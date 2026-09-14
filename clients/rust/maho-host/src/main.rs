@@ -48,6 +48,22 @@ struct Cli {
     /// Output name to capture (Linux). Auto-detects the focused output when omitted.
     #[arg(long, value_name = "NAME")]
     output: Option<String>,
+
+    /// Register and start the LocalSystem service.
+    #[arg(long)]
+    install_service: bool,
+
+    /// Stop and remove the LocalSystem service.
+    #[arg(long)]
+    uninstall_service: bool,
+
+    /// SCM entry point for the LocalSystem service.
+    #[arg(long)]
+    service_run: bool,
+
+    /// Mark this process as a service-spawned session worker.
+    #[arg(long)]
+    session_worker: bool,
 }
 
 pub fn select_pin<F>(
@@ -87,7 +103,49 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    #[cfg(target_os = "windows")]
+    {
+        if cli.install_service {
+            maho_host::service_windows::install(&std::env::current_exe()?)?;
+            println!("Installed service MahoRDHost");
+            return Ok(());
+        }
+        if cli.uninstall_service {
+            maho_host::service_windows::uninstall()?;
+            println!("Removed service MahoRDHost");
+            return Ok(());
+        }
+        if cli.service_run {
+            maho_host::service_windows::log_to_file();
+            maho_host::service_windows::run_service_dispatcher()?;
+            return Ok(());
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if cli.session_worker {
+            maho_host::service_windows::publish_input_desktop();
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if cli.install_service || cli.uninstall_service || cli.service_run {
+            bail!("service mode is only supported on Windows");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    let store = if cli.session_worker {
+        PairingStore::service_default()
+    } else {
+        PairingStore::host_default()?
+    };
+    #[cfg(not(target_os = "windows"))]
     let store = PairingStore::host_default()?;
+
     if cli.list_paired {
         let mut records = store.load_all()?;
         records.sort_by_key(|left| std::cmp::Reverse(left.added_at_unix_ms));
@@ -116,7 +174,7 @@ fn main() -> Result<()> {
 
     onboard_permissions();
 
-    let auto_approve = cli.auto_approve;
+    let auto_approve = cli.auto_approve || cli.session_worker;
     let (consent_tx, consent_rx) = mpsc::channel::<ConsentPrompt>();
     std::thread::Builder::new()
         .name("maho-host-consent".into())
@@ -297,5 +355,20 @@ mod tests {
         let pin = random_pin();
         assert_eq!(pin.len(), 8);
         assert!(pin.bytes().all(|b| b.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_service_cli_flags_parse() {
+        let cli = Cli::parse_from([
+            "maho-host",
+            "--install-service",
+            "--uninstall-service",
+            "--service-run",
+            "--session-worker",
+        ]);
+        assert!(cli.install_service);
+        assert!(cli.uninstall_service);
+        assert!(cli.service_run);
+        assert!(cli.session_worker);
     }
 }
