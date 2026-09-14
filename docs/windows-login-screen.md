@@ -116,19 +116,22 @@ A host configured to elevate without prompting (`PromptOnSecureDesktop=0`) never
 switches to the secure desktop for elevation, so exercise this path there with the
 lock screen or a logon screen instead.
 
-## Known gap: input after a mid-session desktop switch
+## Known gap: a worker respawn drops the connected session
 
-When the console switches between the secure desktop and `Default` while a client is
-already connected, the supervisor respawns the worker. Video survives the switch —
-one session decoded 80+ frames straight through and the agent's `frame_id` advanced
-from 46 to 109 with no reconnect — but **input stops**: the TCP control channel was
-bound to the worker that was just terminated, so `POST /api/v1/input/action` answers
-`{"error":"session is not ready"}`. The user sees the screen and cannot click until
-reconnecting.
+When the console switches desktop, the supervisor terminates the old worker and
+starts a new one. A client that was already connected **freezes completely** — both
+video and input stop. Measured: `frame_id` stuck at 109 while `age_ms` climbed from
+13420 to 27032 ms (a frozen id with rising age means the stream stopped), and
+`POST /api/v1/input/action` answered `{"error":"session is not ready"}`.
 
-Connections established while a secure desktop is already active are unaffected.
-Fixing this means either having the client re-handshake when the control channel
-drops, or handing the listening sockets to the replacement worker.
+A control run without a respawn confirms the session is otherwise healthy
+indefinitely: input returned `{events_sent:1, ok:true}` and `frame_id` advanced from
+72 to 467 at `age_ms=71`. The respawn is the trigger.
+
+Connections established after the switch work normally, which is why a fresh connect
+to an already-active secure desktop streams fine. Fixing this means having the client
+detect worker loss and re-handshake, or handing the listening sockets to the
+replacement worker.
 
 **Not yet verified:** the pre-logon logonUI screen specifically, which requires a
 logoff or reboot on the host.
