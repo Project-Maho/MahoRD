@@ -254,3 +254,22 @@ fn decoder_panic_reaches_media_owner_after_join() {
     assert!(done_rx.recv_timeout(DEADLINE).unwrap());
     worker.join().unwrap();
 }
+
+#[test]
+fn desktop_client_retains_pairing_for_worker_respawn_recovery() {
+    // Given: the Windows host service replaced its session worker, which is what
+    // entering or leaving the logon, lock or UAC secure desktop does. The
+    // desktop client must be able to re-handshake, which requires it to have
+    // kept the pairing id from the original connect.
+    let state = crate::AppState::default();
+    *state.active_pairing_id.lock().unwrap() = Some("pairing-abc".to_string());
+
+    let retained = state.active_pairing_id.lock().unwrap().clone();
+    assert_eq!(retained.as_deref(), Some("pairing-abc"));
+
+    // Then: worker-loss failures are the ones a reconnect can fix.
+    assert!(maho_app::should_reconnect(&maho_app::SessionError::NotReady));
+    assert!(!maho_app::should_reconnect(
+        &maho_app::SessionError::NoAddress
+    ));
+}

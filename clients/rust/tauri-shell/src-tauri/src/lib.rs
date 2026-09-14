@@ -225,6 +225,9 @@ pub fn get_local_ip() -> String {
 pub struct AppState {
     lifecycle: tokio::sync::Mutex<()>,
     pub session: Arc<Mutex<Option<ClientSession>>>,
+    /// Pairing of the live session, kept so input can re-handshake when the
+    /// Windows host service swaps its session worker on a desktop switch.
+    pub active_pairing_id: Arc<Mutex<Option<String>>>,
     pub tcp_runtime: Mutex<Option<SessionRuntime>>,
     pub stop_media_flag: Arc<AtomicBool>,
     pub media_handle: Mutex<Option<thread::JoinHandle<()>>>,
@@ -577,6 +580,7 @@ impl Default for AppState {
         Self {
             lifecycle: tokio::sync::Mutex::new(()),
             session: Arc::new(Mutex::new(None)),
+            active_pairing_id: Arc::new(Mutex::new(None)),
             tcp_runtime: Mutex::new(None),
             stop_media_flag: Arc::new(AtomicBool::new(false)),
             media_handle: Mutex::new(None),
@@ -1477,6 +1481,10 @@ pub mod commands {
 
         start_clipboard_monitor(state, &session);
 
+        if let Ok(mut id) = state.active_pairing_id.lock() {
+            *id = Some(ready_session.pairing.id.clone());
+        }
+
         Ok(ConnectResponse {
             pairing_id: ready_session.pairing.id,
             host_name: ready_session.pairing.name,
@@ -1797,9 +1805,28 @@ pub mod commands {
             }
         };
 
-        session
-            .send_input(input_event)
-            .map_err(|e| format!("Failed to send input: {e}"))
+        match session.send_input(input_event) {
+            Ok(()) => Ok(()),
+            Err(error) if maho_app::should_reconnect(&error) => {
+                // The host service replaces its session worker whenever the
+                // console switches desktop, which tears down this control
+                // channel. Re-handshake with the stored pairing and retry once
+                // so a secure-desktop switch does not freeze the viewer.
+                let pairing_id = state
+                    .active_pairing_id
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .clone()
+                    .ok_or_else(|| format!("Failed to send input: {error}"))?;
+                session
+                    .reconnect(&pairing_id)
+                    .map_err(|retry| format!("Failed to send input: {error}; reconnect: {retry}"))?;
+                session
+                    .send_input(input_event)
+                    .map_err(|retry| format!("Failed to send input after reconnect: {retry}"))
+            }
+            Err(error) => Err(format!("Failed to send input: {error}")),
+        }
     }
 
     #[tauri::command]
