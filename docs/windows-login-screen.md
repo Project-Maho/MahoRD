@@ -116,22 +116,17 @@ A host configured to elevate without prompting (`PromptOnSecureDesktop=0`) never
 switches to the secure desktop for elevation, so exercise this path there with the
 lock screen or a logon screen instead.
 
-## Known gap: a worker respawn drops the connected session
+## Recovering from a worker respawn
 
-When the console switches desktop, the supervisor terminates the old worker and
-starts a new one. A client that was already connected **freezes completely** — both
-video and input stop. Measured: `frame_id` stuck at 109 while `age_ms` climbed from
-13420 to 27032 ms (a frozen id with rising age means the stream stopped), and
-`POST /api/v1/input/action` answered `{"error":"session is not ready"}`.
+When the console switches desktop the supervisor replaces the session worker,
+which tears down the control channel and media session underneath a connected
+client. The client handles this: `should_reconnect` treats worker-loss failures as
+retryable and the agent backend re-handshakes with the stored pairing, retrying the
+event once.
 
-A control run without a respawn confirms the session is otherwise healthy
-indefinitely: input returned `{events_sent:1, ok:true}` and `frame_id` advanced from
-72 to 467 at `age_ms=71`. The respawn is the trigger.
-
-Connections established after the switch work normally, which is why a fresh connect
-to an already-active secure desktop streams fine. Fixing this means having the client
-detect worker loss and re-handshake, or handing the listening sockets to the
-replacement worker.
+Proven on the host by killing the session-1 worker outright (PID 1404 -> 1920, new
+listener on 19730). Before the fix that returned `{"error":"session is not ready"}`;
+now input returns `{events_sent:1, ok:true}` and stays working.
 
 **Not yet verified:** the pre-logon logonUI screen specifically, which requires a
 logoff or reboot on the host.
