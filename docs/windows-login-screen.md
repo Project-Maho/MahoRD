@@ -76,6 +76,17 @@ Disable-ScheduledTask -TaskName erd-host-run
 The service replaces it entirely: it starts before logon, survives logoff, and
 follows the console session on its own.
 
+## Crash recovery
+
+`--install-service` registers an SCM restart policy: three attempts at 1s, 5s and
+15s, with the failure count clearing after a quiet day. Without it the SCM default
+is *take no action*, and a crash leaves the host stopped until someone logs in and
+starts it by hand — the one state this service exists to avoid. Confirm it with:
+
+```powershell
+sc qfailure MahoRDHost   # expect RESET_PERIOD 86400 and three RESTART actions
+```
+
 ## Troubleshooting
 
 An SCM-hosted process has no console, so diagnostics go to
