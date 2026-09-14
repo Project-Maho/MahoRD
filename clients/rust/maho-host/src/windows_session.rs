@@ -135,6 +135,21 @@ const OTHER_FAILURE_ABORT_THRESHOLD: u32 = 30;
 const REACQUIRE_FLOOR_MILLIS: u64 = 33;
 const REACQUIRE_CAP_MILLIS: u64 = 1000;
 
+/// Polling interval while a session worker waits for a capturable output.
+pub const WORKER_OUTPUT_POLL: Duration = Duration::from_millis(500);
+
+/// Whether a worker that cannot yet describe an output should keep waiting.
+///
+/// A worker spawned onto the secure desktop starts before DXGI can enumerate an
+/// output. Exiting there makes the supervisor respawn it in a tight loop, so the
+/// worker waits instead, bounded so a genuinely displayless host still gives up.
+pub fn keep_waiting_for_output(elapsed: Duration) -> bool {
+    elapsed < WORKER_OUTPUT_STARTUP_LIMIT
+}
+
+/// How long a session worker waits for an output before giving up.
+pub const WORKER_OUTPUT_STARTUP_LIMIT: Duration = Duration::from_secs(120);
+
 /// Exponential backoff floored at one frame interval and capped so the loop
 /// stays responsive when the desktop switches back.
 pub fn reacquire_backoff(attempt: u32) -> Duration {
@@ -334,5 +349,34 @@ mod tests {
         for attempt in [31, 32, 63, 64, 10_000, u32::MAX] {
             assert_eq!(reacquire_backoff(attempt), Duration::from_millis(1000));
         }
+    }
+
+    #[test]
+    fn worker_waits_for_a_capturable_output_then_gives_up() {
+        // Given: a worker spawned onto the secure desktop, where DXGI cannot yet
+        // describe an output.
+        for elapsed in [
+            Duration::ZERO,
+            Duration::from_secs(1),
+            Duration::from_secs(119),
+        ] {
+            // Then: it keeps waiting rather than exiting into a respawn loop.
+            assert!(
+                keep_waiting_for_output(elapsed),
+                "gave up after {elapsed:?}"
+            );
+        }
+        for elapsed in [
+            WORKER_OUTPUT_STARTUP_LIMIT,
+            Duration::from_secs(121),
+            Duration::from_secs(10_000),
+        ] {
+            // Then: a genuinely displayless host still terminates.
+            assert!(
+                !keep_waiting_for_output(elapsed),
+                "waited forever at {elapsed:?}"
+            );
+        }
+        assert!(WORKER_OUTPUT_POLL < WORKER_OUTPUT_STARTUP_LIMIT);
     }
 }

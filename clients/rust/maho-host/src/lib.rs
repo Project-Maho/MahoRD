@@ -48,6 +48,33 @@ pub use encode_windows::MediaFoundationEncoder;
 pub use inject_macos::{accessibility_is_trusted, request_accessibility, InputInjector};
 #[cfg(target_os = "windows")]
 pub use inject_windows::WindowsInputInjector;
+
+/// Builds the Windows host configuration for a service-spawned session worker,
+/// waiting for DXGI to describe an output instead of failing.
+///
+/// A worker spawned onto the secure desktop starts before any output can be
+/// enumerated. Returning an error there would exit the process and the service
+/// would respawn it immediately, so this retries until the desktop becomes
+/// capturable or the startup budget runs out.
+#[cfg(target_os = "windows")]
+pub fn windows_default_blocking(
+    bootstrap_pin: Option<String>,
+    pairing_store: session::PairingStore,
+) -> Result<session::HostConfig, session::SessionError> {
+    let started = std::time::Instant::now();
+    loop {
+        match session::HostConfig::windows_default(bootstrap_pin.clone(), pairing_store.clone()) {
+            Ok(config) => return Ok(config),
+            Err(error) => {
+                if !windows_session::keep_waiting_for_output(started.elapsed()) {
+                    return Err(error);
+                }
+                tracing::debug!(%error, "waiting for a capturable output");
+                std::thread::sleep(windows_session::WORKER_OUTPUT_POLL);
+            }
+        }
+    }
+}
 #[cfg(target_os = "linux")]
 pub use session::{focused_output_name, probe_hyprland_monitors, resolve_output_target};
 pub use session::{

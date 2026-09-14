@@ -196,7 +196,14 @@ fn main() -> Result<()> {
         }
         #[cfg(target_os = "windows")]
         {
-            HostConfig::windows_default(Some(pin.clone()), store)?
+            // A worker spawned onto the secure desktop starts before DXGI can
+            // describe an output, so startup waits instead of exiting: exiting
+            // here makes the service respawn it forever.
+            if cli.session_worker {
+                maho_host::windows_default_blocking(Some(pin.clone()), store)?
+            } else {
+                HostConfig::windows_default(Some(pin.clone()), store)?
+            }
         }
         #[cfg(target_os = "linux")]
         {
