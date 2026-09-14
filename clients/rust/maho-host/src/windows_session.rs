@@ -114,6 +114,27 @@ pub enum CaptureRecovery {
     Abort,
 }
 
+/// SCM failure policy for the host service.
+///
+/// The SCM takes no action by default, so a crash leaves the host `STOPPED`
+/// until somebody logs in and starts it by hand — which defeats a service whose
+/// whole point is being reachable before anyone logs in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceFailureActions {
+    /// Delay before each of the first three restart attempts.
+    pub restart_delays_ms: Vec<u32>,
+    /// Quiet period after which the failure count resets, so an old fault does
+    /// not exhaust the restart budget.
+    pub reset_period_secs: u32,
+}
+
+pub fn service_failure_actions() -> ServiceFailureActions {
+    ServiceFailureActions {
+        restart_delays_ms: vec![1_000, 5_000, 15_000],
+        reset_period_secs: 86_400,
+    }
+}
+
 /// Whether a failed acquire should tear the media session down.
 ///
 /// Secure-desktop switches surface as `AccessLost`, `AccessDenied` and
@@ -345,6 +366,28 @@ mod tests {
                 Duration::from_millis(millis),
             );
         }
+    }
+
+    #[test]
+    fn service_recovery_restarts_after_a_crash() {
+        // Given: the SCM's default failure policy takes no action, so a worker
+        // or service crash leaves the host STOPPED until someone logs in and
+        // starts it by hand — which defeats a host meant to be reachable
+        // before anyone logs in.
+        let actions = service_failure_actions();
+
+        // Then: every one of the first three failures restarts the service,
+        // and the counter resets after a quiet period so a fault long ago does
+        // not exhaust the budget.
+        assert_eq!(actions.restart_delays_ms.len(), 3, "{actions:?}");
+        assert!(
+            actions.restart_delays_ms.iter().all(|delay| *delay > 0),
+            "a zero delay hot-loops the SCM: {actions:?}"
+        );
+        assert!(
+            actions.reset_period_secs > 0,
+            "reset period 0 never clears the failure count: {actions:?}"
+        );
     }
 
     #[test]

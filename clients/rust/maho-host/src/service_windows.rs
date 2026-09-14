@@ -190,11 +190,46 @@ pub fn install(exe: &Path) -> io::Result<()> {
             }
             Err(error) => return Err(io_error(error)),
         };
+        apply_failure_actions(service.0);
         match StartServiceW(service.0, None) {
             Ok(()) => Ok(()),
             Err(error) if error.code() == ERROR_SERVICE_ALREADY_RUNNING.to_hresult() => Ok(()),
             Err(error) => Err(io_error(error)),
         }
+    }
+}
+
+/// Registers the SCM restart policy. Without it the default is "take no
+/// action", so a crash leaves the host stopped until someone logs in — the one
+/// state this service exists to avoid. A failure to configure recovery is not
+/// worth refusing the install over, so it is logged and tolerated.
+fn apply_failure_actions(service: SC_HANDLE) {
+    let policy = crate::windows_session::service_failure_actions();
+    let mut actions: Vec<SC_ACTION> = policy
+        .restart_delays_ms
+        .iter()
+        .map(|delay| SC_ACTION {
+            Type: SC_ACTION_RESTART,
+            Delay: *delay,
+        })
+        .collect();
+    let failure = SERVICE_FAILURE_ACTIONSW {
+        dwResetPeriod: policy.reset_period_secs,
+        lpRebootMsg: PWSTR::null(),
+        lpCommand: PWSTR::null(),
+        cActions: actions.len() as u32,
+        lpsaActions: actions.as_mut_ptr(),
+    };
+    // SAFETY: the action slice outlives the call and the handle is open.
+    let configured = unsafe {
+        ChangeServiceConfig2W(
+            service,
+            SERVICE_CONFIG_FAILURE_ACTIONS,
+            Some(std::ptr::addr_of!(failure).cast()),
+        )
+    };
+    if let Err(error) = configured {
+        tracing::warn!(%error, "could not register service restart policy");
     }
 }
 
