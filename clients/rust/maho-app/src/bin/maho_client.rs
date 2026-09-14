@@ -116,6 +116,8 @@ impl Cli {
 #[derive(Clone)]
 struct ClientBackend {
     session: ClientSession,
+    /// Stored pairing used to re-handshake when the host swaps its worker.
+    pairing_id: Option<String>,
     screen_info: ScreenInfo,
     latest_frame: LatestFrameHolder,
     frame_metadata: FrameMetadataHolder,
@@ -124,7 +126,26 @@ struct ClientBackend {
 
 impl AgentServerBackend for ClientBackend {
     fn send_input_event(&self, event: maho_proto::InputEvent) -> std::result::Result<(), String> {
-        self.session.send_input(event).map_err(|e| e.to_string())
+        match self.session.send_input(event) {
+            Ok(()) => Ok(()),
+            Err(error) if maho_app::should_reconnect(&error) => {
+                // The host service replaces its session worker whenever the
+                // console switches desktop, which tears down this client's
+                // control channel. Re-handshake with the stored pairing and
+                // retry once so a secure-desktop switch cannot strand us.
+                let pairing_id = self
+                    .pairing_id
+                    .as_deref()
+                    .ok_or_else(|| error.to_string())?;
+                self.session
+                    .reconnect(pairing_id)
+                    .map_err(|retry| format!("{error}; reconnect failed: {retry}"))?;
+                self.session
+                    .send_input(event)
+                    .map_err(|retry| retry.to_string())
+            }
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     fn get_screen_info(&self) -> ScreenInfo {
@@ -415,10 +436,19 @@ fn run_client(mut cli: Cli) -> Result<()> {
             Ok(Some(record)) => Some(record),
             _ => {
                 if let Ok(records) = store.load_all() {
+                    // Match the saved record by host name or by a previously used
+                    // endpoint. `starts_with` on the record name is deliberately
+                    // gone: "10.0.0.5" must not match a record named "10".
                     records.into_iter().rev().find(|r| {
                         cli.host.eq_ignore_ascii_case(&r.name)
-                            || cli.host.starts_with(&r.name)
-                            || (cli.host == "100.91.254.71" && r.name == "indo")
+                            || r.last_endpoint
+                                .as_ref()
+                                .is_some_and(|endpoint| {
+                                    endpoint.host.eq_ignore_ascii_case(&cli.host)
+                                })
+                            || r.endpoint_aliases
+                                .iter()
+                                .any(|endpoint| endpoint.host.eq_ignore_ascii_case(&cli.host))
                     })
                 } else {
                     None
@@ -563,6 +593,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
     if cli.agent_server.is_some() || cli.mcp {
         let backend = Arc::new(ClientBackend {
             session: session.clone(),
+            pairing_id: cli.pairing_id.clone(),
             screen_info: ScreenInfo {
                 width: ready.server.width as u32,
                 height: ready.server.height as u32,

@@ -1,5 +1,6 @@
 // allow: SIZE_OK — core client session state machine and network driver
 use std::{
+    collections::VecDeque,
     io,
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
     path::PathBuf,
@@ -97,6 +98,25 @@ pub enum SessionEvent {
     InputAck { sequence: u32, success: bool, error_code: u8 },
     Ping,
     Ignored,
+}
+
+/// Whether a session failure is worth re-handshaking for.
+///
+/// The Windows host service replaces its session worker whenever the console
+/// switches desktop (entering or leaving the logon, lock or UAC secure desktop).
+/// That terminates the worker holding this client's control channel and media
+/// session, so a connected client goes silent even though the host is healthy
+/// and already serving a new worker. Those failures are recoverable by
+/// reconnecting with the stored pairing; credential and addressing failures are
+/// not, and retrying them would spin.
+pub fn should_reconnect(error: &SessionError) -> bool {
+    matches!(
+        error,
+        SessionError::NotReady
+            | SessionError::TcpRuntimeStopped
+            | SessionError::TcpRuntimePanicked(_)
+            | SessionError::HandshakeAckTimeout
+    )
 }
 
 #[derive(Debug, Error)]
@@ -1221,9 +1241,15 @@ impl UdpTransport {
 struct EventSlots {
     clipboard: Option<String>,
     ping: bool,
+    /// Stream-configuration responses/rejects/errors, kept in arrival order so
+    /// a caller of `request_stream_config` can correlate them by request id.
+    stream_config: VecDeque<ControlMessage>,
     error: Option<SessionError>,
     closed: bool,
 }
+
+/// Retained stream-configuration results, oldest dropped past this bound.
+const STREAM_CONFIG_SLOTS: usize = 16;
 
 #[derive(Clone, Default)]
 pub struct RuntimeEvents {
@@ -1247,13 +1273,18 @@ impl RuntimeEvents {
         match event {
             Ok(SessionEvent::Clipboard(text)) => slots.clipboard = Some(text),
             Ok(SessionEvent::Ping) => slots.ping = true,
+            Ok(SessionEvent::StreamConfig(message)) => {
+                if slots.stream_config.len() >= STREAM_CONFIG_SLOTS {
+                    slots.stream_config.pop_front();
+                }
+                slots.stream_config.push_back(message);
+            }
             Err(error) => slots.error = Some(error),
             Ok(
                 SessionEvent::Ignored
                 | SessionEvent::Frame(_)
                 | SessionEvent::Audio(_)
                 | SessionEvent::Cursor(_)
-                | SessionEvent::StreamConfig(_)
                 | SessionEvent::InputAck { .. },
             ) => {}
         }
@@ -1267,7 +1298,17 @@ impl RuntimeEvents {
         if std::mem::take(&mut slots.ping) {
             return Some(Ok(SessionEvent::Ping));
         }
+        if let Some(message) = slots.stream_config.pop_front() {
+            return Some(Ok(SessionEvent::StreamConfig(message)));
+        }
         slots.error.take().map(Err)
+    }
+
+    fn pending(slots: &EventSlots) -> bool {
+        slots.clipboard.is_some()
+            || slots.ping
+            || !slots.stream_config.is_empty()
+            || slots.error.is_some()
     }
 
     pub fn try_recv(&self) -> Result<Result<SessionEvent, SessionError>, mpsc::TryRecvError> {
@@ -1293,7 +1334,7 @@ impl RuntimeEvents {
             .map_err(|_| mpsc::RecvTimeoutError::Disconnected)?;
         let (mut slots, _) = ready
             .wait_timeout_while(slots, timeout, |slots| {
-                slots.clipboard.is_none() && !slots.ping && slots.error.is_none() && !slots.closed
+                !Self::pending(slots) && !slots.closed
             })
             .map_err(|_| mpsc::RecvTimeoutError::Disconnected)?;
         Self::take(&mut slots).ok_or(if slots.closed {
@@ -1307,9 +1348,7 @@ impl RuntimeEvents {
         let (lock, ready) = &*self.shared;
         let slots = lock.lock().map_err(|_| mpsc::RecvError)?;
         let mut slots = ready
-            .wait_while(slots, |slots| {
-                slots.clipboard.is_none() && !slots.ping && slots.error.is_none() && !slots.closed
-            })
+            .wait_while(slots, |slots| !Self::pending(slots) && !slots.closed)
             .map_err(|_| mpsc::RecvError)?;
         Self::take(&mut slots).ok_or(mpsc::RecvError)
     }
@@ -1423,6 +1462,39 @@ mod cancellation_tests {
             runtime.events().try_recv(),
             Err(mpsc::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn runtime_events_retain_stream_configuration_results() {
+        let events = RuntimeEvents::default();
+        let response = ControlMessage::StreamConfigResponse(
+            maho_proto::StreamConfigurationResponse {
+                request_id: 7,
+                active: maho_proto::StreamConfiguration {
+                    width: 1920,
+                    height: 1080,
+                    bitrate: 8_000_000,
+                    frames_per_second: 60,
+                },
+            },
+        );
+        let reject = ControlMessage::StreamConfigReject(maho_proto::StreamConfigurationReject {
+            request_id: 8,
+            reason: maho_proto::StreamConfigurationErrorCode::UnsupportedDimensions,
+            message: "nope".to_owned(),
+        });
+        events.push(Ok(SessionEvent::StreamConfig(response.clone())));
+        events.push(Ok(SessionEvent::StreamConfig(reject.clone())));
+
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
+            SessionEvent::StreamConfig(response)
+        );
+        assert_eq!(
+            events.try_recv().unwrap().unwrap(),
+            SessionEvent::StreamConfig(reject)
+        );
+        assert!(matches!(events.try_recv(), Err(mpsc::TryRecvError::Empty)));
     }
 
     #[test]
@@ -1730,5 +1802,35 @@ mod cancellation_tests {
         }
 
         assert_eq!(session.last_input_ack(), Some((101, true, 0)));
+    }
+
+    #[test]
+    fn worker_loss_is_retryable_but_real_failures_are_not() {
+        // Given: the host service replaced its session worker, tearing down the
+        // TCP control channel and the UDP media session under a connected
+        // client. That is the Windows secure-desktop switch, and re-handshaking
+        // with the stored pairing recovers it.
+        for error in [
+            SessionError::NotReady,
+            SessionError::TcpRuntimeStopped,
+            SessionError::TcpRuntimePanicked("worker exited".into()),
+            SessionError::HandshakeAckTimeout,
+        ] {
+            assert!(
+                should_reconnect(&error),
+                "expected a reconnect for {error:?}"
+            );
+        }
+
+        // Given: failures reconnecting cannot fix.
+        for error in [
+            SessionError::PairingNotFound("missing".into()),
+            SessionError::NoAddress,
+        ] {
+            assert!(
+                !should_reconnect(&error),
+                "expected no reconnect for {error:?}"
+            );
+        }
     }
 }
