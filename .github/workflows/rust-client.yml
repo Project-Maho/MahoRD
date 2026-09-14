@@ -11,6 +11,37 @@ on:
       - ".github/workflows/rust-client.yml"
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
+            libclang-dev libswscale-dev libudev-dev libva-dev libwayland-dev \
+            libx264-dev pkg-config
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/rust/tauri-shell
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test src
+      - run: bunx tsc -b --noEmit
+
   macos:
     runs-on: macos-latest
     defaults:
