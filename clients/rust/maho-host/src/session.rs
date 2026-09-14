@@ -49,6 +49,8 @@ use crate::inject_linux::LinuxInputInjector;
 use crate::inject_macos::InputInjector;
 #[cfg(target_os = "windows")]
 use crate::inject_windows::WindowsInputInjector;
+#[cfg(target_os = "windows")]
+use crate::windows_logic::TargetDisplay;
 
 pub const DEFAULT_TCP_PORT: u16 = 19_730;
 pub const DEFAULT_UDP_PORT: u16 = 19_731;
@@ -82,6 +84,18 @@ pub use maho_proto::{TimestampStats, TIMESTAMP_STATS_MAGIC};
 const SWIFT_REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
 #[path = "host_trace.rs"]
 pub(crate) mod host_trace;
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn capture_failure_from_label(label: &str) -> crate::windows_session::CaptureFailure {
+    use crate::windows_session::CaptureFailure;
+
+    match label {
+        "access_lost" => CaptureFailure::AccessLost,
+        "access_denied" => CaptureFailure::AccessDenied,
+        "refresh_failure" => CaptureFailure::RefreshFailure,
+        _ => CaptureFailure::Other,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingRecord {
@@ -123,6 +137,17 @@ impl PairingStore {
 
     pub fn host_default() -> Result<Self, SessionError> {
         Ok(Self::new(Self::default_path()?))
+    }
+
+    pub fn service_default_path(program_data: &str) -> PathBuf {
+        crate::windows_session::service_store_path(program_data)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn service_default() -> Self {
+        let program_data =
+            std::env::var("PROGRAMDATA").unwrap_or_else(|_| r"C:\ProgramData".into());
+        Self::new(Self::service_default_path(&program_data))
     }
 
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -306,6 +331,15 @@ impl HostConfig {
         bootstrap_pin: Option<String>,
         pairing_store: PairingStore,
     ) -> Result<Self, SessionError> {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::UI::HiDpi::{
+                SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            };
+            unsafe {
+                let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            }
+        }
         let meta = crate::capture_windows::WindowsCapture::primary_output_metadata()
             .map_err(|error| SessionError::Io(io::Error::other(error.to_string())))?;
         Ok(Self {
@@ -319,6 +353,8 @@ impl HostConfig {
                 .to_string_lossy()
                 .into_owned(),
             display: DisplayInfo {
+                desktop_x: meta.desktop_x,
+                desktop_y: meta.desktop_y,
                 logical_width: meta.logical_width,
                 logical_height: meta.logical_height,
                 pixel_width: meta.pixel_width,
@@ -347,6 +383,8 @@ impl HostConfig {
             .map_err(|error| SessionError::Io(io::Error::other(error.to_string())))?;
         let output = capture.output_info();
         let display = DisplayInfo {
+            desktop_x: 0,
+            desktop_y: 0,
             logical_width: output.pixel_width,
             logical_height: output.pixel_height,
             pixel_width: output.pixel_width,
@@ -469,6 +507,8 @@ pub struct VideoFrame {
 /// Platform-neutral display geometry shared by every media backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayInfo {
+    pub desktop_x: i32,
+    pub desktop_y: i32,
     pub logical_width: u32,
     pub logical_height: u32,
     pub pixel_width: u32,
@@ -1069,6 +1109,11 @@ struct WindowsMediaSource {
     bitrate: u32,
     codec: VideoCodec,
     capture_audio: bool,
+    /// Captured display origin in virtual-desktop physical pixels. `GetCursorInfo`
+    /// reports virtual-desktop coordinates, so this offset must be subtracted
+    /// before normalizing against the captured display.
+    desktop_x: i32,
+    desktop_y: i32,
 }
 
 #[cfg(target_os = "windows")]
@@ -1225,6 +1270,10 @@ impl MediaSource for WindowsMediaSource {
             let first_keyframe_emitted = Arc::clone(&first_keyframe_emitted);
             let display_index = self.display_index;
             let fps = self.fps.max(1);
+            let origin_x = self.desktop_x;
+            let origin_y = self.desktop_y;
+            let mon_w = self.width;
+            let mon_h = self.height;
             workers.spawn("maho-win-capture", true, move |handoff| {
                 // SetThreadExecutionState is per-thread. Reset it on this same
                 // owning thread on every exit, including initialization failure.
@@ -1249,6 +1298,7 @@ impl MediaSource for WindowsMediaSource {
                 // Repeats retain the real original capture instant.
                 let mut last_frame: Option<WindowsRawFrame> = None;
                 let mut capture_id = 0_u64;
+                let mut consecutive_failures = 0_u32;
                 let mut last_emit = Instant::now();
                 let mut jiggle_flip = false;
                 let mut last_jiggle = Instant::now() - Duration::from_millis(700);
@@ -1275,6 +1325,39 @@ impl MediaSource for WindowsMediaSource {
                         });
                     }
                 };
+                let query_cursor = || -> (f32, f32, u8) {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        GetCursorInfo, CURSORINFO, CURSOR_SHOWING,
+                    };
+                    let mut ci = CURSORINFO {
+                        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                        flags: windows::Win32::UI::WindowsAndMessaging::CURSORINFO_FLAGS(0),
+                        hCursor: Default::default(),
+                        ptScreenPos: Default::default(),
+                    };
+                    let is_showing = unsafe {
+                        GetCursorInfo(&mut ci).is_ok()
+                            && (ci.flags.0 & CURSOR_SHOWING.0) == CURSOR_SHOWING.0
+                    };
+                    if !is_showing {
+                        return (-1.0, -1.0, 0);
+                    }
+                    let px = ci.ptScreenPos.x - origin_x;
+                    let py = ci.ptScreenPos.y - origin_y;
+                    if px >= 0
+                        && px < mon_w as i32
+                        && py >= 0
+                        && py < mon_h as i32
+                        && mon_w > 0
+                        && mon_h > 0
+                    {
+                        let cx = (px as f32) / (mon_w as f32);
+                        let cy = (py as f32) / (mon_h as f32);
+                        (cx.clamp(0.0, 1.0), cy.clamp(0.0, 1.0), 1)
+                    } else {
+                        (-1.0, -1.0, 0)
+                    }
+                };
                 while !handoff.is_stopped() {
                     let started = Instant::now();
                     if let Some(trace) = host_trace::enabled() {
@@ -1286,6 +1369,7 @@ impl MediaSource for WindowsMediaSource {
                     }
                     match capture.acquire_next_frame(Duration::from_millis(33)) {
                         Ok(frame) => {
+                            consecutive_failures = 0;
                             if let Some(trace) = host_trace::enabled() {
                                 trace.record(host_trace::Record {
                                     event: 10,
@@ -1294,34 +1378,31 @@ impl MediaSource for WindowsMediaSource {
                                     ..Default::default()
                                 });
                             }
-                            if frame.pointer_visible {
-                                let (px, py) = if let Some(pos) = frame.pointer_position {
-                                    pos
-                                } else {
-                                    let mut pt = cursor_jiggle::Point::default();
-                                    unsafe { cursor_jiggle::GetCursorPos(&mut pt) };
-                                    (pt.x, pt.y)
-                                };
-                                if frame.width > 0 && frame.height > 0 {
-                                    let cx = (px as f32) / (frame.width as f32);
-                                    let cy = (py as f32) / (frame.height as f32);
-                                    send_cursor(
-                                        &sender,
-                                        MediaEvent::Cursor(CursorUpdate {
-                                            x: cx.clamp(0.0, 1.0),
-                                            y: cy.clamp(0.0, 1.0),
-                                            cursor_type: 1,
-                                        }),
-                                        capture_id + 1,
-                                    );
-                                }
-                            } else {
+                            if frame.pointer_visible
+                                && frame.pointer_position.is_some()
+                                && frame.width > 0
+                                && frame.height > 0
+                            {
+                                let (px, py) = frame.pointer_position.unwrap();
+                                let cx = (px as f32) / (frame.width as f32);
+                                let cy = (py as f32) / (frame.height as f32);
                                 send_cursor(
                                     &sender,
                                     MediaEvent::Cursor(CursorUpdate {
-                                        x: -1.0,
-                                        y: -1.0,
-                                        cursor_type: 0,
+                                        x: cx.clamp(0.0, 1.0),
+                                        y: cy.clamp(0.0, 1.0),
+                                        cursor_type: 1,
+                                    }),
+                                    capture_id + 1,
+                                );
+                            } else {
+                                let (cx, cy, ctype) = query_cursor();
+                                send_cursor(
+                                    &sender,
+                                    MediaEvent::Cursor(CursorUpdate {
+                                        x: cx,
+                                        y: cy,
+                                        cursor_type: ctype,
                                     }),
                                     capture_id + 1,
                                 );
@@ -1374,23 +1455,16 @@ impl MediaSource for WindowsMediaSource {
                             }
                         }
                         Err(CaptureError::Timeout) => {
-                            let mut pt = cursor_jiggle::Point::default();
-                            if unsafe { cursor_jiggle::GetCursorPos(&mut pt) } != 0 {
-                                let (w, h) = capture.geometry();
-                                if w > 0 && h > 0 {
-                                    let cx = (pt.x as f32) / (w as f32);
-                                    let cy = (pt.y as f32) / (h as f32);
-                                    send_cursor(
-                                        &sender,
-                                        MediaEvent::Cursor(CursorUpdate {
-                                            x: cx.clamp(0.0, 1.0),
-                                            y: cy.clamp(0.0, 1.0),
-                                            cursor_type: 1,
-                                        }),
-                                        capture_id,
-                                    );
-                                }
-                            }
+                            let (cx, cy, ctype) = query_cursor();
+                            send_cursor(
+                                &sender,
+                                MediaEvent::Cursor(CursorUpdate {
+                                    x: cx,
+                                    y: cy,
+                                    cursor_type: ctype,
+                                }),
+                                capture_id,
+                            );
                             if (!first_keyframe_emitted.load(Ordering::Relaxed)
                                 || last_frame.is_none())
                                 && last_jiggle.elapsed() >= Duration::from_millis(300)
@@ -1422,24 +1496,50 @@ impl MediaSource for WindowsMediaSource {
                                 }
                             }
                         }
-                        Err(CaptureError::AccessLost) => {
-                            capture =
-                                match WindowsCapture::new(display_index, Duration::from_millis(33))
-                                {
-                                    Ok(capture) => capture,
-                                    Err(error) => {
+                        Err(error) => {
+                            use crate::windows_session::{capture_recovery, CaptureRecovery};
+
+                            let failure = capture_failure_from_label(match &error {
+                                CaptureError::AccessLost => "access_lost",
+                                CaptureError::AccessDenied => "access_denied",
+                                CaptureError::RefreshFailure => "refresh_failure",
+                                _ => "capture",
+                            });
+                            warn!(%error, consecutive_failures, "DXGI capture interrupted");
+                            while !handoff.is_stopped() {
+                                match capture_recovery(failure, consecutive_failures) {
+                                    CaptureRecovery::Reacquire(delay) => {
+                                        thread::sleep(delay);
+                                        if handoff.is_stopped() {
+                                            break;
+                                        }
+                                        let rebuilt = WindowsCapture::new(
+                                            display_index,
+                                            Duration::from_millis(33),
+                                        );
+                                        consecutive_failures =
+                                            consecutive_failures.saturating_add(1);
+                                        match rebuilt {
+                                            Ok(rebuilt) => {
+                                                capture = rebuilt;
+                                                break;
+                                            }
+                                            Err(error) => {
+                                                warn!(%error, consecutive_failures, "DXGI reacquire failed");
+                                            }
+                                        }
+                                    }
+                                    CaptureRecovery::Abort => {
                                         native_media_error(
                                             &handoff,
                                             &sender,
-                                            format!("dxgi reacquire: {error}"),
+                                            format!("dxgi: {error}"),
                                         );
                                         return;
                                     }
-                                };
-                        }
-                        Err(error) => {
-                            native_media_error(&handoff, &sender, format!("dxgi: {error}"));
-                            return;
+                                }
+                            }
+                            continue;
                         }
                     }
                     handoff.pace_until(started + interval);
@@ -1931,6 +2031,8 @@ impl HostServer {
             bitrate: config.bitrate,
             codec: VideoCodec::H264,
             capture_audio: config.capture_audio,
+            desktop_x: config.display.desktop_x,
+            desktop_y: config.display.desktop_y,
         }))
     }
 
@@ -2190,7 +2292,15 @@ impl HostServer {
             self.config.display.logical_height as f32,
         );
         #[cfg(target_os = "windows")]
-        let mut input = WindowsInputInjector::new(None).map_err(SessionError::Io)?;
+        let mut input = {
+            let target = TargetDisplay {
+                x: self.config.display.desktop_x,
+                y: self.config.display.desktop_y,
+                width: self.config.display.pixel_width,
+                height: self.config.display.pixel_height,
+            };
+            WindowsInputInjector::new(Some(target)).map_err(SessionError::Io)?
+        };
         #[cfg(all(target_os = "linux", not(test)))]
         let mut input =
             LinuxInputInjector::new(crate::inject_linux::OutputGeometry::single_output(
@@ -3119,6 +3229,58 @@ mod tests {
         include!("sender_packetization_tests.rs");
     }
 
+    fn peek_datagram(socket: &UdpSocket, buffer: &mut [u8]) -> (usize, SocketAddr) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match socket.peek_from(buffer) {
+                Ok(result) => return result,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "datagram did not arrive within 2s");
+                    thread::yield_now();
+                }
+                Err(error) => panic!("peek_from failed: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn capture_failure_labels_preserve_secure_desktop_recovery() {
+        use crate::windows_session::{capture_recovery, CaptureFailure, CaptureRecovery};
+
+        for (label, expected) in [
+            ("access_lost", CaptureFailure::AccessLost),
+            ("access_denied", CaptureFailure::AccessDenied),
+            ("refresh_failure", CaptureFailure::RefreshFailure),
+            ("capture", CaptureFailure::Other),
+            ("", CaptureFailure::Other),
+            ("ACCESS_DENIED", CaptureFailure::Other),
+        ] {
+            assert_eq!(capture_failure_from_label(label), expected);
+        }
+        for consecutive in [0, 10_000, u32::MAX] {
+            assert!(matches!(
+                capture_recovery(capture_failure_from_label("access_denied"), consecutive),
+                CaptureRecovery::Reacquire(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn service_pairing_store_uses_machine_wide_path() {
+        let program_data = "C:/ProgramData";
+        let path = PairingStore::service_default_path(program_data);
+        assert_eq!(
+            path,
+            crate::windows_session::service_store_path(program_data)
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(program_data)
+                .join("MahoRD")
+                .join("host-authorizations.json")
+        );
+    }
+
     #[test]
     fn bind_synthetic_does_not_start_mdns_advertisement() {
         let directory = tempdir().unwrap();
@@ -3888,6 +4050,8 @@ mod tests {
             pairing_store: store,
             host_name: "test-host".into(),
             display: DisplayInfo {
+                desktop_x: 0,
+                desktop_y: 0,
                 logical_width: 640,
                 logical_height: 360,
                 pixel_width: 640,
@@ -4847,7 +5011,7 @@ mod tests {
 
         // Stage 1a: Plaintext 0xff probe from attacker must be consumed but NOT set udp_peer
         attacker_udp.send_to(&[0xff], host_udp_addr).unwrap();
-        let (peek_len, peek_from) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        let (peek_len, peek_from) = peek_datagram(&server.udp_socket, &mut peek_buf);
         assert_eq!(peek_len, 1);
         assert_eq!(peek_from, attacker_addr);
         server
@@ -4862,7 +5026,7 @@ mod tests {
         // Stage 1b: Short malformed packet (< 40 bytes)
         let malformed = [0x45, 0x52, 0x07, 0x00, 0x01, 0x02];
         attacker_udp.send_to(&malformed, host_udp_addr).unwrap();
-        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        let (peek_len, _) = peek_datagram(&server.udp_socket, &mut peek_buf);
         assert_eq!(peek_len, malformed.len());
         server
             .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
@@ -4880,7 +5044,7 @@ mod tests {
         let ping_hdr = PacketHeader::new(PacketType::Ping, 0, 1000, 0);
         let wrong_packet = wrong_cipher.seal_datagram(&ping_hdr, &[]).unwrap();
         attacker_udp.send_to(&wrong_packet, host_udp_addr).unwrap();
-        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        let (peek_len, _) = peek_datagram(&server.udp_socket, &mut peek_buf);
         assert_eq!(peek_len, wrong_packet.len());
         server
             .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
@@ -4898,7 +5062,7 @@ mod tests {
         let input_hdr = PacketHeader::new(PacketType::InputEvent, 1, 1000, 0);
         let non_reg_packet = client_c2h.seal_datagram(&input_hdr, &[]).unwrap();
         client_udp.send_to(&non_reg_packet, host_udp_addr).unwrap();
-        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        let (peek_len, _) = peek_datagram(&server.udp_socket, &mut peek_buf);
         assert_eq!(peek_len, non_reg_packet.len());
         server
             .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
@@ -4918,7 +5082,7 @@ mod tests {
             .seal_datagram(&ping_payload_hdr, &[1, 2, 3])
             .unwrap();
         client_udp.send_to(&payload_packet, host_udp_addr).unwrap();
-        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        let (peek_len, _) = peek_datagram(&server.udp_socket, &mut peek_buf);
         assert_eq!(peek_len, payload_packet.len());
         server
             .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
@@ -4936,7 +5100,7 @@ mod tests {
         let prior_hdr = PacketHeader::new(PacketType::Ping, 0, 1000, 0);
         let prior_packet = prior_client_c2h.seal_datagram(&prior_hdr, &[]).unwrap();
         client_udp.send_to(&prior_packet, host_udp_addr).unwrap();
-        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        let (peek_len, _) = peek_datagram(&server.udp_socket, &mut peek_buf);
         assert_eq!(peek_len, prior_packet.len());
         server
             .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
@@ -4954,7 +5118,7 @@ mod tests {
         let reg_hdr = PacketHeader::new(PacketType::Ping, 3, 1000, 0);
         let reg_packet = client_c2h.seal_datagram(&reg_hdr, &[]).unwrap();
         client_udp.send_to(&reg_packet, host_udp_addr).unwrap();
-        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        let (peek_len, _) = peek_datagram(&server.udp_socket, &mut peek_buf);
         assert_eq!(peek_len, reg_packet.len());
         server
             .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
@@ -4991,7 +5155,7 @@ mod tests {
         let hijack_hdr = PacketHeader::new(PacketType::Ping, 4, 1000, 0);
         let hijack_packet = client_c2h.seal_datagram(&hijack_hdr, &[]).unwrap();
         attacker_udp.send_to(&hijack_packet, host_udp_addr).unwrap();
-        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        let (peek_len, _) = peek_datagram(&server.udp_socket, &mut peek_buf);
         assert_eq!(peek_len, hijack_packet.len());
         server
             .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
@@ -5055,7 +5219,7 @@ mod tests {
 
         // Prove packet arrived in host socket queue
         let mut peek_buf = [0_u8; 2048];
-        let (peek_len, peek_from) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        let (peek_len, peek_from) = peek_datagram(&server.udp_socket, &mut peek_buf);
         assert_eq!(peek_len, prior_packet.len());
         assert_eq!(peek_from, client_addr);
 
