@@ -421,9 +421,23 @@ fn normalize_hevc_packet(
     let nalus = split_nalus(packet)?;
     for nalu in &nalus {
         let kind = hevc_nalu_type(nalu).ok_or(EncodeError::MalformedHevc)?;
-        if matches!(kind, 32..=34) && !parameter_sets.iter().any(|known| known.as_slice() == *nalu)
+        if !matches!(kind, 32..=34) {
+            continue;
+        }
+        // Replace the cached set of this type instead of appending. A re-issued
+        // VPS/SPS/PPS supersedes the previous one; keeping both would grow the
+        // cache for the session's lifetime and prepend conflicting parameter
+        // sets with identical ids into every keyframe access unit.
+        match parameter_sets
+            .iter_mut()
+            .find(|known| hevc_nalu_type(known) == Some(kind))
         {
-            parameter_sets.push(nalu.to_vec());
+            Some(stored) => {
+                if stored.as_slice() != *nalu {
+                    *stored = nalu.to_vec();
+                }
+            }
+            None => parameter_sets.push(nalu.to_vec()),
         }
     }
 
@@ -705,6 +719,43 @@ mod tests {
         let mut parameters = Vec::new();
         let encoded = normalize_hevc_packet(&annex_b, true, &mut parameters).unwrap();
         assert_eq!(split_avcc(&encoded).unwrap(), vec![vps, sps, pps, idr]);
+    }
+
+    #[test]
+    fn reissued_parameter_sets_replace_the_cached_set() {
+        // Given a keyframe that established VPS/SPS/PPS.
+        let vps = nalu(32, 1);
+        let sps = nalu(33, 2);
+        let pps = nalu(34, 3);
+        let idr = nalu(19, 4);
+        let mut annex_b = Vec::new();
+        for unit in [&vps, &sps, &pps, &idr] {
+            annex_b.extend_from_slice(&[0, 0, 0, 1]);
+            annex_b.extend_from_slice(unit);
+        }
+        let mut parameters = Vec::new();
+        normalize_hevc_packet(&annex_b, true, &mut parameters).unwrap();
+
+        // When the encoder re-issues an updated SPS and PPS on a later keyframe.
+        let new_sps = nalu(33, 7);
+        let new_pps = nalu(34, 8);
+        let mut updated = Vec::new();
+        for unit in [&new_sps, &new_pps, &idr] {
+            updated.extend_from_slice(&[0, 0, 0, 1]);
+            updated.extend_from_slice(unit);
+        }
+        let encoded = normalize_hevc_packet(&updated, true, &mut parameters).unwrap();
+
+        // Then the cache holds one set per type and the keyframe carries no
+        // stale, conflicting parameter sets.
+        assert_eq!(
+            parameters,
+            vec![vps.clone(), new_sps.clone(), new_pps.clone()]
+        );
+        assert_eq!(
+            split_avcc(&encoded).unwrap(),
+            vec![vps, new_sps, new_pps, idr]
+        );
     }
 
     #[test]

@@ -279,20 +279,7 @@ impl MediaFoundationEncoder {
         // by using the ICodecAPI interface."
         let codec_api = transform.cast::<ICodecAPI>().ok();
         if let Some(api) = &codec_api {
-            set_codec_bool(api, &CODECAPI_AVEncCommonLowLatency, true);
-            set_codec_u32(
-                api,
-                &CODECAPI_AVEncCommonRateControlMode,
-                eAVEncCommonRateControlMode_CBR.0 as u32,
-            );
-            set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, config.bitrate);
-            set_codec_u32(api, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
-            set_codec_u32(
-                api,
-                &CODECAPI_AVEncMPVGOPSize,
-                config.keyframe_interval.max(1),
-            );
-            set_codec_u32(api, &CODECAPI_AVEncNumWorkerThreads, 1);
+            apply_codec_properties(api, config);
         }
 
         if let Ok(attributes) = unsafe { transform.GetAttributes() } {
@@ -544,6 +531,12 @@ impl MediaFoundationEncoder {
                     });
                 }
                 let new_type = unsafe { self.transform.GetOutputAvailableType(0, 0)? };
+                // Media Foundation requires ICodecAPI properties to be applied
+                // before the media type is set; afterwards it silently drops
+                // them and the encoder reverts to buffered, B-frame defaults.
+                if let Some(api) = &self.codec_api {
+                    apply_codec_properties(api, self.config);
+                }
                 unsafe { self.transform.SetOutputType(0, &new_type, 0)? };
                 self.output_type = new_type;
                 self.parameter_sets = media_type_parameter_sets(&self.output_type, self.codec);
@@ -738,24 +731,32 @@ fn enumerate_transform(
     }
 
     let mut selected = None;
-    unsafe {
+    // Take ownership of every entry and release the CoTaskMemAlloc'd array
+    // before doing anything fallible: an early return past `CoTaskMemFree`
+    // leaks the array and keeps the remaining activation objects (and their
+    // transform DLLs) referenced for the life of the process.
+    let activation_objects: Vec<IMFActivate> = unsafe {
         let entries = slice::from_raw_parts_mut(activations, count as usize);
-        for entry in entries {
-            let Some(activation) = entry.take() else {
-                continue;
-            };
-            if selected.is_none() {
-                let clsid_id = activation
-                    .GetGUID(&MFT_TRANSFORM_CLSID_Attribute)
-                    .map(|guid| {
-                        let bytes = guid.to_u128().to_le_bytes();
-                        u64::from_le_bytes(bytes[0..8].try_into().unwrap())
-                    })
-                    .unwrap_or(0);
-                selected = Some((activation.ActivateObject::<IMFTransform>()?, clsid_id));
-            }
-        }
+        let owned = entries
+            .iter_mut()
+            .filter_map(|entry| entry.take())
+            .collect();
         CoTaskMemFree(Some(activations.cast()));
+        owned
+    };
+    for activation in activation_objects {
+        if selected.is_none() {
+            let clsid_id = unsafe { activation.GetGUID(&MFT_TRANSFORM_CLSID_Attribute) }
+                .map(|guid| {
+                    let bytes = guid.to_u128().to_le_bytes();
+                    u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+                })
+                .unwrap_or(0);
+            selected = Some((
+                unsafe { activation.ActivateObject::<IMFTransform>() }?,
+                clsid_id,
+            ));
+        }
     }
     Ok(selected)
 }
@@ -778,6 +779,23 @@ fn video_type(subtype: GUID, config: EncoderConfig) -> Result<IMFMediaType, Enco
         }
     }
     Ok(media_type)
+}
+
+fn apply_codec_properties(api: &ICodecAPI, config: EncoderConfig) {
+    set_codec_bool(api, &CODECAPI_AVEncCommonLowLatency, true);
+    set_codec_u32(
+        api,
+        &CODECAPI_AVEncCommonRateControlMode,
+        eAVEncCommonRateControlMode_CBR.0 as u32,
+    );
+    set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, config.bitrate);
+    set_codec_u32(api, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+    set_codec_u32(
+        api,
+        &CODECAPI_AVEncMPVGOPSize,
+        config.keyframe_interval.max(1),
+    );
+    set_codec_u32(api, &CODECAPI_AVEncNumWorkerThreads, 1);
 }
 
 fn set_codec_u32(api: &ICodecAPI, key: &GUID, value: u32) {

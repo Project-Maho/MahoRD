@@ -9,17 +9,18 @@
 //! behavior across keyboard layouts, mixed-DPI virtual desktops, UAC elevation,
 //! and games that reject synthetic input.
 
-use std::{io, mem::size_of};
+use std::{collections::HashSet, io, mem::size_of};
 
 use maho_proto::{InputEvent, InputEventType, Modifiers};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
-        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-        MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-        MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_LCONTROL, VK_LMENU,
-        VK_LSHIFT, VK_LWIN,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
+        MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+        MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+        VK_CAPITAL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT,
+        VK_RWIN,
     },
     WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -38,6 +39,10 @@ pub struct WindowsInputInjector {
     target: TargetDisplay,
     desktop: VirtualDesktop,
     modifiers: Modifiers,
+    // Ordinary keys and mouse buttons the peer is currently holding, so a
+    // dropped session can release them instead of leaving them stuck.
+    active_keys: HashSet<u16>,
+    active_buttons: HashSet<u8>,
 }
 
 impl WindowsInputInjector {
@@ -54,6 +59,8 @@ impl WindowsInputInjector {
             target,
             desktop,
             modifiers: Modifiers::empty(),
+            active_keys: HashSet::new(),
+            active_buttons: HashSet::new(),
         })
     }
 
@@ -103,6 +110,27 @@ impl WindowsInputInjector {
                     InputEventType::MiddleMouseUp => MOUSEEVENTF_MIDDLEUP,
                     _ => MOUSE_EVENT_FLAGS(0),
                 };
+                match event.event_type {
+                    InputEventType::LeftMouseDown | InputEventType::PenDown => {
+                        self.active_buttons.insert(0);
+                    }
+                    InputEventType::LeftMouseUp | InputEventType::PenUp => {
+                        self.active_buttons.remove(&0);
+                    }
+                    InputEventType::RightMouseDown => {
+                        self.active_buttons.insert(1);
+                    }
+                    InputEventType::RightMouseUp => {
+                        self.active_buttons.remove(&1);
+                    }
+                    InputEventType::MiddleMouseDown => {
+                        self.active_buttons.insert(2);
+                    }
+                    InputEventType::MiddleMouseUp => {
+                        self.active_buttons.remove(&2);
+                    }
+                    _ => {}
+                }
                 send_inputs(&[mouse_input(x, y, 0, flags)])
             }
             InputEventType::GamepadAxis
@@ -121,9 +149,12 @@ impl WindowsInputInjector {
                     0,
                     MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTUP | MOUSEEVENTF_MIDDLEUP,
                 ));
-                for vk in [VK_LSHIFT, VK_LCONTROL, VK_LMENU, VK_LWIN] {
-                    inputs.push(key_input(vk.0, true));
+                let mut released: HashSet<u16> = self.active_keys.drain().collect();
+                released.extend([VK_LSHIFT, VK_LCONTROL, VK_LMENU, VK_LWIN].map(|vk| vk.0));
+                for vk in released {
+                    inputs.push(key_input(vk, true));
                 }
+                self.active_buttons.clear();
                 self.modifiers = Modifiers::empty();
                 send_inputs(&inputs)
             }
@@ -143,13 +174,29 @@ impl WindowsInputInjector {
                 let is_up = event.event_type == InputEventType::KeyUp;
                 let mut inputs = Vec::with_capacity(6);
                 if let Some(vk) = macos_keycode_to_vk(event.key_code) {
+                    // Right-side modifiers and CapsLock are modifier keys too:
+                    // treating them as ordinary keys re-synthesizes the modifier
+                    // state around them, duplicating presses and breaking AltGr.
                     let is_mod_key = matches!(
                         VIRTUAL_KEY(vk),
-                        VK_LSHIFT | VK_LCONTROL | VK_LMENU | VK_LWIN
+                        VK_LSHIFT
+                            | VK_LCONTROL
+                            | VK_LMENU
+                            | VK_LWIN
+                            | VK_RSHIFT
+                            | VK_RCONTROL
+                            | VK_RMENU
+                            | VK_RWIN
+                            | VK_CAPITAL
                     );
                     if !is_mod_key {
                         inputs.extend(modifier_inputs(self.modifiers, event.modifiers));
                         self.modifiers = event.modifiers;
+                    }
+                    if is_up {
+                        self.active_keys.remove(&vk);
+                    } else {
+                        self.active_keys.insert(vk);
                     }
                     inputs.push(key_input(vk, is_up));
                 }
@@ -174,7 +221,23 @@ impl WindowsInputInjector {
 
 impl Drop for WindowsInputInjector {
     fn drop(&mut self) {
-        let inputs = modifier_inputs(self.modifiers, Modifiers::empty());
+        // A session can end without a peer Reset, so release everything the
+        // remote user was holding: modifiers, ordinary keys, and buttons.
+        let mut inputs = modifier_inputs(self.modifiers, Modifiers::empty());
+        for vk in self.active_keys.drain() {
+            inputs.push(key_input(vk, true));
+        }
+        let mut button_flags = MOUSE_EVENT_FLAGS(0);
+        for button in self.active_buttons.drain() {
+            button_flags |= match button {
+                0 => MOUSEEVENTF_LEFTUP,
+                1 => MOUSEEVENTF_RIGHTUP,
+                _ => MOUSEEVENTF_MIDDLEUP,
+            };
+        }
+        if button_flags != MOUSE_EVENT_FLAGS(0) {
+            inputs.push(mouse_input(0, 0, 0, button_flags));
+        }
         let _ = send_inputs(&inputs);
     }
 }

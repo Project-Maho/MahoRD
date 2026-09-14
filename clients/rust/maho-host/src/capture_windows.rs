@@ -90,6 +90,10 @@ pub enum CaptureError {
 pub struct WindowsCapture {
     manager: DXGIManager,
     display_index: usize,
+    /// Physical pixel dimensions of the duplicated output, when they could be
+    /// resolved. Frames are validated against these so a DPI-virtualized
+    /// (logical) capture is rejected here instead of truncating the encoder.
+    physical: Option<(u32, u32)>,
 }
 
 impl WindowsCapture {
@@ -114,12 +118,16 @@ impl WindowsCapture {
     }
 
     pub fn new(display_index: usize, timeout: Duration) -> Result<Self, CaptureError> {
+        // Probe before the manager duplicates the output: the probe duplicates
+        // it too, and DXGI limits concurrent duplications of one output.
+        let physical = physical_dimensions(display_index);
         let mut manager = DXGIManager::new(duration_ms(timeout))
             .map_err(|error| CaptureError::Initialization(error.to_string()))?;
         manager.set_capture_source_index(display_index);
         Ok(Self {
             manager,
             display_index,
+            physical,
         })
     }
 
@@ -127,7 +135,12 @@ impl WindowsCapture {
         self.display_index
     }
 
+    /// Physical pixel dimensions of the captured output, falling back to the
+    /// duplication manager's desktop-coordinate geometry.
     pub fn geometry(&self) -> (u32, u32) {
+        if let Some(physical) = self.physical {
+            return physical;
+        }
         let (width, height) = self.manager.geometry();
         (saturating_u32(width), saturating_u32(height))
     }
@@ -137,6 +150,7 @@ impl WindowsCapture {
     }
 
     pub fn select_display(&mut self, display_index: usize) {
+        self.physical = physical_dimensions(display_index);
         self.manager.set_capture_source_index(display_index);
         self.display_index = display_index;
     }
@@ -160,6 +174,15 @@ impl WindowsCapture {
 
         let width = u32::try_from(width).map_err(|_| CaptureError::InvalidFrame)?;
         let height = u32::try_from(height).map_err(|_| CaptureError::InvalidFrame)?;
+        // The rest of the pipeline (encoder configuration, wire geometry) is
+        // sized from the physical duplication mode, so a logical-sized frame is
+        // a truncated capture and must not reach the encoder.
+        if self
+            .physical
+            .is_some_and(|physical| physical != (width, height))
+        {
+            return Err(CaptureError::InvalidFrame);
+        }
         let dirty_regions = metadata
             .dirty_rects
             .into_iter()
@@ -239,12 +262,19 @@ fn output_geometry(source: &impl OutputGeometry) -> Result<(u32, u32), CaptureEr
     ))
 }
 
+fn physical_dimensions(display_index: usize) -> Option<(u32, u32)> {
+    selected_output_metadata(display_index)
+        .ok()
+        .map(|metadata| (metadata.pixel_width, metadata.pixel_height))
+}
+
 fn selected_output_metadata(display_index: usize) -> Result<SelectedOutputMetadata, CaptureError> {
     let initialization =
         |error: windows::core::Error| CaptureError::Initialization(error.to_string());
     // SAFETY: DXGI returns an owned COM interface; no caller-owned raw pointers.
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(initialization)?;
-    // Keep dxgi-capture-rs's adapter order and attached-output index per adapter.
+    // Keep dxgi-capture-rs's adapter order, indexing attached outputs globally.
+    let mut attached_index = 0;
     for adapter_index in 0.. {
         // SAFETY: factory is live and the API validates the enumeration index.
         let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
@@ -255,7 +285,6 @@ fn selected_output_metadata(display_index: usize) -> Result<SelectedOutputMetada
         let Ok(device) = geometry_device(&adapter, Some(&[D3D_FEATURE_LEVEL_9_1])) else {
             continue; // Like the capture manager, skip adapters without a usable device.
         };
-        let mut attached_index = 0;
         for output_index in 0.. {
             // SAFETY: adapter is live; enumeration returns owned COM interfaces.
             let output = match unsafe { adapter.EnumOutputs(output_index) } {

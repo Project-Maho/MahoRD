@@ -114,8 +114,17 @@ impl WindowsClipboard {
 
         // Avoid allocating an arbitrarily large UTF-16 selection. Four KiB of
         // UTF-8 cannot require more than 8 KiB plus the UTF-16 terminator.
-        let max_utf16_storage = MAX_CLIPBOARD_TEXT_BYTES * 2 + 2;
-        if raw::size(CF_UNICODETEXT).is_some_and(|bytes| bytes.get() > max_utf16_storage) {
+        // `raw::size` reports `GlobalSize`, the allocation capacity, which is
+        // routinely far larger than the text it holds, so measure the wide
+        // string up to its NUL terminator instead of the allocation.
+        let max_utf16_bytes = MAX_CLIPBOARD_TEXT_BYTES * 2;
+        let mut probe = vec![0_u8; max_utf16_bytes + 2];
+        let copied = win32(raw::get(CF_UNICODETEXT, &mut probe))?;
+        let within_cap = matches!(
+            wide_string_len(&probe[..copied]),
+            Some(wide_bytes) if wide_bytes <= max_utf16_bytes
+        );
+        if !within_cap {
             drop(clipboard);
             return Ok(None);
         }
@@ -154,6 +163,15 @@ impl Default for WindowsClipboard {
 
 fn sequence_number() -> Option<u32> {
     raw::seq_num().map(|number| number.get())
+}
+
+/// Byte length of the UTF-16 payload before its NUL terminator, or `None` when
+/// no terminator appears in `bytes` (the selection is larger than the cap).
+fn wide_string_len(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .chunks_exact(2)
+        .position(|unit| unit == [0, 0])
+        .map(|units| units * 2)
 }
 
 fn format_is_false(format: u32) -> bool {
