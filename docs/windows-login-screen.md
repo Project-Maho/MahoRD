@@ -105,10 +105,16 @@ On `DESKTOP-1LAPJMP` (Windows 11, rustc 1.97):
   `action=Respawn { session_id: 1, desktop: Winlogon }`, the worker pid changes
   (confirming `CreateProcessAsUserW` onto the secure desktop ran), and the loop
   self-heals back to `Default` when the worker republishes.
+- **Secure desktop, end to end:** with UAC set to prompt on the secure desktop
+  (`EnableLUA=1`, `PromptOnSecureDesktop=1`, `ConsentPromptBehaviorAdmin=2`), an
+  elevation prompt moved the console to `WinSta0\Winlogon`. The worker published
+  `HINT=Winlogon`, the supervisor held a worker bound to that desktop
+  (`desktop: Winlogon ... action=Idle`), and `maho-client` decoded 5/5 frames with
+  `packet_loss_ratio 0.0` while the consent desktop was on screen.
 
-**Not yet verified on this host:** decoded frames captured while a secure desktop is
-actually on screen. That console runs under autologon with no physically attached
-display, and it refuses every remote route to a secure desktop — `LockWorkStation`
-from a user task and from a SYSTEM task, a secure screensaver, `tscon`, and
-restoring default UAC prompting all failed to produce one. Verify by pressing
-Win+L at the machine, then streaming.
+A host configured to elevate without prompting (`PromptOnSecureDesktop=0`) never
+switches to the secure desktop for elevation, so exercise this path there with the
+lock screen or a logon screen instead.
+
+**Not yet verified:** the pre-logon logonUI screen specifically, which requires a
+logoff or reboot on the host.
