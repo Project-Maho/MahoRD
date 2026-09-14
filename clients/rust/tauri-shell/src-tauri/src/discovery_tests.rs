@@ -314,7 +314,13 @@ async fn managed_state_lan_retry_does_not_permanently_lock_initialization_error(
     let state = super::AppState::default();
     assert!(state.discovery.lan_browser.lock().unwrap().is_none());
     let _ = super::commands::list_hosts_internal(&state).await;
-    assert!(state.discovery.lan_browser.lock().unwrap().is_some() || true);
+    // The slot may hold a browser or stay empty when LAN discovery cannot
+    // initialize here; what must not happen is the lock staying poisoned or
+    // held, which would make every later retry fail.
+    assert!(
+        state.discovery.lan_browser.try_lock().is_ok(),
+        "lan_browser lock was left held after list_hosts_internal"
+    );
 }
 
 #[tokio::test]

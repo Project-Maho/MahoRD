@@ -1783,27 +1783,29 @@ pub mod commands {
         })
     }
 
-    #[tauri::command]
-    pub fn send_input(state: State<'_, AppState>, event: InputPayload) -> Result<(), String> {
-        // Serialize submission with reset/teardown; a cloned session could send
-        // a late key-down after cleanup had already released the host's keys.
+    /// Resolves the session to send on, rejecting the two states where input
+    /// must not reach the host: teardown already began, or no session exists.
+    /// Serializing on the session lock keeps a cloned session from landing a
+    /// late key-down after cleanup released the host's keys.
+    pub fn send_input_guarded(
+        state: &AppState,
+        event: &InputPayload,
+    ) -> Result<(ClientSession, maho_proto::InputEvent), String> {
         let sess_opt = state.session.lock().map_err(|e| e.to_string())?;
         if state.stop_media_flag.load(Ordering::SeqCst) {
             return Err("Session disconnecting or inactive".to_string());
         }
-        let session = match sess_opt.as_ref() {
-            Some(s) => s,
-            None => {
-                return Err("Session not initialized".to_string());
-            }
-        };
+        let session = sess_opt
+            .as_ref()
+            .ok_or_else(|| "Session not initialized".to_string())?;
+        let input_event = convert_input_payload(event)?;
+        Ok((session.clone(), input_event))
+    }
 
-        let input_event = match convert_input_payload(&event) {
-            Ok(evt) => evt,
-            Err(e) => {
-                return Err(e);
-            }
-        };
+    #[tauri::command]
+    pub fn send_input(state: State<'_, AppState>, event: InputPayload) -> Result<(), String> {
+        let (session, input_event) = send_input_guarded(&state, &event)?;
+        let session = &session;
 
         match session.send_input(input_event) {
             Ok(()) => Ok(()),

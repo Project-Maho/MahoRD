@@ -273,3 +273,40 @@ fn desktop_client_retains_pairing_for_worker_respawn_recovery() {
         &maho_app::SessionError::NoAddress
     ));
 }
+
+fn sample_input_payload() -> crate::InputPayload {
+    crate::InputPayload {
+        event_type: "mouseMove".to_string(),
+        x: 0.5,
+        y: 0.5,
+        view_width: 1920.0,
+        view_height: 1080.0,
+        key_code: None,
+        modifiers: 0,
+        scroll_dx: 0.0,
+        scroll_dy: 0.0,
+    }
+}
+
+#[test]
+fn send_input_refuses_while_disconnecting_and_without_a_session() {
+    use std::sync::atomic::Ordering;
+
+    let state = crate::AppState::default();
+
+    // Given: no session yet. Input is refused instead of panicking on None.
+    let error = match crate::commands::send_input_guarded(&state, &sample_input_payload()) {
+        Ok(_) => panic!("input without a session must fail"),
+        Err(error) => error,
+    };
+    assert!(error.contains("not initialized"), "unexpected: {error}");
+
+    // Given: teardown has begun. A late key-down here would escape after
+    // cleanup already released the host's keys, so it is refused first.
+    state.stop_media_flag.store(true, Ordering::SeqCst);
+    let error = match crate::commands::send_input_guarded(&state, &sample_input_payload()) {
+        Ok(_) => panic!("input during teardown must fail"),
+        Err(error) => error,
+    };
+    assert!(error.contains("disconnecting"), "unexpected: {error}");
+}
