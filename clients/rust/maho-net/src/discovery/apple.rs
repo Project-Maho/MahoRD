@@ -11,7 +11,7 @@ use std::{
     os::unix::{io::AsRawFd, net::UnixStream},
     sync::{mpsc, Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 type DNSServiceRef = *mut libc::c_void;
@@ -25,6 +25,26 @@ const K_DNS_SERVICE_FLAGS_ADD: DNSServiceFlags = 0x2;
 const K_DNS_SERVICE_INTERFACE_INDEX_LOCAL_ONLY: u32 = !0u32;
 const K_DNS_SERVICE_MAX_DOMAIN_NAME: usize = 1009;
 const MAX_CONCURRENT_SERVICES: usize = 64;
+/// A browsed service that never produces both a hosttarget and at least one address within this
+/// window is torn down so unresponsive advertisers cannot occupy the bounded service table.
+const UNRESOLVED_SERVICE_TTL: Duration = Duration::from_secs(30);
+
+/// True when poll() reports the descriptor as hung up, errored or invalid; such a descriptor stays
+/// permanently "ready" and must be torn down instead of being processed again.
+fn revents_indicate_hangup(revents: libc::c_short) -> bool {
+    (revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0
+}
+
+/// True when a browsed service has not resolved to a usable hosttarget plus address within
+/// `UNRESOLVED_SERVICE_TTL`.
+fn unresolved_service_expired(
+    hosttarget: Option<&str>,
+    addresses: &[(IpAddr, Option<u32>)],
+    age: Duration,
+) -> bool {
+    let resolved = hosttarget.is_some() && !addresses.is_empty();
+    !resolved && age >= UNRESOLVED_SERVICE_TTL
+}
 
 const REGTYPE_C_STR: &CStr = c"_maho-rd._tcp";
 
@@ -277,6 +297,7 @@ struct ActiveService {
     resolve_ref: Option<DNSServiceRef>,
     addr_ref: Option<DNSServiceRef>,
     context: *mut ServiceContext,
+    created_at: Instant,
 }
 
 struct BrowseContext {
@@ -670,6 +691,7 @@ impl AppleDnsServiceBrowser {
                                             resolve_ref: Some(resolve_ref),
                                             addr_ref: None,
                                             context: s_ctx_ptr,
+                                            created_at: Instant::now(),
                                         },
                                     );
                                 } else {
@@ -680,14 +702,52 @@ impl AppleDnsServiceBrowser {
                         }
                     }
 
+                    // Bounded lifetime for services that never resolve: tear them down so they cannot
+                    // occupy slots in the MAX_CONCURRENT_SERVICES table forever.
+                    let expired_keys: Vec<ServiceKey> = active_services
+                        .iter()
+                        .filter(|(_, service)| {
+                            // SAFETY: service.context is valid and pinned on this worker thread.
+                            let s_ctx = unsafe { &*service.context };
+                            unresolved_service_expired(
+                                s_ctx.hosttarget.as_deref(),
+                                &s_ctx.addresses,
+                                service.created_at.elapsed(),
+                            )
+                        })
+                        .map(|(key, _)| key.clone())
+                        .collect();
+                    for key in expired_keys {
+                        if let Some(mut service) = active_services.remove(&key) {
+                            // SAFETY: Deallocate handles before freeing the heap-pinned context.
+                            if let Some(addr_ref) = service.addr_ref.take() {
+                                unsafe { DNSServiceRefDeallocate(addr_ref) };
+                            }
+                            if let Some(resolve_ref) = service.resolve_ref.take() {
+                                unsafe { DNSServiceRefDeallocate(resolve_ref) };
+                            }
+                            // SAFETY: context was allocated via Box::into_raw and all handles are deallocated.
+                            let s_ctx = unsafe { Box::from_raw(service.context) };
+                            tracing::debug!(
+                                "dropping unresolved mDNS service after timeout: {}",
+                                s_ctx.fullname
+                            );
+                        }
+                    }
+
+                    let mut pending_tracker_ops: Vec<(String, Option<DiscoveredHost>)> = Vec::new();
                     for (key, service) in active_services.iter_mut() {
                         // SAFETY: service.context is valid and pinned on this worker thread.
                         let s_ctx = unsafe { &mut *service.context };
                         if let Some(err) = s_ctx.error.take() {
-                            let mut guard = err_clone.lock().unwrap_or_else(|e| e.into_inner());
-                            *guard = Some(err);
-                            let mut tracker_guard = tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
-                            tracker_guard.remove(&s_ctx.fullname);
+                            // Per-service resolve failures are local to one advertiser; logging and
+                            // discarding keeps one broken third-party service from poisoning the
+                            // browser-wide last_error for the process lifetime.
+                            tracing::warn!(
+                                "discarding per-service discovery error for {}: {err}",
+                                s_ctx.fullname
+                            );
+                            pending_tracker_ops.push((s_ctx.fullname.clone(), None));
                         }
 
                         if service.addr_ref.is_none() {
@@ -722,15 +782,47 @@ impl AppleDnsServiceBrowser {
                                 &s_ctx.txt_items,
                                 &s_ctx.addresses,
                             );
-                            let mut tracker_guard = tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
                             match action {
                                 ServiceStateAction::Publish(host) => {
-                                    tracker_guard.upsert(host);
+                                    pending_tracker_ops.push((s_ctx.fullname.clone(), Some(host)));
                                 }
                                 ServiceStateAction::Retract => {
-                                    tracker_guard.remove(&s_ctx.fullname);
+                                    pending_tracker_ops.push((s_ctx.fullname.clone(), None));
                                 }
                             }
+                        }
+                    }
+
+                    for (fullname, publish) in pending_tracker_ops {
+                        let resolved = match publish {
+                            Some(host) => Some(host),
+                            None => {
+                                // A retraction on one interface must not erase a host that is still
+                                // live on another interface.
+                                active_services.values().find_map(|other| {
+                                    // SAFETY: other.context is valid and pinned on this worker thread.
+                                    let other_ctx = unsafe { &*other.context };
+                                    if other_ctx.fullname == fullname {
+                                        match decide_service_state_action(
+                                            &other_ctx.fullname,
+                                            other_ctx.hosttarget.as_deref(),
+                                            other_ctx.srv_port,
+                                            &other_ctx.txt_items,
+                                            &other_ctx.addresses,
+                                        ) {
+                                            ServiceStateAction::Publish(host) => Some(host),
+                                            ServiceStateAction::Retract => None,
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                })
+                            }
+                        };
+                        let mut tracker_guard = tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        match resolved {
+                            Some(host) => tracker_guard.upsert(host),
+                            None => tracker_guard.remove(&fullname),
                         }
                     }
 
@@ -793,7 +885,23 @@ impl AppleDnsServiceBrowser {
                         continue;
                     }
 
-                    if poll_fds[0].revents & libc::POLLIN != 0 {
+                    if poll_fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                        break 'event_loop;
+                    }
+
+                    if revents_indicate_hangup(poll_fds[1].revents) {
+                        // The browse socket hung up: mDNSResponder restarted or closed the query.
+                        // Reporting readiness forever would spin, so treat it as a fatal browser error.
+                        let mut guard = err_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        *guard = Some(DiscoveryError::Backend(
+                            "mDNS browse socket hung up".into(),
+                        ));
+                        let mut tracker_guard = tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        for svc in active_services.values() {
+                            // SAFETY: svc.context is valid on this worker thread.
+                            let fname = unsafe { &(*svc.context).fullname };
+                            tracker_guard.remove(fname);
+                        }
                         break 'event_loop;
                     }
 
@@ -817,14 +925,54 @@ impl AppleDnsServiceBrowser {
                             }
                             break 'event_loop;
                         }
+                        // Browser-level recovery: a successful browse round with no callback error
+                        // clears any previously recorded transient browser error. A policy denial is
+                        // terminal for this process and is never cleared.
+                        // SAFETY: browse_ctx_ptr remains pinned on this single worker thread.
+                        if unsafe { (*browse_ctx_ptr).error.is_none() } {
+                            let mut guard = err_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            if !matches!(*guard, Some(DiscoveryError::PolicyDenied)) {
+                                *guard = None;
+                            }
+                        }
                     }
 
+                    // Handles whose socket hung up or whose ProcessResult failed must be torn down;
+                    // otherwise poll() keeps reporting them ready and the loop spins.
+                    let mut dead_handles: Vec<DNSServiceRef> = Vec::new();
                     for (idx, &handle) in dispatch_handles.iter().enumerate() {
                         let pfd_idx = 2 + idx;
-                        if pfd_idx < poll_fds.len() && (poll_fds[pfd_idx].revents & libc::POLLIN != 0) {
-                            // SAFETY: handle is verified non-null and polled readable.
-                            unsafe { DNSServiceProcessResult(handle) };
+                        if pfd_idx >= poll_fds.len() {
+                            continue;
                         }
+                        let revents = poll_fds[pfd_idx].revents;
+                        if revents_indicate_hangup(revents) {
+                            dead_handles.push(handle);
+                            continue;
+                        }
+                        if revents & libc::POLLIN != 0 {
+                            // SAFETY: handle is verified non-null and polled readable.
+                            let proc_err = unsafe { DNSServiceProcessResult(handle) };
+                            if proc_err != K_DNS_SERVICE_ERR_NO_ERROR {
+                                tracing::warn!(
+                                    "DNSServiceProcessResult failed for service handle: {proc_err}"
+                                );
+                                dead_handles.push(handle);
+                            }
+                        }
+                    }
+
+                    for dead in dead_handles {
+                        for service in active_services.values_mut() {
+                            if service.resolve_ref == Some(dead) {
+                                service.resolve_ref = None;
+                            }
+                            if service.addr_ref == Some(dead) {
+                                service.addr_ref = None;
+                            }
+                        }
+                        // SAFETY: dead is no longer referenced by any ActiveService and is deallocated once.
+                        unsafe { DNSServiceRefDeallocate(dead) };
                     }
                 }
 
@@ -1043,10 +1191,15 @@ impl AppleDnsServiceAdvertiser {
                         revents: 0,
                     });
 
+                    // Handle and its pollfd slot are stored as one pair so a skipped handle
+                    // (fd < 0) cannot shift the index mapping and misdispatch events.
+                    let mut polled: Vec<(DNSServiceRef, usize)> =
+                        Vec::with_capacity(registered_handles.len());
                     for &h in &registered_handles {
                         // SAFETY: h is valid registered DNSServiceRef handle.
                         let fd = unsafe { DNSServiceRefSockFD(h) };
                         if fd >= 0 {
+                            polled.push((h, poll_fds.len()));
                             poll_fds.push(libc::pollfd {
                                 fd,
                                 events: libc::POLLIN,
@@ -1065,15 +1218,46 @@ impl AppleDnsServiceAdvertiser {
                         continue;
                     }
 
-                    if poll_fds[0].revents & libc::POLLIN != 0 {
+                    if poll_fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
                         break;
                     }
 
-                    for (idx, &h) in registered_handles.iter().enumerate() {
-                        let pfd_idx = 1 + idx;
-                        if pfd_idx < poll_fds.len() && (poll_fds[pfd_idx].revents & libc::POLLIN != 0) {
+                    // A hung-up or failing registration socket is reported ready by poll() forever,
+                    // so tear it down instead of spinning on it.
+                    let mut dead_handles: Vec<DNSServiceRef> = Vec::new();
+                    for &(h, pfd_idx) in &polled {
+                        let revents = poll_fds[pfd_idx].revents;
+                        if revents_indicate_hangup(revents) {
+                            tracing::warn!("mDNS registration socket hung up; dropping handle");
+                            dead_handles.push(h);
+                            continue;
+                        }
+                        if revents & libc::POLLIN != 0 {
                             // SAFETY: h is valid and polled readable.
-                            unsafe { DNSServiceProcessResult(h) };
+                            let proc_err = unsafe { DNSServiceProcessResult(h) };
+                            if proc_err != K_DNS_SERVICE_ERR_NO_ERROR {
+                                tracing::warn!(
+                                    "DNSServiceProcessResult failed for registration handle: {proc_err}"
+                                );
+                                dead_handles.push(h);
+                            }
+                        }
+                    }
+
+                    if !dead_handles.is_empty() {
+                        {
+                            let mut guard =
+                                async_error_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            if guard.is_none() {
+                                *guard = Some(DiscoveryError::Backend(
+                                    "mDNS registration handle closed unexpectedly".into(),
+                                ));
+                            }
+                        }
+                        registered_handles.retain(|h| !dead_handles.contains(h));
+                        for dead in dead_handles {
+                            // SAFETY: dead was removed from registered_handles and is deallocated once.
+                            unsafe { DNSServiceRefDeallocate(dead) };
                         }
                     }
                 }
@@ -1131,9 +1315,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn revents_indicate_hangup_detects_closed_and_invalid_fds() {
+        assert!(revents_indicate_hangup(libc::POLLHUP));
+        assert!(revents_indicate_hangup(libc::POLLERR));
+        assert!(revents_indicate_hangup(libc::POLLNVAL));
+        assert!(revents_indicate_hangup(libc::POLLIN | libc::POLLHUP));
+        assert!(!revents_indicate_hangup(libc::POLLIN));
+        assert!(!revents_indicate_hangup(0));
+    }
+
+    #[test]
+    fn unresolved_service_expires_only_when_still_unresolved() {
+        let addrs = vec![(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), None)];
+
+        assert!(unresolved_service_expired(
+            None,
+            &[],
+            UNRESOLVED_SERVICE_TTL + Duration::from_secs(1)
+        ));
+        assert!(unresolved_service_expired(
+            Some("desk.local."),
+            &[],
+            UNRESOLVED_SERVICE_TTL
+        ));
+        assert!(!unresolved_service_expired(
+            None,
+            &[],
+            UNRESOLVED_SERVICE_TTL - Duration::from_secs(1)
+        ));
+        assert!(!unresolved_service_expired(
+            Some("desk.local."),
+            &addrs,
+            UNRESOLVED_SERVICE_TTL * 10
+        ));
+    }
+
+    #[test]
     fn construct_full_name_produces_valid_escaped_fullname() {
         let fullname = construct_full_name("My Host", "_maho-rd._tcp.", "local.").unwrap();
-        assert_eq!(fullname, "My Host._maho-rd._tcp.local.");
+        // DNS-SD escapes a space in the instance label as \032.
+        assert_eq!(fullname, "My\\032Host._maho-rd._tcp.local.");
 
         let dot_name = construct_full_name("host.1", "_maho-rd._tcp", "local").unwrap();
         assert!(dot_name.ends_with("._maho-rd._tcp.local."));
