@@ -373,14 +373,33 @@ pub(crate) fn desktop_hint_path() -> std::path::PathBuf {
 
 /// Reports the input desktop of the calling process's session. Called by the
 /// session worker, which is the only component that can see it.
+/// Reports the input desktop of the calling process's session. Called by the
+/// session worker, which is the only component that can see it.
+///
+/// Spawns a background thread that keeps republishing, because the desktop the
+/// worker was launched on can change under it: when the console switches to the
+/// secure desktop the worker's `OpenInputDesktop` starts failing, and that
+/// failure is itself the signal the supervisor needs to respawn onto Winlogon.
 pub fn publish_input_desktop() {
+    write_input_desktop();
+    let _ = std::thread::Builder::new()
+        .name("maho-desktop-hint".into())
+        .spawn(|| loop {
+            std::thread::sleep(Duration::from_millis(500));
+            write_input_desktop();
+        });
+}
+
+fn write_input_desktop() {
     let path = desktop_hint_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Some(name) = current_input_desktop_name() {
-        let _ = std::fs::write(&path, name);
-    }
+    // An unreadable input desktop means the console switched to the secure
+    // desktop, which this worker has no access to; report it as Winlogon so the
+    // supervisor respawns a worker that does.
+    let name = current_input_desktop_name().unwrap_or_else(|| "Winlogon".to_owned());
+    let _ = std::fs::write(&path, name);
 }
 
 fn current_input_desktop_name() -> Option<String> {
