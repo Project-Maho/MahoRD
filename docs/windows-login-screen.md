@@ -116,6 +116,20 @@ A host configured to elevate without prompting (`PromptOnSecureDesktop=0`) never
 switches to the secure desktop for elevation, so exercise this path there with the
 lock screen or a logon screen instead.
 
+### Triggering a secure desktop remotely
+
+On a console running under autologon with no physically attached display, remote
+attempts to reach the lock screen fail: `LockWorkStation` invoked from session 0
+returns `False` with `GetLastError` 5 (`ERROR_ACCESS_DENIED`), and a session-1
+`schtasks /it` task reports `LastTaskResult=0` while its payload never runs. The
+reliable remote channel is a UAC elevation prompt with `PromptOnSecureDesktop=1`
+and `ConsentPromptBehaviorAdmin=2`; restore the original values afterwards.
+
+When a probe claims an API succeeded yet nothing happened, log both the return
+value and `GetLastError` before believing it — a PowerShell parse error in the
+probe (double quotes inside a double-quoted `Add-Type` signature) can stop the
+call from ever being made.
+
 ## Recovering from a worker respawn
 
 When the console switches desktop the supervisor replaces the session worker,
