@@ -181,11 +181,13 @@ impl AgentServer {
                 )
                 .await
                 {
-                    if let Some(events) = t.check_timeout(pos.0, pos.1) {
-                        if !events.is_empty() {
-                            for event in events {
-                                let _ = watchdog_backend.send_input_event(event);
-                            }
+                    if t.is_timed_out() {
+                        // Detection is non-destructive: the error-aware release keeps the held
+                        // state recorded when transmission fails so the next tick retries.
+                        let (_sent, error) = release_inputs(&*watchdog_backend, &mut t, pos);
+                        if let Some(error) = error {
+                            tracing::warn!(%error, "watchdog input release failed; retrying");
+                            t.mark_release_failed();
                         }
                     }
                 }
@@ -248,6 +250,16 @@ impl AgentServer {
             work.blocking(move || backend.try_disconnect_session())
                 .await?
                 .map_err(std::io::Error::other)?;
+        } else {
+            // Every shutdown path must release held input, not just the disconnect branch.
+            let mut t = tracker.lock().await;
+            if !t.is_empty() {
+                let pos = *current_pos.lock().await;
+                let (_sent, error) = release_inputs(&*backend, &mut t, pos);
+                if let Some(error) = error {
+                    tracing::warn!(%error, "shutdown input release failed");
+                }
+            }
         }
         Ok(())
     }
@@ -631,8 +643,15 @@ async fn handle_connection(
             // even if the connection task is cancelled while the blocking dispatch is running.
             let (status, text, resp) = work
                 .blocking(move || {
+                    use crate::agent_input::MouseButton;
+                    use maho_proto::InputEventType;
                     let screen_info = backend.get_screen_info();
                     let mut total_events = 0;
+                    // Downs already accepted by the backend, so a later failure can be rolled back.
+                    let mut held_buttons: std::collections::HashSet<MouseButton> =
+                        std::collections::HashSet::new();
+                    let mut held_keys: std::collections::HashMap<u16, maho_proto::Modifiers> =
+                        std::collections::HashMap::new();
                     for action in &actions {
                         let events = match convert_agent_action_to_events(
                             action,
@@ -652,11 +671,55 @@ async fn handle_connection(
                         };
                         for event in events {
                             if let Err(err) = backend.send_input_event(event) {
+                                // Re-record what the backend actually holds, then release it all
+                                // (matching ups plus a trailing Reset) before answering.
+                                for button in held_buttons {
+                                    t.record_button_down(button);
+                                }
+                                for (key_code, modifiers) in held_keys {
+                                    t.record_key_down(key_code, modifiers);
+                                }
+                                let (_released, cleanup) = release_inputs(&*backend, &mut t, *cp);
+                                let error = match cleanup {
+                                    Some(cleanup) => format!("{err}; cleanup: {cleanup}"),
+                                    None => err,
+                                };
                                 return (
                                     500,
                                     "Internal Error",
-                                    serde_json::json!({"ok": false, "error": err}),
+                                    serde_json::json!({"ok": false, "error": error}),
                                 );
+                            }
+                            match event.event_type {
+                                InputEventType::LeftMouseDown => {
+                                    held_buttons.insert(MouseButton::Left);
+                                }
+                                InputEventType::RightMouseDown => {
+                                    held_buttons.insert(MouseButton::Right);
+                                }
+                                InputEventType::MiddleMouseDown => {
+                                    held_buttons.insert(MouseButton::Middle);
+                                }
+                                InputEventType::LeftMouseUp => {
+                                    held_buttons.remove(&MouseButton::Left);
+                                }
+                                InputEventType::RightMouseUp => {
+                                    held_buttons.remove(&MouseButton::Right);
+                                }
+                                InputEventType::MiddleMouseUp => {
+                                    held_buttons.remove(&MouseButton::Middle);
+                                }
+                                InputEventType::KeyDown => {
+                                    held_keys.insert(event.key_code, event.modifiers);
+                                }
+                                InputEventType::KeyUp => {
+                                    held_keys.remove(&event.key_code);
+                                }
+                                InputEventType::Reset => {
+                                    held_buttons.clear();
+                                    held_keys.clear();
+                                }
+                                _ => {}
                             }
                             total_events += 1;
                         }
@@ -1633,6 +1696,104 @@ mod tests {
     #[tokio::test]
     async fn reset_release_failure_never_reports_success() {
         release_failure_response("input/reset", "reset_events_sent").await;
+    }
+
+    struct FailOnBackend {
+        fail_on: maho_proto::InputEventType,
+        attempted: std::sync::Mutex<Vec<maho_proto::InputEventType>>,
+    }
+    impl AgentServerBackend for FailOnBackend {
+        fn send_input_event(&self, event: maho_proto::InputEvent) -> Result<(), String> {
+            self.attempted.lock().unwrap().push(event.event_type);
+            if event.event_type == self.fail_on {
+                return Err("scripted transmission failure".into());
+            }
+            Ok(())
+        }
+        fn get_screen_info(&self) -> ScreenInfo {
+            MockBackend {
+                sent_count: AtomicUsize::new(0),
+            }
+            .get_screen_info()
+        }
+        fn get_latest_frame_nv12(&self) -> Option<(u32, u32, Arc<Vec<u8>>)> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_dispatch_releases_already_sent_downs() {
+        use maho_proto::InputEventType::{LeftMouseDown, LeftMouseUp, Reset};
+        // Given a backend that accepts the down of a batch but rejects its up.
+        let backend = Arc::new(FailOnBackend {
+            fail_on: LeftMouseUp,
+            attempted: std::sync::Mutex::new(Vec::new()),
+        });
+        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend.clone())
+            .await
+            .unwrap();
+        let tracker = server.tracker.clone();
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(server.run(rx));
+        let body = r#"[{"action":"mouse_down","button":"left"},{"action":"mouse_up","button":"left"}]"#;
+        // When the batch is dispatched.
+        let (status, response) = http_roundtrip(
+            addr,
+            &format!(
+                "POST /api/v1/input/batch HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        let _ = shutdown.send(true);
+        worker.await.unwrap().unwrap();
+        // Then the failure is reported and the accepted down was released with a trailing Reset.
+        assert_eq!(status, "HTTP/1.1 500 Internal Error");
+        assert_eq!(response["ok"], false);
+        let attempted = backend.attempted.lock().unwrap().clone();
+        assert_eq!(attempted.first(), Some(&LeftMouseDown));
+        assert_eq!(attempted.last(), Some(&Reset));
+        assert!(
+            attempted.iter().filter(|e| **e == LeftMouseUp).count() >= 2,
+            "the accepted down must be released again after the failure: {attempted:?}"
+        );
+        assert!(tracker.try_lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn external_shutdown_releases_held_input() {
+        use maho_proto::InputEventType::{LeftMouseDown, LeftMouseUp, Reset};
+        // Given a held left button and an external shutdown (no disconnect request).
+        let backend = disconnect_backend(false);
+        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend.clone())
+            .await
+            .unwrap();
+        let tracker = server.tracker.clone();
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(server.run(rx));
+        let body = r#"{"action":"mouse_down","button":"left"}"#;
+        let (_, down) = http_roundtrip(
+            addr,
+            &format!(
+                "POST /api/v1/input/action HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        assert_eq!(down["events_sent"], 1);
+        // When the server is shut down externally.
+        shutdown.send(true).unwrap();
+        worker.await.unwrap().unwrap();
+        // Then the held button was released before returning.
+        let events: Vec<_> = backend
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.event_type)
+            .collect();
+        assert_eq!(events, vec![LeftMouseDown, LeftMouseUp, Reset]);
+        assert!(tracker.try_lock().unwrap().is_empty());
     }
 
     struct DisconnectGateBackend {

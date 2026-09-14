@@ -43,6 +43,97 @@ pub(super) fn release(
     }
 }
 
+/// Single non-blocking probe for a newer frame than `last_frame_id`.
+fn poll_screen_change(
+    backend: &dyn AgentServerBackend,
+    last_frame_id: Option<u64>,
+) -> Option<Value> {
+    let meta = backend.get_latest_frame_metadata()?;
+    if last_frame_id.is_some_and(|id| meta.frame_id == id) {
+        return None;
+    }
+    Some(json!([{"type":"text","text":format!(
+        "Screen changed: frame_id={}, timestamp_ms={}, age_ms={}",
+        meta.frame_id, meta.timestamp_ms, meta.age_ms
+    )}]))
+}
+
+fn screen_change_timeout(last_frame_id: Option<u64>) -> Value {
+    json!([{"type":"text","text":format!(
+        "Timeout: no change detected (last_frame_id={})",
+        last_frame_id.unwrap_or(0)
+    )}])
+}
+
+const SCREEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Cancellation-aware screen-change wait: every pause is an async timer, so the caller's
+/// `select!` can drop this future and observe shutdown instead of being blocked for up to 30s.
+async fn wait_for_screen_change_async(
+    backend: &dyn AgentServerBackend,
+    last_frame_id: Option<u64>,
+    timeout_ms: u64,
+) -> Value {
+    let start = tokio::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    loop {
+        if let Some(changed) = poll_screen_change(backend, last_frame_id) {
+            return changed;
+        }
+        if start.elapsed() >= timeout {
+            return screen_change_timeout(last_frame_id);
+        }
+        tokio::time::sleep(SCREEN_POLL_INTERVAL).await;
+    }
+}
+
+/// Recognizes a fully valid `remote_wait_for_screen_change` tool call so it can be served on the
+/// async path. Anything malformed falls through to [`handle_mcp_message`] for its error response.
+fn parse_wait_for_screen_change(msg: &str) -> Option<(Value, Option<u64>, u64)> {
+    let req: Value = serde_json::from_str(msg).ok()?;
+    if !req.is_object() || req["jsonrpc"] != "2.0" || req["method"] != "tools/call" {
+        return None;
+    }
+    let id = req.get("id")?.clone();
+    if !(id.is_string() || id.is_number()) {
+        return None;
+    }
+    let params = req.get("params")?;
+    if !params.is_object() || params.get("name")? != "remote_wait_for_screen_change" {
+        return None;
+    }
+    let arguments = match params.get("arguments") {
+        None => serde_json::Map::new(),
+        Some(Value::Object(map)) => map.clone(),
+        Some(_) => return None,
+    };
+    let last_frame_id = arguments.get("last_frame_id").and_then(Value::as_u64);
+    let timeout_ms = arguments
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(5000)
+        .min(30000);
+    Some((id, last_frame_id, timeout_ms))
+}
+
+/// Async entry point used by the stdio server: identical to [`handle_mcp_message`] except the
+/// screen-change wait never blocks the executor.
+pub(super) async fn handle_mcp_message_cancellable(
+    msg: &str,
+    backend: Arc<dyn AgentServerBackend>,
+    tracker: &mut InputStateTracker,
+    pos: &mut (f32, f32),
+) -> Option<String> {
+    if let Some((id, last_frame_id, timeout_ms)) = parse_wait_for_screen_change(msg) {
+        let content = wait_for_screen_change_async(backend.as_ref(), last_frame_id, timeout_ms).await;
+        return Some(
+            json!({"jsonrpc":"2.0","id":id,"result":{"content":content,"isError":false}})
+                .to_string(),
+        );
+    }
+    handle_mcp_message(msg, backend, tracker, pos)
+}
+
 pub fn handle_mcp_message(
     msg: &str,
     backend: Arc<dyn AgentServerBackend>,
@@ -87,19 +178,16 @@ pub fn handle_mcp_message(
                         .and_then(|v| v.as_u64())
                         .unwrap_or(5000)
                         .min(30000);
-                    
+
                     let start = std::time::Instant::now();
-                    let poll_interval = std::time::Duration::from_millis(25);
                     loop {
-                        if let Some(meta) = backend.get_latest_frame_metadata() {
-                            if last_frame_id.is_none() || meta.frame_id != last_frame_id.unwrap() {
-                                break Ok(json!([{"type":"text","text":format!("Screen changed: frame_id={}, timestamp_ms={}, age_ms={}", meta.frame_id, meta.timestamp_ms, meta.age_ms)}]));
-                            }
+                        if let Some(changed) = poll_screen_change(backend.as_ref(), last_frame_id) {
+                            break Ok(changed);
                         }
                         if start.elapsed() >= std::time::Duration::from_millis(timeout_ms) {
-                            break Ok(json!([{"type":"text","text":format!("Timeout: no change detected (last_frame_id={})", last_frame_id.unwrap_or(0))}]));
+                            break Ok(screen_change_timeout(last_frame_id));
                         }
-                        std::thread::sleep(poll_interval);
+                        std::thread::sleep(SCREEN_POLL_INTERVAL);
                     }
                 }
                 "remote_take_screenshot" => {

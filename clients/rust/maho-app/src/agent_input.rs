@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     io::Cursor,
     time::{Duration, Instant},
@@ -249,6 +249,7 @@ pub enum AgentAction {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentInputError {
     UnknownKey(String),
+    UnmappableKey(String),
     EmptyHotkey,
     InvalidCoordinates { x: f32, y: f32 },
     ActionTooLarge { max_events: usize },
@@ -258,6 +259,7 @@ impl fmt::Display for AgentInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownKey(k) => write!(f, "unknown key name: '{k}'"),
+            Self::UnmappableKey(k) => write!(f, "key has no host keycode mapping: '{k}'"),
             Self::EmptyHotkey => write!(f, "hotkey must contain at least one key"),
             Self::InvalidCoordinates { x, y } => {
                 write!(f, "invalid non-finite coordinates ({x}, {y})")
@@ -392,6 +394,14 @@ pub fn parse_hotkey_string(hotkey: &str) -> Result<(InputKey, Modifiers), AgentI
     Ok((key, combined_modifiers))
 }
 
+/// Resolves a parsed key to its host keycode, failing explicitly when no mapping exists.
+///
+/// A missing mapping must never fall back to `0`: that is the macOS keycode for `A`.
+fn require_macos_keycode(key: InputKey, name: &str) -> Result<u16, AgentInputError> {
+    crate::input::InputKeyMap::to_macos(key)
+        .ok_or_else(|| AgentInputError::UnmappableKey(name.to_string()))
+}
+
 pub fn normalize_agent_coordinates(
     x: f32,
     y: f32,
@@ -473,6 +483,8 @@ pub fn synthesize_ascii_char(ch: char) -> Option<(InputKey, Modifiers)> {
 pub struct InputStateTracker {
     active_buttons: HashSet<MouseButton>,
     active_keys: HashSet<u16>,
+    /// Modifier bits each held key contributed, so releases can recompute the active set.
+    key_modifiers: HashMap<u16, Modifiers>,
     active_modifiers: Modifiers,
     last_action_at: Instant,
     hold_timeout: Duration,
@@ -483,6 +495,7 @@ impl Default for InputStateTracker {
         Self {
             active_buttons: HashSet::new(),
             active_keys: HashSet::new(),
+            key_modifiers: HashMap::new(),
             active_modifiers: Modifiers::empty(),
             last_action_at: Instant::now(),
             hold_timeout: Duration::from_millis(5000),
@@ -510,12 +523,18 @@ impl InputStateTracker {
 
     pub fn record_key_down(&mut self, key_code: u16, modifiers: Modifiers) {
         self.active_keys.insert(key_code);
+        *self.key_modifiers.entry(key_code).or_insert(Modifiers::empty()) |= modifiers;
         self.active_modifiers |= modifiers;
         self.last_action_at = Instant::now();
     }
 
     pub fn record_key_up(&mut self, key_code: u16) {
         self.active_keys.remove(&key_code);
+        self.key_modifiers.remove(&key_code);
+        self.active_modifiers = self
+            .key_modifiers
+            .values()
+            .fold(Modifiers::empty(), |acc, mods| acc | *mods);
         self.last_action_at = Instant::now();
     }
 
@@ -528,6 +547,7 @@ impl InputStateTracker {
     pub fn clear(&mut self) {
         self.active_buttons.clear();
         self.active_keys.clear();
+        self.key_modifiers.clear();
         self.active_modifiers = Modifiers::empty();
         self.last_action_at = Instant::now();
     }
@@ -559,6 +579,7 @@ impl InputStateTracker {
             });
         }
 
+        self.key_modifiers.clear();
         self.active_modifiers = Modifiers::empty();
 
         events.push(InputEvent {
@@ -576,11 +597,24 @@ impl InputStateTracker {
     }
 
     pub fn check_timeout(&mut self, current_x: f32, current_y: f32) -> Option<Vec<InputEvent>> {
-        if !self.is_empty() && self.last_action_at.elapsed() > self.hold_timeout {
+        if self.is_timed_out() {
             Some(self.release_all(current_x, current_y))
         } else {
             None
         }
+    }
+
+    /// Non-destructive timeout probe, so detection can be separated from the release itself.
+    pub fn is_timed_out(&self) -> bool {
+        !self.is_empty() && self.last_action_at.elapsed() > self.hold_timeout
+    }
+
+    /// Backdates the activity clock so a failed release is retried on the next watchdog tick
+    /// instead of waiting a full hold timeout again.
+    pub fn mark_release_failed(&mut self) {
+        self.last_action_at = Instant::now()
+            .checked_sub(self.hold_timeout + Duration::from_millis(1))
+            .unwrap_or_else(Instant::now);
     }
 }
 
@@ -781,7 +815,7 @@ pub fn convert_agent_action_to_events(
         }
         AgentAction::KeyDown { key } => {
             let (k, mods) = parse_key_name(key)?;
-            let macos_code = crate::input::InputKeyMap::to_macos(k).unwrap_or(0);
+            let macos_code = require_macos_keycode(k, key)?;
             tracker.record_key_down(macos_code, mods);
             events.push(InputEvent {
                 event_type: InputEventType::KeyDown,
@@ -795,7 +829,7 @@ pub fn convert_agent_action_to_events(
         }
         AgentAction::KeyUp { key } => {
             let (k, _) = parse_key_name(key)?;
-            let macos_code = crate::input::InputKeyMap::to_macos(k).unwrap_or(0);
+            let macos_code = require_macos_keycode(k, key)?;
             tracker.record_key_up(macos_code);
             events.push(InputEvent {
                 event_type: InputEventType::KeyUp,
@@ -809,7 +843,7 @@ pub fn convert_agent_action_to_events(
         }
         AgentAction::KeyPress { key, .. } => {
             let (k, mods) = parse_key_name(key)?;
-            let macos_code = crate::input::InputKeyMap::to_macos(k).unwrap_or(0);
+            let macos_code = require_macos_keycode(k, key)?;
             events.push(InputEvent {
                 event_type: InputEventType::KeyDown,
                 x: current_pos.0,
@@ -832,7 +866,7 @@ pub fn convert_agent_action_to_events(
         AgentAction::Hotkey { keys } => {
             let combined = keys.join("+");
             let (k, mods) = parse_hotkey_string(&combined)?;
-            let macos_code = crate::input::InputKeyMap::to_macos(k).unwrap_or(0);
+            let macos_code = require_macos_keycode(k, &combined)?;
             events.push(InputEvent {
                 event_type: InputEventType::KeyDown,
                 x: current_pos.0,
@@ -896,6 +930,111 @@ pub fn convert_agent_action_to_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_release_is_retried_on_the_next_timeout_check() {
+        let mut tracker = InputStateTracker::new(Duration::from_secs(60));
+        tracker.record_key_down(0x3b, Modifiers::CONTROL);
+        assert!(!tracker.is_timed_out(), "fresh hold is not timed out");
+        // A failed release keeps the held state and demands an immediate retry.
+        tracker.mark_release_failed();
+        assert!(
+            tracker.is_timed_out(),
+            "a failed release must be retried without waiting another hold timeout"
+        );
+        assert!(!tracker.is_empty());
+    }
+
+    #[test]
+    fn function_keys_map_to_distinct_host_keycodes() {
+        let a_keycode = crate::input::InputKeyMap::to_macos(InputKey::WindowsVirtualKey(0x41))
+            .expect("letter A must map");
+        assert_eq!(a_keycode, 0x00);
+
+        let (f5_key, _) = parse_key_name("f5").unwrap();
+        let f5_code = require_macos_keycode(f5_key, "f5").expect("f5 must map");
+        assert_ne!(
+            f5_code, a_keycode,
+            "F5 must not collapse onto the macOS 'A' keycode"
+        );
+        assert_eq!(f5_code, 0x60);
+
+        let mut seen = HashSet::new();
+        for (name, expected) in [
+            ("f1", 0x7au16),
+            ("f2", 0x78),
+            ("f3", 0x63),
+            ("f4", 0x76),
+            ("f5", 0x60),
+            ("f6", 0x61),
+            ("f7", 0x62),
+            ("f8", 0x64),
+            ("f9", 0x65),
+            ("f10", 0x6d),
+            ("f11", 0x67),
+            ("f12", 0x6f),
+        ] {
+            let (key, _) = parse_key_name(name).unwrap();
+            let code = require_macos_keycode(key, name).expect("function key must map");
+            assert_eq!(code, expected, "{name} mapped to unexpected keycode");
+            assert!(seen.insert(code), "{name} keycode collides with another key");
+        }
+    }
+
+    #[test]
+    fn key_up_clears_only_that_keys_modifiers() {
+        let mut tracker = InputStateTracker::default();
+        let mut position = (0.5, 0.5);
+
+        let down = convert_agent_action_to_events(
+            &AgentAction::KeyDown {
+                key: "ctrl".into(),
+            },
+            &mut tracker,
+            &mut position,
+            800.0,
+            600.0,
+        )
+        .unwrap();
+        assert!(down[0].modifiers.contains(Modifiers::CONTROL));
+
+        convert_agent_action_to_events(
+            &AgentAction::KeyUp {
+                key: "ctrl".into(),
+            },
+            &mut tracker,
+            &mut position,
+            800.0,
+            600.0,
+        )
+        .unwrap();
+        assert_eq!(tracker.active_modifiers, Modifiers::empty());
+
+        let c_down = convert_agent_action_to_events(
+            &AgentAction::KeyDown { key: "c".into() },
+            &mut tracker,
+            &mut position,
+            800.0,
+            600.0,
+        )
+        .unwrap();
+        assert!(
+            !c_down[0].modifiers.contains(Modifiers::CONTROL),
+            "released ctrl must not leak into later key events"
+        );
+    }
+
+    #[test]
+    fn key_up_retains_modifiers_owned_by_other_held_keys() {
+        let mut tracker = InputStateTracker::default();
+        tracker.record_key_down(0x3b, Modifiers::CONTROL);
+        tracker.record_key_down(0x38, Modifiers::SHIFT);
+        tracker.record_key_up(0x3b);
+        assert_eq!(tracker.active_modifiers, Modifiers::SHIFT);
+        tracker.record_key_up(0x38);
+        assert_eq!(tracker.active_modifiers, Modifiers::empty());
+        assert!(tracker.is_empty());
+    }
 
     #[test]
     fn parses_standard_key_names_and_modifiers() {
