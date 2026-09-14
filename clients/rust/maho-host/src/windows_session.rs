@@ -114,20 +114,23 @@ pub enum CaptureRecovery {
     Abort,
 }
 
-/// Recovery policy for the native capture loop. Secure-desktop switches surface
-/// as `AccessDenied`/`AccessLost` and MUST keep retrying: aborting there is the
-/// bug that kills streaming at the logon screen.
+/// Whether a failed acquire should tear the media session down.
+///
+/// Secure-desktop switches surface as `AccessLost`, `AccessDenied` and
+/// `RefreshFailure`, and those must never abort however long they persist:
+/// aborting there is what kills streaming at the logon screen. Only an
+/// unexplained failure gives up, and only after it has repeated enough times to
+/// rule out a transient.
+pub fn should_abort_capture(failure: CaptureFailure, consecutive: u32) -> bool {
+    matches!(failure, CaptureFailure::Other) && consecutive >= OTHER_FAILURE_ABORT_THRESHOLD
+}
+
+/// Recovery policy for the native capture loop.
 pub fn capture_recovery(failure: CaptureFailure, consecutive: u32) -> CaptureRecovery {
-    match failure {
-        CaptureFailure::AccessLost
-        | CaptureFailure::AccessDenied
-        | CaptureFailure::RefreshFailure => {
-            CaptureRecovery::Reacquire(reacquire_backoff(consecutive))
-        }
-        CaptureFailure::Other if consecutive < OTHER_FAILURE_ABORT_THRESHOLD => {
-            CaptureRecovery::Reacquire(reacquire_backoff(consecutive))
-        }
-        CaptureFailure::Other => CaptureRecovery::Abort,
+    if should_abort_capture(failure, consecutive) {
+        CaptureRecovery::Abort
+    } else {
+        CaptureRecovery::Reacquire(reacquire_backoff(consecutive))
     }
 }
 
@@ -345,6 +348,34 @@ mod tests {
     }
 
     #[test]
+    fn only_unexplained_failures_abort_the_capture_loop() {
+        // Given: the failures a secure-desktop switch produces. They must never
+        // abort, however long they persist, or streaming dies at the logon
+        // screen.
+        for failure in [
+            CaptureFailure::AccessLost,
+            CaptureFailure::AccessDenied,
+            CaptureFailure::RefreshFailure,
+        ] {
+            for consecutive in [0, 29, 30, 10_000, u32::MAX] {
+                assert!(
+                    !should_abort_capture(failure, consecutive),
+                    "{failure:?} aborted at {consecutive}"
+                );
+            }
+        }
+
+        // Given: an unexplained failure, which is tolerated briefly and then
+        // gives up rather than spinning forever.
+        for consecutive in 0..30 {
+            assert!(!should_abort_capture(CaptureFailure::Other, consecutive));
+        }
+        for consecutive in [30, 31, u32::MAX] {
+            assert!(should_abort_capture(CaptureFailure::Other, consecutive));
+        }
+    }
+
+    #[test]
     fn backoff_is_capped_without_overflow_for_large_attempts() {
         for attempt in [31, 32, 63, 64, 10_000, u32::MAX] {
             assert_eq!(reacquire_backoff(attempt), Duration::from_millis(1000));
@@ -353,8 +384,6 @@ mod tests {
 
     #[test]
     fn worker_waits_for_a_capturable_output_then_gives_up() {
-        // Given: a worker spawned onto the secure desktop, where DXGI cannot yet
-        // describe an output.
         for elapsed in [
             Duration::ZERO,
             Duration::from_secs(1),
