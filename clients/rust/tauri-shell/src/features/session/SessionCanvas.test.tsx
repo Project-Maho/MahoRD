@@ -111,6 +111,8 @@ if (typeof globalThis.document === "undefined") {
 let createRendererCallCount = 0;
 let disposeCallCount = 0;
 let renderCallCount = 0;
+let mockFrameWidth = 1920;
+let mockFrameHeight = 1080;
 
 mock.module("@/lib/renderer", () => {
   return {
@@ -129,9 +131,10 @@ mock.module("@/lib/renderer", () => {
     parseFrame: (buf: ArrayBuffer) => {
       if (!buf || buf.byteLength < 16) return null;
       return {
-        width: 1920,
-        height: 1080,
+        width: mockFrameWidth,
+        height: mockFrameHeight,
         y: new Uint8Array(0),
+        uvStride: mockFrameWidth,
         uv: new Uint8Array(0),
         cursor: { x: 0.5, y: 0.5, visible: true },
       };
@@ -168,11 +171,82 @@ async function waitFor(
   }
 }
 
+function findElement(node: any, predicate: (el: any) => boolean): any {
+  if (!node) return null;
+  if (node.nodeType === 1 && predicate(node)) return node;
+  for (const child of node.childNodes || []) {
+    const found = findElement(child, predicate);
+    if (found) return found;
+  }
+  return null;
+}
+
 describe("SessionCanvas", () => {
   beforeEach(() => {
     createRendererCallCount = 0;
     disposeCallCount = 0;
     renderCallCount = 0;
+    mockFrameWidth = 1920;
+    mockFrameHeight = 1080;
+  });
+
+  it("drives the drawing buffer from the frame dimensions, not hardcoded JSX attributes", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    mockFrameWidth = 2560;
+    mockFrameHeight = 1440;
+
+    let pollCount = 0;
+    const pollFrame = async () => {
+      pollCount++;
+      return new ArrayBuffer(20);
+    };
+
+    await act(async () => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: true,
+          pollFrame,
+        })
+      );
+    });
+
+    const canvas = findElement(container, (el) => el.getAttribute("id") === "video-canvas");
+    expect(canvas).not.toBeNull();
+    // No hardcoded drawing-buffer attributes may be emitted by the JSX.
+    expect(canvas.getAttribute("width")).toBeNull();
+    expect(canvas.getAttribute("height")).toBeNull();
+
+    await waitFor(() => canvas.width === 2560 && canvas.height === 1440);
+    expect(canvas.width).toBe(2560);
+    expect(canvas.height).toBe(1440);
+
+    // A re-render must not reset the drawing buffer back to a fixed size.
+    await act(async () => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: true,
+          pollFrame,
+          onCursor: () => {},
+        })
+      );
+    });
+    expect(canvas.width).toBe(2560);
+    expect(canvas.height).toBe(1440);
+
+    // A stream size change is followed.
+    mockFrameWidth = 1280;
+    mockFrameHeight = 800;
+    await waitFor(() => canvas.width === 1280 && canvas.height === 800);
+    expect(canvas.width).toBe(1280);
+    expect(canvas.height).toBe(800);
+
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
   });
 
   it("THE CRITICAL INVARIANT: creates renderer exactly once across multiple re-renders and disposes on unmount", async () => {

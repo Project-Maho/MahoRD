@@ -268,7 +268,7 @@ describe("useRemoteInput", () => {
     sentInputs = [];
   });
 
-  it("keydown with repeat true sends nothing", async () => {
+  it("keydown with repeat true is forwarded so held keys repeat on the host", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -287,16 +287,22 @@ describe("useRemoteInput", () => {
     });
 
     // Dispatch keydown with repeat: true targeting viewport
+    let repeatPrevented = false;
     const repeatEvent = new Event("keydown") as any;
     repeatEvent.key = "Enter";
     repeatEvent.keyCode = 13;
     repeatEvent.repeat = true;
+    repeatEvent.preventDefault = () => {
+      repeatPrevented = true;
+    };
     Object.defineProperty(repeatEvent, "target", {
       value: { tagName: "DIV", id: "viewport" },
     });
 
     window.dispatchEvent(repeatEvent);
-    expect(sentInputs.filter((i) => i.event_type === "KeyDown").length).toBe(0);
+    expect(sentInputs.filter((i) => i.event_type === "KeyDown").length).toBe(1);
+    // Forwarded keys are consumed locally: Tab must not move focus out of the session.
+    expect(repeatPrevented).toBe(true);
 
     // Dispatch keydown with repeat: false targeting viewport
     const normalEvent = new Event("keydown") as any;
@@ -309,10 +315,164 @@ describe("useRemoteInput", () => {
 
     window.dispatchEvent(normalEvent);
     const downInputs = sentInputs.filter((i) => i.event_type === "KeyDown");
-    expect(downInputs.length).toBe(1);
+    expect(downInputs.length).toBe(2);
     expect(downInputs[0].key_code).toBe(13);
+    expect(downInputs[1].key_code).toBe(13);
 
     act(() => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+  });
+
+  it("a drag that leaves the viewport keeps sending move events from the window", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    const viewport = createFakeDomTarget("viewport");
+    const canvas = createFakeDomTarget("video-canvas", "canvas");
+    viewport.contains = (node: any) => node === viewport || node === canvas;
+
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+        })
+      );
+    });
+
+    const downEv = new Event("mousedown") as any;
+    downEv.button = 0;
+    downEv.clientX = 100;
+    downEv.clientY = 100;
+    viewport.dispatchEvent(downEv);
+    expect(sentInputs.filter((i) => i.event_type === "LeftMouseDown").length).toBe(1);
+
+    sentInputs = [];
+    // Move with the button held, targeting an element OUTSIDE the viewport.
+    const outside = createFakeDomTarget("outside");
+    const dragEv = new Event("mousemove") as any;
+    dragEv.clientX = 4000;
+    dragEv.clientY = 100;
+    Object.defineProperty(dragEv, "target", { value: outside, configurable: true });
+    window.dispatchEvent(dragEv);
+
+    // Motion is coalesced through rAF: flushed by releaseAll on teardown.
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+    await waitFor(() => sentInputs.some((i) => i.event_type === "LeftMouseDragged"));
+    expect(sentInputs.filter((i) => i.event_type === "LeftMouseDragged").length).toBe(1);
+  });
+
+  it("hover motion outside the viewport with no button held is not forwarded", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    const viewport = createFakeDomTarget("viewport");
+    const canvas = createFakeDomTarget("video-canvas", "canvas");
+    viewport.contains = (node: any) => node === viewport || node === canvas;
+
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+        })
+      );
+    });
+
+    const outside = createFakeDomTarget("outside");
+    const moveEv = new Event("mousemove") as any;
+    moveEv.clientX = 10;
+    moveEv.clientY = 10;
+    Object.defineProperty(moveEv, "target", { value: outside, configurable: true });
+    window.dispatchEvent(moveEv);
+
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+    expect(sentInputs.filter((i) => i.event_type === "MouseMove").length).toBe(0);
+  });
+
+  it("rebinds to a new viewport element and releases held inputs on disconnect", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    const firstViewport = createFakeDomTarget("viewport");
+    const canvas = createFakeDomTarget("video-canvas", "canvas");
+
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport: firstViewport,
+          canvas,
+        })
+      );
+    });
+
+    // Hold a button on the first viewport.
+    const downEv = new Event("mousedown") as any;
+    downEv.button = 0;
+    downEv.clientX = 10;
+    downEv.clientY = 10;
+    firstViewport.dispatchEvent(downEv);
+    expect(sentInputs.filter((i) => i.event_type === "LeftMouseDown").length).toBe(1);
+
+    // Swap in a different viewport element: the effect must re-run, releasing
+    // the held button instead of orphaning it against a stale element.
+    sentInputs = [];
+    const secondViewport = createFakeDomTarget("viewport");
+    await act(async () => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport: secondViewport,
+          canvas,
+        })
+      );
+    });
+    await waitFor(() => sentInputs.filter((i) => i.event_type === "LeftMouseUp").length === 1);
+
+    // The stale element no longer drives input; the current one does.
+    sentInputs = [];
+    const staleEv = new Event("mousedown") as any;
+    staleEv.button = 0;
+    staleEv.clientX = 20;
+    staleEv.clientY = 20;
+    firstViewport.dispatchEvent(staleEv);
+    expect(sentInputs.filter((i) => i.event_type === "LeftMouseDown").length).toBe(0);
+
+    const freshEv = new Event("mousedown") as any;
+    freshEv.button = 0;
+    freshEv.clientX = 30;
+    freshEv.clientY = 30;
+    secondViewport.dispatchEvent(freshEv);
+    expect(sentInputs.filter((i) => i.event_type === "LeftMouseDown").length).toBe(1);
+
+    // Disconnecting re-runs the effect and releases what is still held.
+    sentInputs = [];
+    await act(async () => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: false,
+          viewport: secondViewport,
+          canvas,
+        })
+      );
+    });
+    await waitFor(() => sentInputs.filter((i) => i.event_type === "LeftMouseUp").length === 1);
+
+    await act(async () => {
       root.unmount();
     });
     document.body.removeChild(container);

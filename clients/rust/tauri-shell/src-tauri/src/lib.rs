@@ -172,7 +172,13 @@ pub struct HostStatus {
     pub port: u16,
     pub pin: String,
     pub auto_approve: bool,
+    /// Name of the bootstrap client waiting for an explicit approval, if any.
+    pub pending_client: Option<String>,
 }
+
+/// The stop command must return to the webview even when the host thread is
+/// still winding an active connection down; the caller re-reads the status.
+const HOST_STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct HostRuntime {
     pub running: Arc<AtomicBool>,
@@ -181,6 +187,9 @@ pub struct HostRuntime {
     pub stop_flag: Arc<AtomicBool>,
     pub thread_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub auto_approve: Arc<AtomicBool>,
+    /// A bootstrap request parked for the operator's decision. The host side
+    /// bounds its own wait, so a never-answered prompt expires there.
+    pub pending_consent: Arc<Mutex<Option<maho_host::ConsentPrompt>>>,
 }
 
 impl Default for HostRuntime {
@@ -192,6 +201,7 @@ impl Default for HostRuntime {
             stop_flag: Arc::new(AtomicBool::new(false)),
             thread_handle: Mutex::new(None),
             auto_approve: Arc::new(AtomicBool::new(false)),
+            pending_consent: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -333,9 +343,9 @@ struct CpalDesktopBackend {
 
 impl DesktopAudioBackend for CpalDesktopBackend {
     fn devices(&mut self) -> Result<Vec<DesktopAudioDevice>, String> {
-        if self.devices.is_none() {
-            self.devices = Some(CpalAudioOutput::output_devices().map_err(|e| e.to_string())?);
-        }
+        // Re-enumerate on every listing so hot-plugged outputs appear. The
+        // retained handles are replaced together with the ids that index them.
+        self.devices = Some(CpalAudioOutput::output_devices().map_err(|e| e.to_string())?);
         self.devices
             .as_ref()
             .unwrap()
@@ -685,6 +695,13 @@ impl AppState {
             port: self.host_runtime.port,
             pin,
             auto_approve: self.host_runtime.auto_approve.load(Ordering::SeqCst),
+            pending_client: self
+                .host_runtime
+                .pending_consent
+                .lock()
+                .map_err(|e| format!("Failed to lock pending consent: {e}"))?
+                .as_ref()
+                .map(|prompt| prompt.client_name.clone()),
         })
     }
 
@@ -785,11 +802,31 @@ impl AppState {
         self.get_host_status()
     }
 
+    pub fn set_auto_approve(&self, enabled: bool) -> Result<HostStatus, String> {
+        self.host_runtime
+            .auto_approve
+            .store(enabled, Ordering::SeqCst);
+        self.get_host_status()
+    }
+
     pub fn stop_host(&self) -> Result<HostStatus, String> {
         self.host_runtime.stop_flag.store(true, Ordering::SeqCst);
         if let Ok(mut guard) = self.host_runtime.thread_handle.lock() {
             if let Some(handle) = guard.take() {
-                let _ = handle.join();
+                // The host thread may still be winding an active connection down.
+                // Wait only briefly, then hand the thread back so the IPC call
+                // returns to the webview instead of blocking it indefinitely;
+                // the caller re-reads the status to observe the final state.
+                let deadline = std::time::Instant::now() + HOST_STOP_JOIN_TIMEOUT;
+                while !handle.is_finished() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                if handle.is_finished() {
+                    let _ = handle.join();
+                } else {
+                    *guard = Some(handle);
+                    return self.get_host_status();
+                }
             }
         }
         self.host_runtime.running.store(false, Ordering::SeqCst);
@@ -1422,7 +1459,12 @@ pub mod commands {
                             let width = nv12.width as usize;
                             let height = nv12.height as usize;
                             let y_len = width * height;
-                            let uv_len = width * (height / 2);
+                            // NV12 carries one chroma row per two luma rows, rounded UP: an odd
+                            // height has a final half-height row. Truncating here drops that row
+                            // and desynchronizes the frame from both decoder adapters (which
+                            // produce div_ceil rows) and the webview parser, which then rejects
+                            // the buffer as mis-framed.
+                            let uv_len = width * height.div_ceil(2);
                             let total_bytes = 16 + y_len + uv_len + 9;
 
                             let mut buffer = Vec::with_capacity(total_bytes);
@@ -1992,12 +2034,20 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub fn set_auto_approve(
+        state: State<'_, AppState>,
+        enabled: bool,
+    ) -> Result<HostStatus, String> {
+        state.set_auto_approve(enabled)
+    }
+
+    #[tauri::command]
     pub fn stop_host(state: State<'_, AppState>) -> Result<HostStatus, String> {
         state.stop_host()
     }
 }
 
-pub use commands::{get_host_status, start_host, stop_host};
+pub use commands::{get_host_status, set_auto_approve, start_host, stop_host};
 
 // Shared by the actual connect worker and media integration tests.
 fn dispatch_media_event(
@@ -2267,7 +2317,8 @@ pub fn run() {
             commands::set_bitrate,
             commands::get_host_status,
             commands::start_host,
-            commands::stop_host
+            commands::stop_host,
+            commands::set_auto_approve
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

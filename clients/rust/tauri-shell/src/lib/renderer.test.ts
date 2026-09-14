@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseFrame } from "./renderer";
+import { createRenderer, parseFrame } from "./renderer";
 
 function createFrameBuffer(
   width: number,
@@ -7,9 +7,10 @@ function createFrameBuffer(
   tail?: { x: number; y: number; type: number } | number[]
 ): ArrayBuffer {
   const yLen = width * height;
-  const uvWidth = Math.floor(width / 2);
+  // NV12 chroma rows are strided by the full luma width (one chroma byte per
+  // luma column), exactly as the Rust IPC packer writes them.
   const uvHeight = Math.ceil(height / 2);
-  const uvLen = uvWidth * uvHeight * 2;
+  const uvLen = width * uvHeight;
   const tailLen = tail ? (Array.isArray(tail) ? tail.length : 9) : 0;
   const totalLen = 16 + yLen + uvLen + tailLen;
 
@@ -50,9 +51,7 @@ describe("parseFrame", () => {
     const width = 64;
     const height = 48;
     const yLen = 64 * 48;
-    const uvWidth = Math.floor(64 / 2);
-    const uvHeight = Math.ceil(48 / 2);
-    const uvLen = uvWidth * uvHeight * 2;
+    const uvLen = 64 * Math.ceil(48 / 2);
     const buf = createFrameBuffer(width, height);
 
     const parsed = parseFrame(buf);
@@ -61,6 +60,7 @@ describe("parseFrame", () => {
     expect(parsed?.height).toBe(height);
     expect(parsed?.y.byteLength).toBe(yLen);
     expect(parsed?.uv.byteLength).toBe(uvLen);
+    expect(parsed?.uvStride).toBe(width);
     expect(parsed?.cursor).toBeNull();
   });
 
@@ -125,23 +125,49 @@ describe("parseFrame", () => {
     expect(parseFrame(partialUv)).toBeNull();
   });
 
-  it("buffers with partial tail (< 9 bytes) yield null cursor without throwing", () => {
+  it("buffers whose size does not match the framing exactly are rejected", () => {
     const width = 16;
     const height = 16;
-    // 8 extra bytes instead of 9
-    const buf = createFrameBuffer(width, height, [1, 2, 3, 4, 5, 6, 7, 8]);
-    const parsed = parseFrame(buf);
-    expect(parsed).not.toBeNull();
-    expect(parsed?.cursor).toBeNull();
+    // 8 extra bytes instead of the 9-byte cursor record: the framing does not
+    // match, so the buffer is rejected rather than silently mis-sliced.
+    const truncatedTail = createFrameBuffer(width, height, [1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(parseFrame(truncatedTail)).toBeNull();
+
+    // Extra bytes beyond the cursor record are equally a framing mismatch.
+    const overlongTail = createFrameBuffer(
+      width,
+      height,
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    );
+    expect(parseFrame(overlongTail)).toBeNull();
+  });
+
+  it("an odd-height frame packed with a floor()'d uv plane is rejected, not mis-sliced", () => {
+    // A producer that truncates uvHeight with floor packs fewer UV bytes than
+    // this parser's ceil geometry requires. The two disagree, so the 9-byte
+    // cursor tail would land inside the UV plane if the length check were loose.
+    const width = 16;
+    const height = 15;
+    const yLen = width * height;
+    const flooredUvLen = width * Math.floor(height / 2); // 7 rows
+    const ceilUvLen = width * Math.ceil(height / 2); // 8 rows
+    expect(flooredUvLen).not.toBe(ceilUvLen);
+
+    const buf = new ArrayBuffer(16 + yLen + flooredUvLen + 9);
+    const view = new DataView(buf);
+    view.setUint32(0, width, true);
+    view.setUint32(4, height, true);
+
+    expect(parseFrame(buf)).toBeNull();
   });
 
   it("calculates UV dimensions matching NV12 half-sampling math", () => {
     const width = 65;
     const height = 47;
     const yLen = 65 * 47;
-    const uvWidth = Math.floor(65 / 2); // 32
-    const uvHeight = Math.ceil(47 / 2); // 24
-    const uvLen = uvWidth * uvHeight * 2; // 1536
+    // Chroma rows are strided by the luma width even on an odd width, so the
+    // plane is width * ceil(height / 2) bytes, not a tightly packed half-width.
+    const uvLen = 65 * Math.ceil(47 / 2); // 65 * 24
     const buf = createFrameBuffer(width, height);
 
     const parsed = parseFrame(buf);
@@ -150,6 +176,7 @@ describe("parseFrame", () => {
     expect(parsed?.height).toBe(47);
     expect(parsed?.y.byteLength).toBe(yLen);
     expect(parsed?.uv.byteLength).toBe(uvLen);
+    expect(parsed?.uvStride).toBe(65);
   });
 });
 
@@ -307,5 +334,183 @@ describe("BT.601 full-range NV12 round-trip", () => {
     expect(Math.abs(out.r - 0)).toBeLessThanOrEqual(TOLERANCE_255);
     expect(Math.abs(out.g - 0)).toBeLessThanOrEqual(TOLERANCE_255);
     expect(Math.abs(out.b - 0)).toBeLessThanOrEqual(TOLERANCE_255);
+  });
+});
+
+// Minimal WebGL2 double: records the calls the renderer makes so context-loss
+// recovery and UV row-stride handling can be asserted without a real GPU.
+interface FakeGlCall {
+  name: string;
+  args: unknown[];
+}
+
+function createFakeCanvas() {
+  const calls: FakeGlCall[] = [];
+  const listeners: Record<string, ((e: any) => void)[]> = {};
+  let contextLost = false;
+  let nextId = 1;
+
+  const record =
+    (name: string, result?: unknown) =>
+    (...args: unknown[]) => {
+      calls.push({ name, args });
+      return result;
+    };
+
+  const gl: any = {
+    VERTEX_SHADER: 0x8b31,
+    FRAGMENT_SHADER: 0x8b30,
+    COMPILE_STATUS: 0x8b81,
+    LINK_STATUS: 0x8b82,
+    ARRAY_BUFFER: 0x8892,
+    STATIC_DRAW: 0x88e4,
+    FLOAT: 0x1406,
+    TEXTURE_2D: 0x0de1,
+    TEXTURE0: 0x84c0,
+    TEXTURE1: 0x84c1,
+    TEXTURE_WRAP_S: 0x2802,
+    TEXTURE_WRAP_T: 0x2803,
+    TEXTURE_MIN_FILTER: 0x2801,
+    TEXTURE_MAG_FILTER: 0x2800,
+    CLAMP_TO_EDGE: 0x812f,
+    LINEAR: 0x2601,
+    UNPACK_ALIGNMENT: 0x0cf5,
+    UNPACK_ROW_LENGTH: 0x0cf2,
+    UNSIGNED_BYTE: 0x1401,
+    TRIANGLES: 0x0004,
+    RED: 0x1903,
+    RG: 0x8227,
+    R8: 0x8229,
+    RG8: 0x822b,
+    LUMINANCE: 0x1909,
+    LUMINANCE_ALPHA: 0x190a,
+    createShader: record("createShader", { shader: nextId++ }),
+    shaderSource: record("shaderSource"),
+    compileShader: record("compileShader"),
+    getShaderParameter: () => true,
+    getShaderInfoLog: () => "",
+    deleteShader: record("deleteShader"),
+    createProgram: record("createProgram", { program: nextId++ }),
+    attachShader: record("attachShader"),
+    detachShader: record("detachShader"),
+    linkProgram: record("linkProgram"),
+    getProgramParameter: () => true,
+    getProgramInfoLog: () => "",
+    deleteProgram: record("deleteProgram"),
+    useProgram: record("useProgram"),
+    createBuffer: () => ({ buffer: nextId++ }),
+    bindBuffer: record("bindBuffer"),
+    bufferData: record("bufferData"),
+    deleteBuffer: record("deleteBuffer"),
+    getAttribLocation: () => 0,
+    enableVertexAttribArray: record("enableVertexAttribArray"),
+    vertexAttribPointer: record("vertexAttribPointer"),
+    createTexture: () => ({ texture: nextId++ }),
+    bindTexture: record("bindTexture"),
+    deleteTexture: record("deleteTexture"),
+    texParameteri: record("texParameteri"),
+    getUniformLocation: () => ({ uniform: nextId++ }),
+    uniform1i: record("uniform1i"),
+    activeTexture: record("activeTexture"),
+    pixelStorei: record("pixelStorei"),
+    texImage2D: record("texImage2D"),
+    texSubImage2D: record("texSubImage2D"),
+    viewport: record("viewport"),
+    drawArrays: record("drawArrays"),
+    isContextLost: () => contextLost,
+  };
+
+  const canvas: any = {
+    width: 0,
+    height: 0,
+    getContext: (kind: string) => (kind === "webgl2" ? gl : null),
+    addEventListener(type: string, fn: (e: any) => void) {
+      (listeners[type] ||= []).push(fn);
+    },
+    removeEventListener(type: string, fn: (e: any) => void) {
+      listeners[type] = (listeners[type] || []).filter((l) => l !== fn);
+    },
+  };
+
+  return {
+    canvas: canvas as HTMLCanvasElement,
+    calls,
+    loseContext() {
+      contextLost = true;
+      let prevented = false;
+      for (const fn of listeners["webglcontextlost"] || []) {
+        fn({ preventDefault: () => (prevented = true) });
+      }
+      return prevented;
+    },
+    restoreContext() {
+      contextLost = false;
+      for (const fn of listeners["webglcontextrestored"] || []) fn({});
+    },
+  };
+}
+
+function nv12Buffer(width: number, height: number): ArrayBuffer {
+  const yLen = width * height;
+  const uvLen = width * Math.ceil(height / 2);
+  const buf = new ArrayBuffer(16 + yLen + uvLen);
+  const view = new DataView(buf);
+  view.setUint32(0, width, true);
+  view.setUint32(4, height, true);
+  return buf;
+}
+
+describe("WebGL context loss and restore", () => {
+  it("rebuilds the program, textures and state after webglcontextrestored", () => {
+    const fake = createFakeCanvas();
+    const renderer = createRenderer(fake.canvas);
+    expect(renderer).not.toBeNull();
+
+    renderer!.render(nv12Buffer(64, 48));
+    const drawsBeforeLoss = fake.calls.filter((c) => c.name === "drawArrays").length;
+    expect(drawsBeforeLoss).toBe(1);
+
+    const programsBeforeLoss = fake.calls.filter((c) => c.name === "createProgram").length;
+    expect(programsBeforeLoss).toBe(1);
+
+    // Context loss must be preventDefault()'d, and nothing may be drawn while lost.
+    expect(fake.loseContext()).toBe(true);
+    renderer!.render(nv12Buffer(64, 48));
+    expect(fake.calls.filter((c) => c.name === "drawArrays").length).toBe(drawsBeforeLoss);
+
+    // Restore rebuilds GL objects and rendering resumes.
+    fake.restoreContext();
+    expect(fake.calls.filter((c) => c.name === "createProgram").length).toBe(2);
+    expect(fake.calls.filter((c) => c.name === "texParameteri").length).toBe(16);
+
+    renderer!.render(nv12Buffer(64, 48));
+    expect(fake.calls.filter((c) => c.name === "drawArrays").length).toBe(drawsBeforeLoss + 1);
+    // Both plane textures are reallocated for the first frame after restore.
+    expect(fake.calls.filter((c) => c.name === "texImage2D").length).toBe(4);
+
+    renderer!.dispose();
+  });
+
+  it("does not assume tightly packed UV rows for an odd width", () => {
+    const fake = createFakeCanvas();
+    const renderer = createRenderer(fake.canvas);
+    expect(renderer).not.toBeNull();
+
+    // Odd width: uv row is floor(65 / 2) * 2 = 64 bytes wide in texels,
+    // while NV12 chroma rows are strided by the full luma width.
+    renderer!.render(nv12Buffer(65, 48));
+
+    const rowLengthCalls = fake.calls.filter(
+      (c) => c.name === "pixelStorei" && c.args[0] === 0x0cf2
+    );
+    const uvUploads = fake.calls.filter(
+      (c) => c.name === "texSubImage2D" && c.args[6] === 0x8227
+    );
+    // Either UNPACK_ROW_LENGTH is set for the strided upload, or rows are
+    // uploaded individually; a single tight full-plane upload would shear.
+    const strideHandled = rowLengthCalls.length > 0 || uvUploads.length === Math.ceil(48 / 2);
+    expect(strideHandled).toBe(true);
+
+    renderer!.dispose();
   });
 });

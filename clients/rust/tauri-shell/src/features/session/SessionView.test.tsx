@@ -601,7 +601,7 @@ describe("SessionView", () => {
   });
 
   describe("Remote input forwarding", () => {
-    it("filters out repeated keyboard events (e.repeat is true)", async () => {
+    it("forwards repeated keyboard events so held keys repeat on the host", async () => {
       const container = document.createElement("div");
       document.body.appendChild(container);
       const root = createRoot(container);
@@ -627,9 +627,9 @@ describe("SessionView", () => {
         (window as any).dispatchEvent(repeatEvent);
       }
 
-      expect(sentInputs.filter((i) => i.event_type === "KeyDown").length).toBe(0);
+      expect(sentInputs.filter((i) => i.event_type === "KeyDown").length).toBe(1);
 
-      // Non-repeated keydown should be forwarded
+      // Non-repeated keydown is forwarded too
       const normalEvent = new Event("keydown");
       Object.defineProperty(normalEvent, "key", { value: "b" });
       Object.defineProperty(normalEvent, "keyCode", { value: 66 });
@@ -643,8 +643,9 @@ describe("SessionView", () => {
       }
 
       const keyEvents = sentInputs.filter((i) => i.event_type === "KeyDown");
-      expect(keyEvents.length).toBe(1);
-      expect(keyEvents[0].key_code).toBe(66);
+      expect(keyEvents.length).toBe(2);
+      expect(keyEvents[0].key_code).toBe(65);
+      expect(keyEvents[1].key_code).toBe(66);
 
       await act(async () => {
         root.unmount();

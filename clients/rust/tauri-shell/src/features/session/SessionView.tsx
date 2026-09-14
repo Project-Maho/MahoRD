@@ -209,7 +209,7 @@ export function SessionView({
     <div
       ref={containerRef}
       id="viewport-container"
-      className="relative w-full h-full overflow-hidden bg-black select-none"
+      className="fixed inset-0 w-full h-full overflow-hidden bg-black select-none z-[1000]"
       data-phase={snapshot.phase}
     >
       {/* Floating session overlay reproducing legacy copy, ids, and controls */}

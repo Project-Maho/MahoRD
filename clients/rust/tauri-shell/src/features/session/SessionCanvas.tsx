@@ -143,6 +143,16 @@ export function SessionCanvas({
           }
 
           const frame = parseFrame(buf);
+          if (frame) {
+            // The drawing buffer follows the actual stream size; hardcoded
+            // attributes would be reapplied on every re-render and break
+            // mouse mapping and cursor projection for other resolutions.
+            const canvas = canvasRef.current;
+            if (canvas && frame.width > 0 && frame.height > 0) {
+              if (canvas.width !== frame.width) canvas.width = frame.width;
+              if (canvas.height !== frame.height) canvas.height = frame.height;
+            }
+          }
           if (frame?.cursor) {
             updateRemoteCursor(
               canvasRef.current,
@@ -187,11 +197,9 @@ export function SessionCanvas({
       <canvas
         id="video-canvas"
         ref={canvasRef}
-        width={3840}
-        height={1600}
         tabIndex={0}
         aria-label="Remote desktop video; focus to send remote input"
-        className="block w-full h-full object-contain"
+        className="pointer-events-auto"
       />
       <div
         id="remote-cursor"

@@ -56,7 +56,11 @@ export function App(props: AppProps = {}) {
     snapshot.phase === "streaming"
 
   if (isSessionActive) {
-    return <SessionView connection={connection} snapshot={snapshot} />
+    return (
+      <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-black select-none">
+        <SessionView connection={connection} snapshot={snapshot} />
+      </div>
+    )
   }
 
   return (

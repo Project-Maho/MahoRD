@@ -338,17 +338,34 @@ export function useRemoteInput(
     };
 
     // lines 1399-1409 viewport mousemove
+    // Bound at window level so a drag that leaves the canvas keeps its moves:
+    // hover motion is still scoped to the viewport, held buttons and pointer
+    // lock capture motion anywhere on the window.
+    const isWithinViewport = (target: unknown): boolean => {
+      if (!target) return false;
+      if (target === viewport || target === canvas) return true;
+      if (viewport && typeof viewport.contains === "function") {
+        return viewport.contains(target as Node);
+      }
+      return false;
+    };
+
     const handleMouseMove = (e: MouseEvent) => {
       const isLocked =
         typeof document !== "undefined" &&
         (document.pointerLockElement === canvas ||
           document.pointerLockElement === viewport ||
           Boolean(document.pointerLockElement));
+      const leftDown = heldInputsRef.current.isButtonDown("left");
+      const rightDown = heldInputsRef.current.isButtonDown("right");
+      const dragging =
+        leftDown || rightDown || heldInputsRef.current.isButtonDown("middle");
+      if (!isLocked && !dragging && !isWithinViewport(e.target)) return;
       if (isLocked) {
         sendRelativePointerEvent(e);
-      } else if (heldInputsRef.current.isButtonDown("left")) {
+      } else if (leftDown) {
         sendPointerEvent("LeftMouseDragged", e);
-      } else if (heldInputsRef.current.isButtonDown("right")) {
+      } else if (rightDown) {
         sendPointerEvent("RightMouseDragged", e);
       } else {
         sendPointerEvent("MouseMove", e);
@@ -399,7 +416,9 @@ export function useRemoteInput(
         return;
       }
       if (!isConnectedRef.current) return;
-      if (e.repeat) return;
+      // Forwarded keys belong to the remote host: Tab must not move local focus
+      // and browser/webview shortcuts must not navigate the shell.
+      e.preventDefault?.();
 
       let mod = 0;
       if (e.shiftKey) mod |= 1;
@@ -431,6 +450,7 @@ export function useRemoteInput(
       const target = e.target as { tagName?: unknown; id?: unknown } | null;
       if (!shouldForwardKeyboardEvent({ target })) return;
       if (!isConnectedRef.current) return;
+      e.preventDefault?.();
 
       let mod = 0;
       if (e.shiftKey) mod |= 1;
@@ -460,7 +480,6 @@ export function useRemoteInput(
 
     if (viewport) {
       viewport.addEventListener("mousedown", handleMouseDown as EventListener);
-      viewport.addEventListener("mousemove", handleMouseMove as EventListener);
       viewport.addEventListener("contextmenu", handleContextMenu as EventListener);
       viewport.addEventListener("wheel", handleWheel as EventListener, {
         passive: false,
@@ -476,6 +495,7 @@ export function useRemoteInput(
     }
 
     if (typeof window !== "undefined") {
+      window.addEventListener("mousemove", handleMouseMove as EventListener);
       window.addEventListener("mouseup", handleWindowMouseUp as EventListener);
       window.addEventListener("keydown", handleKeyDown as EventListener);
       window.addEventListener("keyup", handleKeyUp as EventListener);
@@ -494,10 +514,6 @@ export function useRemoteInput(
         viewport.removeEventListener(
           "mousedown",
           handleMouseDown as EventListener
-        );
-        viewport.removeEventListener(
-          "mousemove",
-          handleMouseMove as EventListener
         );
         viewport.removeEventListener(
           "contextmenu",
@@ -519,6 +535,10 @@ export function useRemoteInput(
 
       if (typeof window !== "undefined") {
         window.removeEventListener(
+          "mousemove",
+          handleMouseMove as EventListener
+        );
+        window.removeEventListener(
           "mouseup",
           handleWindowMouseUp as EventListener
         );
@@ -538,7 +558,19 @@ export function useRemoteInput(
       flushPointerMotion();
       releaseAll().catch(() => {});
     };
-  }, [releaseAll, flushPointerMotion]);
+    // The elements are resolved when the effect runs, so the dependencies must
+    // include everything that can change which elements those are: a new
+    // target/ref from the caller, or a connection transition that remounts the
+    // session DOM. Re-running teardown also releases held inputs on disconnect
+    // instead of orphaning them until unmount.
+  }, [
+    releaseAll,
+    flushPointerMotion,
+    isConnected,
+    options.viewport,
+    options.canvas,
+    options.overlay,
+  ]);
 
   const handle = useCallback(() => releaseAll(), [releaseAll]) as RemoteInputHandle;
   handle.releaseAll = releaseAll;

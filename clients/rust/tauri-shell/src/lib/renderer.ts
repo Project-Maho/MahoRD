@@ -8,6 +8,8 @@ export interface ParsedFrame {
   width: number;
   height: number;
   y: Uint8Array;
+  /** Byte stride between chroma rows; `width` bytes per NV12 interleaved row. */
+  uvStride: number;
   uv: Uint8Array;
   cursor: { x: number; y: number; visible: boolean } | null;
 }
@@ -99,12 +101,22 @@ export function parseFrame(buf: ArrayBuffer): ParsedFrame | null {
     const height = view.getUint32(4, true);
 
     const yLen = width * height;
-    const uvWidth = Math.floor(width / 2);
     const uvHeight = Math.ceil(height / 2);
-    const uvLen = uvWidth * uvHeight * 2;
+    // NV12 interleaves one chroma byte pair per 2x2 luma block, so a chroma row
+    // spans `width` bytes even when width is odd and the row only carries
+    // floor(width / 2) complete UV pairs.
+    const uvStride = width;
+    const uvLen = uvStride * uvHeight;
     const planesEnd = 16 + yLen + uvLen;
 
-    if (!Number.isSafeInteger(planesEnd) || buf.byteLength < planesEnd) {
+    // The framing must match exactly: a buffer packed with a different plane
+    // geometry (e.g. a floor()'d uv height on odd sizes) would otherwise be
+    // mis-sliced and its 9-byte cursor tail read as pixel data. Accept only the
+    // two valid sizes: planes alone, or planes plus a complete cursor record.
+    if (
+      !Number.isSafeInteger(planesEnd) ||
+      (buf.byteLength !== planesEnd && buf.byteLength !== planesEnd + 9)
+    ) {
       return null;
     }
 
@@ -112,7 +124,7 @@ export function parseFrame(buf: ArrayBuffer): ParsedFrame | null {
     const uv = new Uint8Array(buf, 16 + yLen, uvLen);
 
     let cursor: { x: number; y: number; visible: boolean } | null = null;
-    if (buf.byteLength >= planesEnd + 9) {
+    if (buf.byteLength === planesEnd + 9) {
       const cursorOffset = planesEnd;
       const cursorX = view.getFloat32(cursorOffset, true);
       const cursorY = view.getFloat32(cursorOffset + 4, true);
@@ -128,6 +140,7 @@ export function parseFrame(buf: ArrayBuffer): ParsedFrame | null {
       width,
       height,
       y,
+      uvStride,
       uv,
       cursor,
     };
@@ -169,111 +182,135 @@ export function createRenderer(canvas: HTMLCanvasElement): RendererHandle | null
   }
 
   const isWebGL2 = backend === "webgl2";
-  const vs = compileShader(gl, gl.VERTEX_SHADER, isWebGL2 ? VS_SOURCE_WEBGL2 : VS_SOURCE_WEBGL1);
-  const fs = compileShader(gl, gl.FRAGMENT_SHADER, isWebGL2 ? FS_SOURCE_WEBGL2 : FS_SOURCE_WEBGL1);
-  if (!vs || !fs) {
-    if (vs) gl.deleteShader(vs);
-    if (fs) gl.deleteShader(fs);
+
+  interface GlResources {
+    program: WebGLProgram;
+    vs: WebGLShader;
+    fs: WebGLShader;
+    posBuf: WebGLBuffer;
+    texBuf: WebGLBuffer;
+    yTexture: WebGLTexture;
+    uvTexture: WebGLTexture;
+  }
+
+  // Every GL object dies with the context, so creation lives in one function
+  // that can be re-run verbatim when a lost context is restored.
+  function initResources(
+    gl: WebGLRenderingContext | WebGL2RenderingContext
+  ): GlResources | null {
+    const vs = compileShader(gl, gl.VERTEX_SHADER, isWebGL2 ? VS_SOURCE_WEBGL2 : VS_SOURCE_WEBGL1);
+    const fs = compileShader(gl, gl.FRAGMENT_SHADER, isWebGL2 ? FS_SOURCE_WEBGL2 : FS_SOURCE_WEBGL1);
+    if (!vs || !fs) {
+      if (vs) gl.deleteShader(vs);
+      if (fs) gl.deleteShader(fs);
+      return null;
+    }
+
+    const program = gl.createProgram();
+    if (!program) {
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      return null;
+    }
+
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error("Program link error:", gl.getProgramInfoLog(program));
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      gl.deleteProgram(program);
+      return null;
+    }
+
+    gl.useProgram(program);
+
+    const posBuf = gl.createBuffer();
+    if (!posBuf) {
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      gl.deleteProgram(program);
+      return null;
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([
+        -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,
+        -1.0,  1.0,  1.0, -1.0,  1.0,  1.0,
+      ]),
+      gl.STATIC_DRAW
+    );
+
+    const posLoc = gl.getAttribLocation(program, "a_pos");
+    if (posLoc !== -1) {
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    }
+
+    const texBuf = gl.createBuffer();
+    if (!texBuf) {
+      gl.deleteBuffer(posBuf);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      gl.deleteProgram(program);
+      return null;
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, texBuf);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([
+        0.0, 1.0,  1.0, 1.0,  0.0, 0.0,
+        0.0, 0.0,  1.0, 1.0,  1.0, 0.0,
+      ]),
+      gl.STATIC_DRAW
+    );
+
+    const texLoc = gl.getAttribLocation(program, "a_texCoord");
+    if (texLoc !== -1) {
+      gl.enableVertexAttribArray(texLoc);
+      gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 0, 0);
+    }
+
+    const yTexture = gl.createTexture();
+    const uvTexture = gl.createTexture();
+    if (!yTexture || !uvTexture) {
+      if (yTexture) gl.deleteTexture(yTexture);
+      if (uvTexture) gl.deleteTexture(uvTexture);
+      gl.deleteBuffer(texBuf);
+      gl.deleteBuffer(posBuf);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      gl.deleteProgram(program);
+      return null;
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, yTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    gl.bindTexture(gl.TEXTURE_2D, uvTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    gl.uniform1i(gl.getUniformLocation(program, "u_yPlane"), 0);
+    gl.uniform1i(gl.getUniformLocation(program, "u_uvPlane"), 1);
+
+    return { program, vs, fs, posBuf, texBuf, yTexture, uvTexture };
+  }
+
+  let resources = initResources(gl);
+  if (!resources) {
     return null;
   }
-
-  const program = gl.createProgram();
-  if (!program) {
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    return null;
-  }
-
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    console.error("Program link error:", gl.getProgramInfoLog(program));
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    gl.deleteProgram(program);
-    return null;
-  }
-
-  gl.useProgram(program);
-
-  const posBuf = gl.createBuffer();
-  if (!posBuf) {
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    gl.deleteProgram(program);
-    return null;
-  }
-
-  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
-  gl.bufferData(
-    gl.ARRAY_BUFFER,
-    new Float32Array([
-      -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,
-      -1.0,  1.0,  1.0, -1.0,  1.0,  1.0,
-    ]),
-    gl.STATIC_DRAW
-  );
-
-  const posLoc = gl.getAttribLocation(program, "a_pos");
-  if (posLoc !== -1) {
-    gl.enableVertexAttribArray(posLoc);
-    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
-  }
-
-  const texBuf = gl.createBuffer();
-  if (!texBuf) {
-    gl.deleteBuffer(posBuf);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    gl.deleteProgram(program);
-    return null;
-  }
-
-  gl.bindBuffer(gl.ARRAY_BUFFER, texBuf);
-  gl.bufferData(
-    gl.ARRAY_BUFFER,
-    new Float32Array([
-      0.0, 1.0,  1.0, 1.0,  0.0, 0.0,
-      0.0, 0.0,  1.0, 1.0,  1.0, 0.0,
-    ]),
-    gl.STATIC_DRAW
-  );
-
-  const texLoc = gl.getAttribLocation(program, "a_texCoord");
-  if (texLoc !== -1) {
-    gl.enableVertexAttribArray(texLoc);
-    gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 0, 0);
-  }
-
-  const yTexture = gl.createTexture();
-  const uvTexture = gl.createTexture();
-  if (!yTexture || !uvTexture) {
-    if (yTexture) gl.deleteTexture(yTexture);
-    if (uvTexture) gl.deleteTexture(uvTexture);
-    gl.deleteBuffer(texBuf);
-    gl.deleteBuffer(posBuf);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    gl.deleteProgram(program);
-    return null;
-  }
-
-  gl.bindTexture(gl.TEXTURE_2D, yTexture);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-
-  gl.bindTexture(gl.TEXTURE_2D, uvTexture);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-
-  gl.uniform1i(gl.getUniformLocation(program, "u_yPlane"), 0);
-  gl.uniform1i(gl.getUniformLocation(program, "u_uvPlane"), 1);
 
   let disposed = false;
   let lastRenderWidth = 0;
@@ -281,11 +318,32 @@ export function createRenderer(canvas: HTMLCanvasElement): RendererHandle | null
 
   const onContextLost = (e: Event) => {
     e.preventDefault();
+    // The driver already destroyed every GL object; drop our handles so nothing
+    // is used or deleted after the loss.
+    resources = null;
+    lastRenderWidth = 0;
+    lastRenderHeight = 0;
+  };
+  const onContextRestored = () => {
+    if (disposed || !gl) return;
+    // Rebuild program, buffers, textures and sampler state; zeroed dimensions
+    // force the next frame to reallocate both plane textures.
+    resources = initResources(gl);
+    lastRenderWidth = 0;
+    lastRenderHeight = 0;
   };
   canvas.addEventListener("webglcontextlost", onContextLost, false);
+  canvas.addEventListener("webglcontextrestored", onContextRestored, false);
 
-  function renderNv12(width: number, height: number, yData: Uint8Array, uvData: Uint8Array): void {
-    if (disposed || !gl || gl.isContextLost() || width <= 0 || height <= 0) return;
+  function renderNv12(
+    width: number,
+    height: number,
+    yData: Uint8Array,
+    uvData: Uint8Array,
+    uvStride: number
+  ): void {
+    if (disposed || !gl || !resources || gl.isContextLost() || width <= 0 || height <= 0) return;
+    const { yTexture, uvTexture } = resources;
 
     const uvWidth = Math.floor(width / 2);
     const uvHeight = Math.ceil(height / 2);
@@ -329,11 +387,35 @@ export function createRenderer(canvas: HTMLCanvasElement): RendererHandle | null
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, uvTexture);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    if (isWebGL2) {
+    const uvFormat = isWebGL2 ? (gl as WebGL2RenderingContext).RG : gl.LUMINANCE_ALPHA;
+    // The chroma texture is floor(width / 2) RG texels (i.e. `uvRowBytes`) wide,
+    // but a chroma row is strided by `uvStride` bytes. The two differ on odd
+    // widths, so a tightly packed upload would shear every row.
+    const uvRowBytes = uvWidth * 2;
+    if (uvStride <= uvRowBytes) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, uvFormat, gl.UNSIGNED_BYTE, uvData);
+    } else if (isWebGL2 && uvStride % 2 === 0) {
       const gl2 = gl as WebGL2RenderingContext;
-      gl2.texSubImage2D(gl2.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, gl2.RG, gl2.UNSIGNED_BYTE, uvData);
+      gl2.pixelStorei(gl2.UNPACK_ROW_LENGTH, uvStride / 2);
+      gl2.texSubImage2D(gl2.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, uvFormat, gl2.UNSIGNED_BYTE, uvData);
+      gl2.pixelStorei(gl2.UNPACK_ROW_LENGTH, 0);
     } else {
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, uvData);
+      // An odd byte stride cannot be expressed through UNPACK_ROW_LENGTH
+      // (which counts texels), so upload one row at a time.
+      for (let row = 0; row < uvHeight; row++) {
+        const start = row * uvStride;
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          0,
+          row,
+          uvWidth,
+          1,
+          uvFormat,
+          gl.UNSIGNED_BYTE,
+          uvData.subarray(start, start + uvRowBytes)
+        );
+      }
     }
 
     gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -341,7 +423,10 @@ export function createRenderer(canvas: HTMLCanvasElement): RendererHandle | null
 
   function cleanup(): void {
     canvas.removeEventListener("webglcontextlost", onContextLost, false);
-    if (!gl) return;
+    canvas.removeEventListener("webglcontextrestored", onContextRestored, false);
+    if (!gl || !resources) return;
+    const { program, vs, fs, yTexture, uvTexture, posBuf, texBuf } = resources;
+    resources = null;
     try {
       gl.deleteTexture(yTexture);
       gl.deleteTexture(uvTexture);
@@ -367,7 +452,7 @@ export function createRenderer(canvas: HTMLCanvasElement): RendererHandle | null
       if (disposed) return;
       const frame = parseFrame(buf);
       if (!frame) return;
-      renderNv12(frame.width, frame.height, frame.y, frame.uv);
+      renderNv12(frame.width, frame.height, frame.y, frame.uv, frame.uvStride);
     },
     dispose(): void {
       if (disposed) return;

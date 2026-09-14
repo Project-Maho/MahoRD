@@ -177,7 +177,9 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
 
   function cleanup(retry = false): Promise<void> {
     if (pendingCleanup) return pendingCleanup;
-    if (!state.busy) return Promise.resolve();
+    // A retry after a failed teardown has already released `busy`, but native
+    // disconnect still has to be re-run, so `cleanupError` keeps the path open.
+    if (!state.busy && !(retry && state.cleanupError)) return Promise.resolve();
     const connectToSettle = pendingConnect;
     ++state.generation;
     state.phase = 'disconnecting';
@@ -201,12 +203,14 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
       } catch (error) {
         errors.push(errorText(error));
       }
+      // Both branches release the session: `cleanupError` is a surfaced,
+      // dismissible message, never a latched state that blocks connect().
+      state.busy = false;
+      state.host = null;
       if (errors.length) {
         state.cleanupError = errors.join('\n');
         state.phase = 'error';
       } else {
-        state.busy = false;
-        state.host = null;
         state.phase = state.error ? 'error' : 'idle';
       }
       pendingCleanup = null;

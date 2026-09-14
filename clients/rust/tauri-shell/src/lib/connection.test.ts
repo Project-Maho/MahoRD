@@ -279,8 +279,10 @@ test("connect rejection cleans up, retaining original error and retryable cleanu
   expect(state.error).toBe("<unsafe> pairing denied");
   expect(state.cleanupError).toBe("cleanup failed");
   expect(state.phase).toBe("error");
-  expect(state.busy).toBe(true);
-  expect(await f.connection.connect({ host: "other" })).toBe(false);
+  // A failed teardown surfaces cleanupError but must not latch the client:
+  // busy/host are released on both branches so reconnect stays possible.
+  expect(state.busy).toBe(false);
+  expect(state.host).toBe(null);
   const retried = f.next("disconnect");
   const retry = f.connection.retryCleanup();
   expect(f.connection.disconnect()).toBe(retry);
@@ -294,7 +296,24 @@ test("connect rejection cleans up, retaining original error and retryable cleanu
   expect(f.calls.map((c) => c.command)).toEqual(["connect", "disconnect", "disconnect"]);
 });
 
-test("release failure is visible, does not prevent teardown, and holds lock until retry", async () => {
+test("a failed cleanup never wedges the client: reconnect is accepted without a retry", async () => {
+  const f = fixture();
+  const arrival = f.next("connect"),
+    teardown = f.next("disconnect");
+  const connecting = f.connection.connect({ host: "host" });
+  (await arrival).reject(new Error("pairing denied"));
+  (await teardown).reject(new Error("cleanup failed"));
+  expect(await connecting).toBe(true);
+  expect(f.connection.snapshot().cleanupError).toBe("cleanup failed");
+  expect(f.connection.snapshot().busy).toBe(false);
+  const fresh = await active(f);
+  expect(f.connection.snapshot().phase).toBe("waiting-video");
+  expect(f.connection.snapshot().cleanupError).toBe(null);
+  expect(f.connection.isCurrent(fresh)).toBe(true);
+  expect(f.calls.map((c) => c.command)).toEqual(["connect", "disconnect", "connect"]);
+});
+
+test("release failure is visible, does not prevent teardown, and is retryable without blocking reconnect", async () => {
   let releases = 0;
   const f = fixture({
     releaseInputs: async () => {
@@ -308,13 +327,14 @@ test("release failure is visible, does not prevent teardown, and holds lock unti
   (await arrival).resolve(undefined);
   await done;
   expect(f.connection.snapshot().cleanupError).toBe("release failed");
-  expect(f.connection.snapshot().busy).toBe(true);
+  expect(f.connection.snapshot().busy).toBe(false);
   const retryArrival = f.next("disconnect");
   const retry = f.connection.retryCleanup();
   (await retryArrival).resolve(undefined);
   await retry;
   expect(releases).toBe(1);
   expect(f.connection.snapshot().busy).toBe(false);
+  expect(f.connection.snapshot().cleanupError).toBe(null);
 });
 
 test("stats deduplicate, clear unavailable values, and failure does not disconnect", async () => {
