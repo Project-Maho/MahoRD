@@ -357,21 +357,29 @@ impl PairingStore {
             StoreBackend::File(path) => {
                 if !path.exists() {
                     // Safe legacy client migration: if client-pairings.json does not exist
-                    // and pairing-keys.json is present, migrate valid entries into client-pairings.json.
-                    // The legacy file is preserved intact and never overwritten or deleted.
-                    let legacy_path = path.with_file_name("pairing-keys.json");
-                    if legacy_path.exists() && legacy_path != *path {
-                        let legacy_records = Self::read_file_records(&legacy_path)?;
-                        if !legacy_records.is_empty() {
-                            self.write_records(path, &legacy_records)?;
-                            return Ok(legacy_records);
+                    // and a legacy store is present, migrate valid entries into client-pairings.json.
+                    // The legacy files are preserved intact and never overwritten or deleted.
+                    for legacy_path in Self::legacy_migration_candidates(path) {
+                        if legacy_path.exists() && legacy_path != *path {
+                            let legacy_records = Self::read_file_records(&legacy_path)?;
+                            if !legacy_records.is_empty() {
+                                self.write_records(path, &legacy_records)?;
+                                return Ok(legacy_records);
+                            }
                         }
                     }
                 }
                 Self::read_file_records(path)
             }
             #[cfg(any(target_os = "ios", target_os = "macos"))]
-            StoreBackend::Keychain(service) => load_all_keychain(service),
+            StoreBackend::Keychain(service) => {
+                let records = load_all_keychain(service)?;
+                if records.is_empty() {
+                    migrate_legacy_keychain(service)
+                } else {
+                    Ok(records)
+                }
+            }
             StoreBackend::Ephemeral(records) => {
                 let guard = records
                     .lock()
@@ -381,14 +389,43 @@ impl PairingStore {
         }
     }
 
+    /// Legacy store locations, searched in order, when the current file is absent:
+    /// the pre-rename file beside it, then both names inside the pre-rebrand
+    /// `EclipticRD` application-data directory.
+    fn legacy_migration_candidates(path: &Path) -> Vec<PathBuf> {
+        let mut candidates = vec![path.with_file_name("pairing-keys.json")];
+        if let Some(parent) = path.parent() {
+            let legacy_dir = parent.with_file_name("EclipticRD");
+            if legacy_dir != parent {
+                if let Some(file_name) = path.file_name() {
+                    candidates.push(legacy_dir.join(file_name));
+                }
+                candidates.push(legacy_dir.join("pairing-keys.json"));
+            }
+        }
+        candidates
+    }
+
     fn read_file_records(path: &Path) -> Result<Vec<PairingRecord>, PairingStoreError> {
         match fs::read(path) {
             Ok(bytes) => {
                 let records: Vec<PairingRecord> = serde_json::from_slice(&bytes)?;
-                for record in &records {
-                    record.key_array()?;
-                }
-                Ok(records)
+                // A single malformed record must not brick the whole store:
+                // skip it and keep every valid pairing loadable.
+                Ok(records
+                    .into_iter()
+                    .filter(|record| match record.key_array() {
+                        Ok(_) => true,
+                        Err(error) => {
+                            tracing::warn!(
+                                pairing_id = %record.id,
+                                %error,
+                                "skipping malformed pairing record"
+                            );
+                            false
+                        }
+                    })
+                    .collect())
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(error) => Err(error.into()),
@@ -398,7 +435,12 @@ impl PairingStore {
     pub fn load(&self, id: &str) -> Result<Option<PairingRecord>, PairingStoreError> {
         match &self.backend {
             #[cfg(any(target_os = "ios", target_os = "macos"))]
-            StoreBackend::Keychain(service) => load_keychain(service, id),
+            StoreBackend::Keychain(service) => match load_keychain(service, id)? {
+                Some(record) => Ok(Some(record)),
+                // Nothing under the current service: load_all runs the legacy
+                // migration, after which the record may exist locally.
+                None => Ok(self.load_all()?.into_iter().find(|record| record.id == id)),
+            },
             _ => Ok(self.load_all()?.into_iter().find(|record| record.id == id)),
         }
     }
@@ -784,6 +826,59 @@ fn load_keychain(service: &str, id: &str) -> Result<Option<PairingRecord>, Pairi
 
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 fn load_all_keychain(service: &str) -> Result<Vec<PairingRecord>, PairingStoreError> {
+    load_keychain_matching(service, None)
+}
+
+/// Pre-rebrand Keychain service and account prefixes, migrated on first load.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+const LEGACY_KEYCHAIN_SERVICE: &str = "com.eclipticrd.ios.pairing";
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+const LEGACY_KEYCHAIN_ACCOUNT_PREFIXES: [&str; 2] = ["erd_pairing_", "maho_pairing_"];
+
+/// Imports pairings from the legacy EclipticRD Keychain service into `service`.
+/// The legacy items are only read here and are left in place.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn migrate_legacy_keychain(service: &str) -> Result<Vec<PairingRecord>, PairingStoreError> {
+    if service == LEGACY_KEYCHAIN_SERVICE {
+        return Ok(Vec::new());
+    }
+    let legacy = load_keychain_matching(
+        LEGACY_KEYCHAIN_SERVICE,
+        Some(&LEGACY_KEYCHAIN_ACCOUNT_PREFIXES),
+    )?;
+    for record in &legacy {
+        save_keychain(service, record)?;
+    }
+    Ok(legacy)
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn cf_string_to_string(value: security_ffi::CFStringRef) -> Option<String> {
+    unsafe {
+        let length = security_ffi::CFStringGetLength(value);
+        if length <= 0 {
+            return None;
+        }
+        let mut buffer = vec![0_u8; length as usize * 4 + 1];
+        let copied = security_ffi::CFStringGetCString(
+            value,
+            buffer.as_mut_ptr(),
+            buffer.len() as security_ffi::CFIndex,
+            security_ffi::K_CF_STRING_ENCODING_UTF8,
+        );
+        if copied == 0 {
+            return None;
+        }
+        let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(0);
+        String::from_utf8(buffer[..end].to_vec()).ok()
+    }
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn load_keychain_matching(
+    service: &str,
+    account_prefixes: Option<&[&str]>,
+) -> Result<Vec<PairingRecord>, PairingStoreError> {
     unsafe {
         let service_cf = make_cf_string(service)
             .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate service CFString".into()))?;
@@ -815,6 +910,23 @@ fn load_all_keychain(service: &str) -> Result<Vec<PairingRecord>, PairingStoreEr
         for i in 0..count {
             let dict = security_ffi::CFArrayGetValueAtIndex(wrapper.0, i);
             if !dict.is_null() {
+                if let Some(prefixes) = account_prefixes {
+                    let account_val = security_ffi::CFDictionaryGetValue(
+                        dict,
+                        security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                    );
+                    let account = if account_val.is_null() {
+                        None
+                    } else {
+                        cf_string_to_string(account_val)
+                    };
+                    let matches = account.is_some_and(|account| {
+                        prefixes.iter().any(|prefix| account.starts_with(prefix))
+                    });
+                    if !matches {
+                        continue;
+                    }
+                }
                 let data_val = security_ffi::CFDictionaryGetValue(dict, security_ffi::kSecValueData as security_ffi::CFTypeRef);
                 if !data_val.is_null() {
                     let bytes = cf_data_to_vec(data_val);
@@ -1012,6 +1124,66 @@ mod tests {
         // Legacy file must remain untouched
         let remaining_legacy = fs::read(&legacy_file).unwrap();
         assert_eq!(remaining_legacy, legacy_bytes);
+    }
+
+    #[test]
+    fn test_legacy_eclipticrd_directory_migration() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let legacy_dir = temp_dir.path().join("EclipticRD");
+        let current_dir = temp_dir.path().join("MahoRD");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_file = legacy_dir.join("pairing-keys.json");
+        let client_file = current_dir.join("client-pairings.json");
+
+        let legacy_json = serde_json::json!([
+            {
+                "id": "erd-id-7",
+                "name": "EclipticHost",
+                "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+                "addedAt": 0.0
+            }
+        ]);
+        let legacy_bytes = serde_json::to_vec(&legacy_json).unwrap();
+        fs::write(&legacy_file, &legacy_bytes).unwrap();
+
+        let store = PairingStore::new(&client_file);
+        let records = store.load_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "erd-id-7");
+        assert!(client_file.exists());
+        assert_eq!(
+            fs::read(&legacy_file).unwrap(),
+            legacy_bytes,
+            "legacy EclipticRD file must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_malformed_record_is_skipped_not_fatal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client_file = temp_dir.path().join("client-pairings.json");
+        let json = serde_json::json!([
+            {
+                "id": "broken",
+                "name": "BrokenHost",
+                "key": "AQEB",
+                "addedAt": 0.0
+            },
+            {
+                "id": "intact",
+                "name": "IntactHost",
+                "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+                "addedAt": 0.0
+            }
+        ]);
+        fs::write(&client_file, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        let store = PairingStore::new(&client_file);
+        let records = store.load_all().unwrap();
+        assert_eq!(records.len(), 1, "only the valid record must load");
+        assert_eq!(records[0].id, "intact");
+        assert_eq!(store.load("intact").unwrap().map(|r| r.id), Some("intact".to_owned()));
+        assert_eq!(store.load("broken").unwrap(), None);
     }
 
     #[test]

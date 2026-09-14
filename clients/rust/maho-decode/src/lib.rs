@@ -200,6 +200,8 @@ mod ffmpeg_impl {
     pub struct HevcDecoder {
         decoder: codec::decoder::Video,
         scaler: Option<scaling::Context>,
+        // Owns the buffer AVCodecContext::extradata points at for the decoder's lifetime.
+        #[allow(dead_code)]
         extradata: Vec<u8>,
         acceleration: HardwareAcceleration,
         hw_device: *mut ffmpeg::ffi::AVBufferRef,
@@ -405,7 +407,6 @@ mod ffmpeg_impl {
                 (*context).extradata = ptr::null_mut();
                 (*context).extradata_size = 0;
             }
-            let _ = self.extradata.len();
         }
     }
 
@@ -420,7 +421,10 @@ mod ffmpeg_impl {
         Ok(software)
     }
 
-    fn copy_nv12(frame: &frame::Video, timestamp_ms: i64) -> Result<Nv12Frame, DecodeError> {
+    pub(super) fn copy_nv12(
+        frame: &frame::Video,
+        timestamp_ms: i64,
+    ) -> Result<Nv12Frame, DecodeError> {
         if frame.format() != Pixel::NV12 || frame.planes() < 2 {
             return Err(DecodeError::UnsupportedFrame);
         }
@@ -428,6 +432,13 @@ mod ffmpeg_impl {
         let height = frame.height() as usize;
         let y_stride = frame.stride(0);
         let uv_stride = frame.stride(1);
+        if y_stride < width
+            || uv_stride < width
+            || frame.data(0).len() < y_stride * height
+            || frame.data(1).len() < uv_stride * height.div_ceil(2)
+        {
+            return Err(DecodeError::UnsupportedFrame);
+        }
         let mut y_plane = vec![0_u8; width * height];
         let mut uv_plane = vec![0_u8; width * height.div_ceil(2)];
         for row in 0..height {
@@ -589,6 +600,22 @@ mod tests {
             count <= 4,
             "decoded planes, output list and NAL metadata must not include a copied input Vec"
         );
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn copy_nv12_rejects_undersized_chroma_stride() {
+        use ffmpeg_next::{format::Pixel, frame};
+        // Given an NV12 frame whose chroma rows are narrower than the frame width.
+        let mut frame = frame::Video::new(Pixel::NV12, 16, 16);
+        assert!(crate::ffmpeg_impl::copy_nv12(&frame, 0).is_ok());
+        unsafe {
+            (*frame.as_mut_ptr()).linesize[1] = 8;
+        }
+        // When the FFmpeg path copies it.
+        let result = crate::ffmpeg_impl::copy_nv12(&frame, 0);
+        // Then the frame is rejected instead of panicking the decode thread.
+        assert!(matches!(result, Err(DecodeError::UnsupportedFrame)));
     }
 
     #[test]

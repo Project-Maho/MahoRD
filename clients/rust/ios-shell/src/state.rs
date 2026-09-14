@@ -267,24 +267,34 @@ impl AppState {
         coord.in_flight_generation = Some(generation);
         drop(coord);
 
-        let reap_result = self.execute_teardown(generation, target_state, terminal_reason);
+        let (reap_result, applied) = match self.execute_teardown(generation, target_state, terminal_reason) {
+            Ok(applied) => (Ok(()), applied),
+            Err(e) => (Err(e), true),
+        };
 
         // Record completion and wake up all waiting threads:
         let mut coord = lock.lock().map_err(|e| format!("Teardown lock poisoned: {e}"))?;
         coord.in_flight_generation = None;
-        coord.done_generation = Some(generation);
-        coord.last_result = Some(reap_result.clone());
+        // Only claim the completion slot when this teardown actually applied to the current
+        // generation: a late worker from a stale generation must never overwrite the record of a
+        // newer generation, otherwise the idempotency check above would re-run its teardown.
+        if applied {
+            coord.done_generation = Some(generation);
+            coord.last_result = Some(reap_result.clone());
+        }
         cvar.notify_all();
 
         reap_result
     }
 
+    /// Returns `Ok(true)` when the teardown applied to the current generation, `Ok(false)` when the
+    /// event was stale (a newer generation is live) and nothing was torn down.
     fn execute_teardown(
         &self,
         generation: u64,
         target_state: ConnectionState,
         terminal_reason: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let (sess, tcp_rt, handles) = {
             let mut inner = match self.inner.lock() {
                 Ok(g) => g,
@@ -298,19 +308,19 @@ impl AppState {
                     event_generation = generation,
                     "Ignoring stale terminal event from previous generation"
                 );
-                return Ok(());
+                return Ok(false);
             }
 
             // If already fully torn down to Idle, nothing to do.
             // Do not let late errors restore terminal state after idle!
             if inner.state == ConnectionState::Idle && inner.session.is_none() && inner.worker_handles.is_empty() {
-                return Ok(());
+                return Ok(true);
             }
 
             // Preserve primary terminal reason: if already Disconnected (e.g. from TCP remote close),
             // secondary worker shutdowns (e.g. media receiver unblocking) must not overwrite it.
             if inner.state == ConnectionState::Disconnected && target_state == ConnectionState::Error {
-                return Ok(());
+                return Ok(true);
             }
 
             // Propagate terminal reason
@@ -400,7 +410,7 @@ impl AppState {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     pub async fn list_discovered_hosts(&self) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
@@ -1072,7 +1082,13 @@ impl AppState {
                     },
                 );
             })
-            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Runtime, format!("Failed to spawn supervisor worker: {e}")))?;
+            .map_err(|e| {
+                let err_msg = format!("Failed to spawn supervisor worker: {e}");
+                // The TCP runtime and session are already stored in `inner`; tear them down so the
+                // failed connect does not leak the runtime or leave the session stuck in Ready.
+                let _ = self.handle_terminal_shutdown(current_generation, ConnectionState::Error, Some(err_msg.clone()));
+                IpcError::connection_failed(IpcErrorStage::Runtime, err_msg)
+            })?;
 
         {
             let mut inner = self

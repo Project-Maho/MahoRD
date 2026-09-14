@@ -132,30 +132,34 @@ impl<C: PlatformClipboard> ClipboardMonitor<C> {
     }
 
     pub fn apply_remote(&self, text: &str) -> Result<(), ClipboardError> {
-        let change_count = self.clipboard.set_text(text)?;
-        self.synchronizer
+        // Hold the synchronizer lock across the write and the record so the
+        // polling worker cannot observe the remote text before it is recorded,
+        // nor classify a pre-write snapshot against the post-write state.
+        let mut state = self
+            .synchronizer
             .lock()
-            .map_err(|_| ClipboardError::Unavailable("clipboard state lock poisoned".to_owned()))?
-            .record_remote_write(text, change_count);
+            .map_err(|_| ClipboardError::Unavailable("clipboard state lock poisoned".to_owned()))?;
+        let change_count = self.clipboard.set_text(text)?;
+        state.record_remote_write(text, change_count);
         Ok(())
     }
 
     pub fn poll_once(&self) -> Result<ClipboardDecision, ClipboardError> {
+        let mut state = self
+            .synchronizer
+            .lock()
+            .map_err(|_| ClipboardError::Unavailable("clipboard state lock poisoned".to_owned()))?;
         let snapshot = self.clipboard.snapshot()?;
         let type_refs = snapshot
             .types
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        Ok(self
-            .synchronizer
-            .lock()
-            .map_err(|_| ClipboardError::Unavailable("clipboard state lock poisoned".to_owned()))?
-            .poll(
-                snapshot.change_count,
-                snapshot.text.as_deref().unwrap_or_default(),
-                &type_refs,
-            ))
+        Ok(state.poll(
+            snapshot.change_count,
+            snapshot.text.as_deref().unwrap_or_default(),
+            &type_refs,
+        ))
     }
 
     pub fn start(
@@ -173,20 +177,20 @@ impl<C: PlatformClipboard> ClipboardMonitor<C> {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            let Ok(snapshot) = clipboard.snapshot() else {
-                continue;
-            };
-            let type_refs = snapshot
-                .types
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>();
-            let decision = synchronizer.lock().ok().map(|mut state| {
-                state.poll(
+            // Snapshot and classify under one lock acquisition, then release it
+            // before the callback so apply_remote cannot interleave between them.
+            let decision = synchronizer.lock().ok().and_then(|mut state| {
+                let snapshot = clipboard.snapshot().ok()?;
+                let type_refs = snapshot
+                    .types
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                Some(state.poll(
                     snapshot.change_count,
                     snapshot.text.as_deref().unwrap_or_default(),
                     &type_refs,
-                )
+                ))
             });
             if let Some(ClipboardDecision::Send(text)) = decision {
                 on_local_change(text);

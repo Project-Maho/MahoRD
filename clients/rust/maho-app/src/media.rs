@@ -103,13 +103,25 @@ impl FrameAssembler {
             .frames
             .get(&frame_id)
             .map_or(started, |assembly| assembly.started.min(started));
-        let assembly = FrameAssembly {
-            header,
-            chunks,
-            started,
-            timestamp_ms,
-        };
-        self.frames.insert(frame_id, assembly);
+        // A retransmitted header must not discard chunks already collected for
+        // this frame: replacing the assembly with an empty map means a frame
+        // whose header arrives twice mid-stream can never complete.
+        if let Some(existing) = self.frames.get_mut(&frame_id) {
+            existing.started = started;
+            existing.timestamp_ms = timestamp_ms;
+            existing.header = header;
+            for (index, data) in chunks {
+                existing.chunks.entry(index).or_insert(data);
+            }
+        } else {
+            let assembly = FrameAssembly {
+                header,
+                chunks,
+                started,
+                timestamp_ms,
+            };
+            self.frames.insert(frame_id, assembly);
+        }
         let completed = self.finish_if_complete(frame_id, now)?;
         if self.frames.len() > MAX_INCOMPLETE_FRAMES {
             let oldest = self
