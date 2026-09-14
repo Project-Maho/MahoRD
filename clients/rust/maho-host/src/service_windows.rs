@@ -11,6 +11,10 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Security::*;
 use windows::Win32::System::Environment::*;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+    TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 use windows::Win32::System::Services::*;
 use windows::Win32::System::StationsAndDesktops::*;
@@ -117,6 +121,16 @@ impl Drop for ServiceHandle {
         // SAFETY: this wrapper exclusively owns a successfully opened SCM handle.
         if let Err(error) = unsafe { CloseServiceHandle(self.0) } {
             tracing::warn!(%error, "CloseServiceHandle failed");
+        }
+    }
+}
+
+struct ProcessHandle(HANDLE);
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            // SAFETY: the handle came from a Win32 open/snapshot call and is closed once.
+            unsafe { let _ = CloseHandle(self.0); }
         }
     }
 }
@@ -360,6 +374,9 @@ extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
         }
         return;
     }
+    if crate::windows_session::reap_orphans_on_startup() {
+        reap_previous_workers();
+    }
     let mut worker = None;
     while !STOP_REQUESTED.load(Ordering::Acquire) {
         if let Err(error) = supervise(&mut worker) {
@@ -473,6 +490,53 @@ fn session_desktop_kind(_session_id: u32) -> Option<DesktopKind> {
         return None;
     }
     Some(crate::windows_session::desktop_kind(name))
+}
+
+/// Terminates `--session-worker` processes left behind by a previous instance.
+///
+/// After the SCM restarts a crashed service the old worker keeps running and
+/// keeps the listening ports, while the fresh supervisor holds no handle to it
+/// and can never move it to another desktop. Clearing them restores the host's
+/// capability, not just its process.
+fn reap_previous_workers() {
+    let current = std::process::id();
+    // SAFETY: the snapshot handle is closed below and every call checks its result.
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return;
+        };
+        let snapshot = ProcessHandle(snapshot);
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if Process32FirstW(snapshot.0, &mut entry).is_err() {
+            return;
+        }
+        loop {
+            let end = entry
+                .szExeFile
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+            if name.eq_ignore_ascii_case("maho-host.exe")
+                && entry.th32ProcessID != current
+                && entry.th32ParentProcessID != current
+            {
+                if let Ok(handle) =
+                    OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID)
+                {
+                    let handle = ProcessHandle(handle);
+                    let _ = TerminateProcess(handle.0, 0);
+                    service_log(&format!("reaped orphan worker pid={}", entry.th32ProcessID));
+                }
+            }
+            if Process32NextW(snapshot.0, &mut entry).is_err() {
+                break;
+            }
+        }
+    }
 }
 
 pub fn console_state() -> io::Result<ConsoleState> {

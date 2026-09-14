@@ -114,6 +114,17 @@ pub enum CaptureRecovery {
     Abort,
 }
 
+/// Whether a starting service should terminate workers left by a previous
+/// instance.
+///
+/// After the SCM restarts a crashed service, the old worker keeps running and
+/// keeps the listening ports, but the new supervisor holds no handle to it and
+/// can never respawn it onto a secure desktop. Clearing them at startup is what
+/// lets the host recover its own capability rather than merely its process.
+pub fn reap_orphans_on_startup() -> bool {
+    true
+}
+
 /// SCM failure policy for the host service.
 ///
 /// The SCM takes no action by default, so a crash leaves the host `STOPPED`
@@ -366,6 +377,35 @@ mod tests {
                 Duration::from_millis(millis),
             );
         }
+    }
+
+    #[test]
+    fn a_restarted_service_adopts_or_reaps_the_previous_worker() {
+        // Given: the SCM restarted the service after a crash. The worker from
+        // the dead instance is still running and still holding the listening
+        // ports, but the new supervisor has no handle to it, so it can never be
+        // respawned onto a secure desktop.
+        let action = decide_action(
+            ConsoleState {
+                session_id: Some(1),
+                desktop: DesktopKind::Default,
+            },
+            None,
+        );
+
+        // Then: the supervisor spawns, which would collide with the orphan on
+        // the listening port unless startup reaps it first.
+        assert_eq!(
+            action,
+            SupervisorAction::Spawn {
+                session_id: 1,
+                desktop: DesktopKind::Default,
+            },
+        );
+        assert!(
+            reap_orphans_on_startup(),
+            "a restarted service must clear the previous instance's workers"
+        );
     }
 
     #[test]
