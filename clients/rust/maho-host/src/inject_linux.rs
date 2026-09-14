@@ -32,6 +32,10 @@ pub struct OutputGeometry {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Signed origin of the logical desktop. Outputs left of or above the
+    /// primary display make this negative.
+    pub desktop_x: i32,
+    pub desktop_y: i32,
     pub desktop_width: u32,
     pub desktop_height: u32,
 }
@@ -43,6 +47,8 @@ impl OutputGeometry {
             y: 0,
             width,
             height,
+            desktop_x: 0,
+            desktop_y: 0,
             desktop_width: width,
             desktop_height: height,
         }
@@ -59,9 +65,11 @@ pub fn map_normalized_to_output(
     // Protocol convention inverts Y (1.0 - y) for legacy macOS compatibility.
     // Invert it back so (0,0) is top-left on Linux.
     let y = (1.0 - normalized_y).clamp(0.0, 1.0) * geometry.height.saturating_sub(1) as f32;
+    // The uinput absolute axes are unsigned, so shift by the signed desktop
+    // origin instead of clamping negative multi-monitor offsets to zero.
     (
-        (i64::from(geometry.x) + x.round() as i64).max(0) as u32,
-        (i64::from(geometry.y) + y.round() as i64).max(0) as u32,
+        (i64::from(geometry.x) - i64::from(geometry.desktop_x) + x.round() as i64).max(0) as u32,
+        (i64::from(geometry.y) - i64::from(geometry.desktop_y) + y.round() as i64).max(0) as u32,
     )
 }
 
@@ -608,6 +616,8 @@ mod tests {
             y: 100,
             width: 2560,
             height: 1440,
+            desktop_x: 0,
+            desktop_y: 0,
             desktop_width: 4480,
             desktop_height: 1540,
         };
@@ -622,6 +632,26 @@ mod tests {
         }
         assert_eq!(map_normalized_to_output(0.0, 0.0, geometry), (1920, 1539));
         assert_eq!(map_normalized_to_output(-2.0, 2.0, geometry), (1920, 100));
+    }
+
+    #[test]
+    fn maps_outputs_left_of_and_above_the_primary_display() {
+        // 1920x1080 output placed left of and above a 2560x1440 primary.
+        let geometry = OutputGeometry {
+            x: -1920,
+            y: -1080,
+            width: 1920,
+            height: 1080,
+            desktop_x: -1920,
+            desktop_y: -1080,
+            desktop_width: 4480,
+            desktop_height: 2520,
+        };
+        // Top-left of that output maps to the desktop origin, not a clamp.
+        assert_eq!(map_normalized_to_output(0.0, 1.0, geometry), (0, 0));
+        // Bottom-right stays inside the same output instead of collapsing to x=0.
+        assert_eq!(map_normalized_to_output(1.0, 0.0, geometry), (1919, 1079));
+        assert_eq!(map_normalized_to_output(0.5, 0.5, geometry), (960, 540));
     }
 
     #[test]

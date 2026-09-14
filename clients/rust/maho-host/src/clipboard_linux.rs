@@ -26,6 +26,9 @@ use thiserror::Error;
 pub const MAX_CLIPBOARD_BYTES: usize = 4 * 1024;
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub const DEFAULT_ECHO_PERIOD: Duration = Duration::from_secs(2);
+/// `wl-paste`/`xclip` block until the selection owner answers. A frozen owner
+/// must not hold the host session thread, so every read is bounded.
+const READ_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_TYPE_LIST_BYTES: usize = 64 * 1024;
 const CONCEALED_TYPES: [&str; 2] = [
     "org.nspasteboard.ConcealedType",
@@ -63,6 +66,8 @@ pub enum ClipboardError {
     InvalidUtf8,
     #[error("clipboard text exceeds the 4 KiB protocol limit")]
     TooLarge,
+    #[error("clipboard command did not answer within the deadline")]
+    Timeout,
     #[error("clipboard I/O failed: {0}")]
     Io(#[from] io::Error),
 }
@@ -233,22 +238,79 @@ impl LinuxClipboard {
 }
 
 fn read_command_bounded(command: &mut Command, limit: usize) -> Result<Vec<u8>, ClipboardError> {
+    read_command_bounded_within(command, limit, READ_COMMAND_TIMEOUT)
+}
+
+fn read_command_bounded_within(
+    command: &mut Command,
+    limit: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>, ClipboardError> {
+    use rustix::event::{poll, PollFd, PollFlags, Timespec};
+
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
-    let mut bytes = Vec::with_capacity(limit.min(1024));
-    child
-        .stdout
-        .take()
-        .ok_or_else(|| ClipboardError::Command("clipboard stdout was unavailable".into()))?
-        .take((limit + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    let output = child.wait_with_output()?;
-    if bytes.len() > limit {
-        return Err(ClipboardError::TooLarge);
-    }
-    if !output.status.success() {
+    let deadline = Instant::now() + timeout;
+    let mut stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ClipboardError::Command(
+                "clipboard stdout was unavailable".into(),
+            ));
+        }
+    };
+
+    let collected = (|| {
+        let mut bytes = Vec::with_capacity(limit.min(1024));
+        let mut eof = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ClipboardError::Timeout);
+            }
+            if eof {
+                if let Some(status) = child.try_wait()? {
+                    return Ok((bytes, status));
+                }
+            }
+            let slice = Timespec::try_from(remaining.min(Duration::from_millis(25)))
+                .expect("bounded duration");
+            let mut fds = [PollFd::new(&stdout, PollFlags::IN)];
+            // EOF may precede child exit. An empty poll avoids spinning on HUP.
+            let ready = match poll(if eof { &mut [] } else { &mut fds }, Some(&slice)) {
+                Ok(count) => count > 0,
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => return Err(io::Error::from(error).into()),
+            };
+            if ready {
+                let mut chunk = [0; 1024];
+                let count = stdout.read(&mut chunk)?;
+                eof = count == 0;
+                bytes.extend_from_slice(&chunk[..count]);
+                if bytes.len() > limit {
+                    return Err(ClipboardError::TooLarge);
+                }
+            }
+        }
+    })();
+
+    let (bytes, status) = match collected {
+        Ok(collected) => collected,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    if !status.success() {
+        let mut stderr = Vec::new();
+        if let Some(pipe) = child.stderr.take() {
+            let _ = pipe.take(4096).read_to_end(&mut stderr);
+        }
         return Err(ClipboardError::Command(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            String::from_utf8_lossy(&stderr).trim().to_owned(),
         ));
     }
     Ok(bytes)
@@ -293,5 +355,34 @@ mod tests {
     fn four_kibibyte_limit_is_utf8_bytes() {
         assert_eq!("é".repeat(2048).len(), MAX_CLIPBOARD_BYTES);
         assert!("é".repeat(2049).len() > MAX_CLIPBOARD_BYTES);
+    }
+
+    #[test]
+    fn bounded_read_returns_short_output_and_times_out_on_a_frozen_owner() {
+        let mut fast = Command::new("sh");
+        fast.args(["-c", "printf clipboard"]);
+        assert_eq!(
+            read_command_bounded_within(&mut fast, MAX_CLIPBOARD_BYTES, Duration::from_secs(5))
+                .unwrap(),
+            b"clipboard".to_vec()
+        );
+
+        // A selection owner that never answers keeps stdout open forever.
+        let mut frozen = Command::new("sh");
+        frozen.args(["-c", "sleep 300"]);
+        assert!(matches!(
+            read_command_bounded_within(&mut frozen, MAX_CLIPBOARD_BYTES, Duration::from_millis(50)),
+            Err(ClipboardError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn bounded_read_rejects_oversized_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes x"]);
+        assert!(matches!(
+            read_command_bounded_within(&mut command, 16, Duration::from_secs(5)),
+            Err(ClipboardError::TooLarge)
+        ));
     }
 }

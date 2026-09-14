@@ -163,6 +163,11 @@ struct CaptureState {
     shm: Option<wl_shm::WlShm>,
     outputs: Vec<(wl_output::WlOutput, OutputInfo)>,
     offered_buffer: Option<BufferDescription>,
+    /// Format offers that this host cannot consume, reported only when no
+    /// supported offer arrives before the frame is finalized.
+    rejected_formats: Vec<String>,
+    /// `Flags` arrives before `BufferDone`, so it cannot be stored on `active`.
+    y_inverted: bool,
     active: Option<ActiveCapture>,
     result: Option<Result<CapturedFrame, CaptureError>>,
     raw_shm_buf: Vec<u8>,
@@ -185,10 +190,12 @@ impl CaptureState {
         frame: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
         qh: &QueueHandle<Self>,
     ) -> Result<(), CaptureError> {
-        let description = self
-            .offered_buffer
-            .take()
-            .ok_or(CaptureError::InvalidBuffer("missing wl_shm buffer offer"))?;
+        let description = self.offered_buffer.take().ok_or_else(|| {
+            match self.rejected_formats.first() {
+                Some(format) => CaptureError::UnsupportedFormat(format.clone()),
+                None => CaptureError::InvalidBuffer("missing wl_shm buffer offer"),
+            }
+        })?;
         let size = u64::from(description.stride)
             .checked_mul(u64::from(description.height))
             .ok_or(CaptureError::InvalidBuffer("buffer size overflow"))?;
@@ -232,6 +239,12 @@ impl CaptureState {
                 qh,
                 (),
             );
+            // Dropping the Rust proxies sends nothing; the compositor keeps the
+            // old buffer, pool, and shm mapping alive without explicit destroys.
+            if let Some(previous) = self.cached_buffer.take() {
+                previous.buffer.destroy();
+                previous._pool.destroy();
+            }
             self.cached_buffer = Some(CachedBuffer {
                 file,
                 _pool: pool,
@@ -247,7 +260,7 @@ impl CaptureState {
         self.active = Some(ActiveCapture {
             description,
             damage: Vec::new(),
-            y_inverted: false,
+            y_inverted: self.y_inverted,
         });
         Ok(())
     }
@@ -370,6 +383,8 @@ impl LinuxCapture {
             shm: None,
             outputs: Vec::new(),
             offered_buffer: None,
+            rejected_formats: Vec::new(),
+            y_inverted: false,
             active: None,
             result: None,
             raw_shm_buf: Vec::new(),
@@ -434,6 +449,8 @@ impl LinuxCapture {
         }
         if !self.request_pending {
             self.state.offered_buffer = None;
+            self.state.rejected_formats.clear();
+            self.state.y_inverted = false;
             self.state.active = None;
             self.state.result = None;
 
@@ -660,11 +677,17 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for CaptureSt
                     WEnum::Value(wl_shm::Format::Argb8888) => wl_shm::Format::Argb8888,
                     WEnum::Value(wl_shm::Format::Xrgb8888) => wl_shm::Format::Xrgb8888,
                     other => {
-                        state.result =
-                            Some(Err(CaptureError::UnsupportedFormat(format!("{other:?}"))));
+                        // Versions below 3 advertise alternatives across several
+                        // buffer events; only BufferDone can declare failure.
+                        state.rejected_formats.push(format!("{other:?}"));
                         return;
                     }
                 };
+                if state.offered_buffer.is_some() || state.active.is_some() {
+                    // `copy` may be sent at most once per frame, so keep the
+                    // first supported offer instead of re-arming the capture.
+                    return;
+                }
                 state.offered_buffer = Some(BufferDescription {
                     format,
                     width,
@@ -684,13 +707,15 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for CaptureSt
                 }
             }
             zwlr_screencopy_frame_v1::Event::Flags { flags } => {
+                // `Flags` precedes `BufferDone`, so record it on the state and
+                // let `create_buffer` copy it into the active capture.
+                let y_inverted = match flags {
+                    WEnum::Value(flags) => flags.contains(zwlr_screencopy_frame_v1::Flags::YInvert),
+                    WEnum::Unknown(_) => false,
+                };
+                state.y_inverted = y_inverted;
                 if let Some(active) = &mut state.active {
-                    active.y_inverted = match flags {
-                        WEnum::Value(flags) => {
-                            flags.contains(zwlr_screencopy_frame_v1::Flags::YInvert)
-                        }
-                        WEnum::Unknown(_) => false,
-                    };
+                    active.y_inverted = y_inverted;
                 }
             }
             zwlr_screencopy_frame_v1::Event::Damage {
@@ -798,6 +823,8 @@ mod tests {
                 shm: None,
                 outputs: Vec::new(),
                 offered_buffer: None,
+                rejected_formats: Vec::new(),
+                y_inverted: false,
                 active: None,
                 result: None,
                 raw_shm_buf: Vec::new(),

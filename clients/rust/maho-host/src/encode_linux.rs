@@ -79,6 +79,10 @@ impl EncoderConfig {
         if self.width == 0 || self.height == 0 || self.fps == 0 || self.bitrate == 0 {
             return Err(EncodeError::InvalidConfig);
         }
+        // The NV12 conversion reads and writes pixel pairs per 2x2 block.
+        if self.width % 2 != 0 || self.height % 2 != 0 {
+            return Err(EncodeError::InvalidConfig);
+        }
         Ok(self)
     }
 }
@@ -93,7 +97,7 @@ pub struct EncodedFrame {
 
 #[derive(Debug, Error)]
 pub enum EncodeError {
-    #[error("encoder dimensions, FPS, and bitrate must be non-zero")]
+    #[error("encoder dimensions must be non-zero and even; FPS and bitrate must be non-zero")]
     InvalidConfig,
     #[error("BGRA frame length/stride does not match the configured dimensions")]
     InvalidFrame,
@@ -303,7 +307,7 @@ impl LinuxVideoEncoder {
             software.set_kind(ffmpeg::picture::Type::None);
         }
 
-        if let Some(vaapi) = &self.open.vaapi {
+        let hardware = if let Some(vaapi) = &self.open.vaapi {
             let mut hardware = frame::Video::empty();
             unsafe {
                 let status =
@@ -322,13 +326,34 @@ impl LinuxVideoEncoder {
             }
             hardware.set_pts(Some(pts));
             hardware.set_kind(software.kind());
-            self.open.encoder.send_frame(&hardware)?;
+            Some(hardware)
         } else {
-            self.open.encoder.send_frame(software)?;
+            None
+        };
+
+        // EAGAIN from avcodec_send_frame means the output queue is full: drain
+        // it and resubmit the same frame instead of failing the pipeline.
+        let mut output = Vec::new();
+        match self.submit_frame(hardware.as_ref()) {
+            Ok(()) => {}
+            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::ffi::EAGAIN => {
+                output = self.receive_packets()?;
+                self.submit_frame(hardware.as_ref())?;
+            }
+            Err(error) => return Err(EncodeError::Ffmpeg(error)),
         }
 
         self.force_keyframe = false;
-        self.receive_packets()
+        output.extend(self.receive_packets()?);
+        Ok(output)
+    }
+
+    /// Submits either the VAAPI surface or the software conversion frame.
+    fn submit_frame(&mut self, hardware: Option<&frame::Video>) -> Result<(), ffmpeg::Error> {
+        match hardware {
+            Some(hardware) => self.open.encoder.send_frame(hardware),
+            None => self.open.encoder.send_frame(&self.open.software),
+        }
     }
 
     pub fn drain(&mut self) -> Result<Vec<EncodedFrame>, EncodeError> {
@@ -475,7 +500,7 @@ fn open_vaapi(config: EncoderConfig, video_codec: VideoCodec) -> Result<OpenEnco
         (*frames_context).sw_format = Pixel::NV12.into();
         (*frames_context).width = config.width as i32;
         (*frames_context).height = config.height as i32;
-        (*frames_context).initial_pool_size = 4;
+        (*frames_context).initial_pool_size = 16;
         let status = ffmpeg::ffi::av_hwframe_ctx_init(frames);
         if status < 0 {
             let mut frames = frames;

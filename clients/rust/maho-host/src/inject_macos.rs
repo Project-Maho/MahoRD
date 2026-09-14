@@ -96,7 +96,19 @@ impl InputInjector {
         if !accessibility_is_trusted() {
             return Err(InputError::PermissionDenied);
         }
-        if !self.allow_event() {
+        // Events that END a hold are never throttled: dropping a KeyUp, a
+        // MouseUp or a Reset leaves the host with a stuck key or a stuck drag
+        // that no later event can clear.
+        let releases_hold = matches!(
+            event.event_type,
+            InputEventType::KeyUp
+                | InputEventType::LeftMouseUp
+                | InputEventType::RightMouseUp
+                | InputEventType::MiddleMouseUp
+                | InputEventType::PenUp
+                | InputEventType::Reset
+        );
+        if !releases_hold && !self.allow_event() {
             return Err(InputError::RateLimited);
         }
         if let Some(cg_event) = self.create_event(event)? {
@@ -372,6 +384,36 @@ pub fn request_accessibility() -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn request_accessibility() -> bool {
     false
+}
+
+/// Releases anything the remote user was still holding when the session ends.
+/// Without this, dropping the injector after a KeyDown or a MouseDown leaves the
+/// host repeating a key or stuck mid-drag: a dropped connection can never
+/// deliver the matching up event or an explicit Reset.
+#[cfg(target_os = "macos")]
+impl Drop for InputInjector {
+    fn drop(&mut self) {
+        if self.active_mouse_buttons.borrow().is_empty() && self.active_keys.borrow().is_empty() {
+            return;
+        }
+        // Synthesizing events without Accessibility access cannot reach the
+        // host, so skip the work entirely, exactly as `inject` does.
+        if !accessibility_is_trusted() {
+            return;
+        }
+        let reset = InputEvent {
+            event_type: InputEventType::Reset,
+            x: 0.0,
+            y: 0.0,
+            key_code: 0,
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+        // The Reset path posts an up event for every tracked button and key and
+        // returns no event of its own. Errors are unactionable during drop.
+        let _ = self.create_event(&reset);
+    }
 }
 
 #[cfg(test)]
