@@ -494,6 +494,30 @@ fn session_desktop_kind(_session_id: u32) -> Option<DesktopKind> {
 
 /// Terminates `--session-worker` processes left behind by a previous instance.
 ///
+/// Directory where the service records each worker it spawns, so a restarted
+/// instance can recognise its predecessor's workers by pid.
+fn worker_marker_dir() -> std::path::PathBuf {
+    std::env::var("ProgramData")
+        .map(|root| Path::new(&root).join("MahoRD").join("workers"))
+        .unwrap_or_else(|_| Path::new("C:\\ProgramData\\MahoRD\\workers").to_path_buf())
+}
+
+fn record_worker(process_id: u32) {
+    let dir = worker_marker_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(format!("{process_id}.txt")), "--session-worker");
+}
+
+fn forget_worker(process_id: u32) {
+    let _ = std::fs::remove_file(worker_marker_dir().join(format!("{process_id}.txt")));
+}
+
+/// The command line the service recorded for a worker it spawned, or `None`
+/// for a process this host never started.
+fn recorded_worker_command(process_id: u32) -> Option<String> {
+    std::fs::read_to_string(worker_marker_dir().join(format!("{process_id}.txt"))).ok()
+}
+
 /// After the SCM restarts a crashed service the old worker keeps running and
 /// keeps the listening ports, while the fresh supervisor holds no handle to it
 /// and can never move it to another desktop. Clearing them restores the host's
@@ -520,15 +544,17 @@ fn reap_previous_workers() {
                 .position(|unit| *unit == 0)
                 .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
-            if name.eq_ignore_ascii_case("maho-host.exe")
-                && entry.th32ProcessID != current
+            let command = recorded_worker_command(entry.th32ProcessID).unwrap_or_default();
+            if entry.th32ProcessID != current
                 && entry.th32ParentProcessID != current
+                && crate::windows_session::is_reapable_worker(&name, &command)
             {
                 if let Ok(handle) =
                     OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID)
                 {
                     let handle = ProcessHandle(handle);
                     let _ = TerminateProcess(handle.0, 0);
+                    forget_worker(entry.th32ProcessID);
                     service_log(&format!("reaped orphan worker pid={}", entry.th32ProcessID));
                 }
             }
@@ -656,6 +682,7 @@ pub fn spawn_session_worker(session_id: u32, desktop: DesktopKind) -> io::Result
         .map_err(io_error)?;
         let _process = KernelHandle(process.hProcess);
         let _thread = KernelHandle(process.hThread);
+        record_worker(process.dwProcessId);
         Ok(WorkerHandle {
             process_id: process.dwProcessId,
             session_id,
@@ -665,6 +692,7 @@ pub fn spawn_session_worker(session_id: u32, desktop: DesktopKind) -> io::Result
 }
 
 pub fn stop_session_worker(handle: &WorkerHandle) -> io::Result<()> {
+    forget_worker(handle.process_id);
     // SAFETY: the process handle is opened with termination access and owned until the call completes.
     unsafe {
         let process = KernelHandle(

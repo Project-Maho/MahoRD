@@ -114,6 +114,19 @@ pub enum CaptureRecovery {
     Abort,
 }
 
+/// Whether a running process is a session worker left by a previous service
+/// instance, and so safe to terminate at startup.
+///
+/// Matching on the image name alone would also kill a host a developer is
+/// running by hand, or a second install; only a process carrying the
+/// `--session-worker` flag is ours to clear.
+pub fn is_reapable_worker(image_name: &str, command_line: &str) -> bool {
+    image_name.eq_ignore_ascii_case("maho-host.exe")
+        && command_line
+            .split_whitespace()
+            .any(|argument| argument.eq_ignore_ascii_case("--session-worker"))
+}
+
 /// Whether a starting service should terminate workers left by a previous
 /// instance.
 ///
@@ -375,6 +388,38 @@ mod tests {
             assert_eq!(
                 reacquire_backoff(attempt as u32),
                 Duration::from_millis(millis),
+            );
+        }
+    }
+
+    #[test]
+    fn only_session_workers_are_reaped_not_every_host_process() {
+        // Given: the processes a starting service may see. Reaping must clear
+        // workers orphaned by the previous instance without killing a host a
+        // developer or another install is running.
+        assert!(
+            is_reapable_worker("maho-host.exe", "--session-worker"),
+            "an orphaned session worker must be reaped"
+        );
+        assert!(
+            is_reapable_worker(
+                "MAHO-HOST.EXE",
+                "\"C:\\erd\\maho-host.exe\"  --session-worker "
+            ),
+            "matching is case- and spacing-insensitive"
+        );
+
+        // Then: everything else is left alone.
+        for (name, command) in [
+            ("maho-host.exe", "--service-run"),
+            ("maho-host.exe", ""),
+            ("maho-host.exe", "--pin generate"),
+            ("maho-client.exe", "--session-worker"),
+            ("notepad.exe", "--session-worker"),
+        ] {
+            assert!(
+                !is_reapable_worker(name, command),
+                "must not reap {name} {command:?}"
             );
         }
     }
