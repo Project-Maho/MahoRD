@@ -62,6 +62,20 @@ Copy-Item "$env:APPDATA\MahoRD\host-authorizations.json" "$env:ProgramData\MahoR
 Copy-Item "$env:APPDATA\MahoRD\pairing-keys.json"        "$env:ProgramData\MahoRD\" -Force
 ```
 
+## Migrating from the scheduled-task host
+
+Earlier deployments ran `maho-host.exe` from a Windows scheduled task with a logon
+trigger (`erd-host-run`). That task and the service both bind TCP 19730, and the
+`AUTO_START` service wins the race on boot, leaving the task's host to fail. Disable
+the task once the service is installed:
+
+```powershell
+Disable-ScheduledTask -TaskName erd-host-run
+```
+
+The service replaces it entirely: it starts before logon, survives logoff, and
+follows the console session on its own.
+
 ## Troubleshooting
 
 An SCM-hosted process has no console, so diagnostics go to
