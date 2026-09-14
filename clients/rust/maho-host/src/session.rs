@@ -2168,9 +2168,12 @@ impl HostServer {
                     let tls_server = maho_net::tls_psk::TlsPskServer::new(self.current_psks()?)?;
                     match tls_server.accept_stream_until(tcp, admission_deadline) {
                         Ok(stream) => {
-                            if let Err(error) =
-                                self.handle_connection(stream, peer, admission_deadline)
-                            {
+                            if let Err(error) = self.handle_connection(
+                                stream,
+                                peer,
+                                admission_deadline,
+                                Some(stop.as_ref()),
+                            ) {
                                 tracing::warn!(%error, "connection ended with an error");
                             }
                         }
@@ -2210,7 +2213,7 @@ impl HostServer {
         tcp.set_nodelay(true)?;
         let tls_server = TlsPskServer::new(self.current_psks()?)?;
         match tls_server.accept_stream_until(tcp, admission_deadline) {
-            Ok(stream) => self.handle_connection(stream, peer, admission_deadline),
+            Ok(stream) => self.handle_connection(stream, peer, admission_deadline, None),
             Err(error) => {
                 let locked = self
                     .lockout
@@ -2269,6 +2272,7 @@ impl HostServer {
         mut stream: maho_net::TlsPskStream<TcpStream>,
         tcp_peer: SocketAddr,
         admission_deadline: Instant,
+        stop: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<(), SessionError> {
         stream
             .ssl_stream_mut()
@@ -2318,6 +2322,11 @@ impl HostServer {
         let mut next_ping = Instant::now() + HEARTBEAT_INTERVAL;
         let mut stop_sender_tx = None;
         let mut sender_thread = None;
+        // Terminal status of the media pipeline. One bounded slot so a dying
+        // sender thread reports its exit without ever blocking on this channel.
+        let (media_status_tx, media_status_rx) = mpsc::sync_channel::<()>(1);
+        let mut active_bitrate = self.config.bitrate;
+        let mut injected_input = false;
         let mut clipboard_sync = false;
         #[cfg(target_os = "windows")]
         let mut clipboard = Some(crate::WindowsClipboard::new());
@@ -2329,6 +2338,16 @@ impl HostServer {
         let result = (|| -> Result<(), SessionError> {
             // If authenticated and media_receiver is set, we run UDP sending in a dedicated thread to avoid TCP blocking it.
             loop {
+                if stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed)) {
+                    info!(peer = %tcp_peer, "host stop requested; closing connection");
+                    break;
+                }
+                // Checked independently of UDP registration: a media pipeline that
+                // died must end the session instead of serving heartbeats forever.
+                if media_status_rx.try_recv().is_ok() {
+                    warn!(peer = %tcp_peer, "media pipeline terminated; closing connection");
+                    break;
+                }
                 if state != SessionState::Authenticated {
                     let remaining = admission_deadline
                         .checked_duration_since(Instant::now())
@@ -2350,6 +2369,7 @@ impl HostServer {
                             let pixel_height = self.config.display.pixel_height;
                             let (stx, srx) = mpsc::channel();
                             stop_sender_tx = Some(stx);
+                            let media_status_tx = media_status_tx.clone();
                             #[cfg(test)]
                             let media_source = self.media_source.clone();
                             let handle = thread::spawn(move || {
@@ -2412,11 +2432,13 @@ impl HostServer {
                                         }
                                         Ok(MediaEvent::Error(err)) => {
                                             warn!(%err, "Media event error in sender thread");
+                                            let _ = media_status_tx.try_send(());
                                             break;
                                         }
                                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                                         Err(mpsc::RecvTimeoutError::Disconnected) => {
                                             warn!("Media receiver disconnected, exiting sender thread");
+                                            let _ = media_status_tx.try_send(());
                                             break;
                                         }
                                     }
@@ -2675,6 +2697,7 @@ impl HostServer {
                         }
                         let event = InputEvent::decode(payload)?;
                         let success = inject_input(&event, |event| input.inject(event));
+                        injected_input |= success;
                         let ack = InputAckMessage {
                             sequence: header.sequence,
                             success,
@@ -2705,6 +2728,8 @@ impl HostServer {
                                         // A rejected quality change must not end the
                                         // session; the stream stays at its old bitrate.
                                         warn!(%error, target_bitrate, "bitrate adjust failed");
+                                    } else {
+                                        active_bitrate = target_bitrate as u32;
                                     }
                                 }
                             }
@@ -2749,18 +2774,42 @@ impl HostServer {
                                         )?;
                                     }
                                     None => {
-                                        if let Some(media) = &media_handle {
-                                            let _ = media.update_bitrate(req.desired.bitrate);
+                                        // A submission that failed must never be reported
+                                        // back to the client as the active configuration.
+                                        let applied = match &media_handle {
+                                            Some(media) => media
+                                                .update_bitrate(req.desired.bitrate)
+                                                .map(|()| req.desired.bitrate),
+                                            None => Ok(active_bitrate),
+                                        };
+                                        match applied {
+                                            Ok(bitrate) => {
+                                                active_bitrate = bitrate;
+                                                send_tcp_control(
+                                                    &mut stream,
+                                                    ControlMessage::StreamConfigResponse(
+                                                        StreamConfigurationResponse {
+                                                            request_id: req.request_id,
+                                                            active: req.desired,
+                                                        },
+                                                    ),
+                                                )?;
+                                            }
+                                            Err(error) => {
+                                                warn!(%error, "stream configuration bitrate was not applied");
+                                                send_tcp_control(
+                                                    &mut stream,
+                                                    ControlMessage::StreamConfigReject(
+                                                        StreamConfigurationReject {
+                                                            request_id: req.request_id,
+                                                            reason: StreamConfigurationErrorCode::UnsupportedBitrate,
+                                                            message: "bitrate update was not applied"
+                                                                .to_owned(),
+                                                        },
+                                                    ),
+                                                )?;
+                                            }
                                         }
-                                        send_tcp_control(
-                                            &mut stream,
-                                            ControlMessage::StreamConfigResponse(
-                                                StreamConfigurationResponse {
-                                                    request_id: req.request_id,
-                                                    active: req.desired,
-                                                },
-                                            ),
-                                        )?;
                                     }
                                 }
                             }
@@ -2818,6 +2867,20 @@ impl HostServer {
                 warn!("UDP sender thread panicked");
             }
         }
+        // Release anything the remote user was still holding before the session
+        // ends; a dropped connection can never deliver the matching key/button up.
+        if injected_input {
+            let reset = InputEvent {
+                event_type: maho_proto::InputEventType::Reset,
+                x: 0.0,
+                y: 0.0,
+                key_code: 0,
+                modifiers: maho_proto::Modifiers::empty(),
+                scroll_dx: 0.0,
+                scroll_dy: 0.0,
+            };
+            inject_input(&reset, |event| input.inject(event));
+        }
         if let Some(mut media) = media_handle {
             media.stop();
         }
@@ -2865,7 +2928,11 @@ impl HostServer {
                 Ok(_) => continue,
                 Err(error)
                     if error.kind() == io::ErrorKind::ConnectionReset
-                        || error.raw_os_error() == Some(10054) =>
+                        || error.raw_os_error() == Some(10054)
+                        // WSAEMSGSIZE: an oversized datagram was truncated. Any
+                        // sender can produce it, so discard it like any other
+                        // malformed registration instead of failing the session.
+                        || error.raw_os_error() == Some(10040) =>
                 {
                     continue;
                 }
@@ -3235,7 +3302,10 @@ mod tests {
             match socket.peek_from(buffer) {
                 Ok(result) => return result,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "datagram did not arrive within 2s");
+                    assert!(
+                        Instant::now() < deadline,
+                        "datagram did not arrive within 2s"
+                    );
                     thread::yield_now();
                 }
                 Err(error) => panic!("peek_from failed: {error}"),
@@ -3587,7 +3657,7 @@ mod tests {
             let result = tls
                 .accept_stream_until(socket, deadline)
                 .map_err(SessionError::Tls)
-                .and_then(|stream| server.handle_connection(stream, peer, deadline));
+                .and_then(|stream| server.handle_connection(stream, peer, deadline, None));
             done_tx.send((result, Instant::now())).unwrap();
         });
         let mut tcp = client.connect(addr).unwrap();
@@ -3953,6 +4023,7 @@ mod tests {
                 tls.accept_stream(tcp).unwrap(),
                 peer,
                 Instant::now() + server.preauth_timeout,
+                None,
             );
             done_tx.send(result).unwrap();
         });
