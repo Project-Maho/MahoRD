@@ -11,6 +11,9 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Security::*;
 use windows::Win32::System::Environment::*;
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
     TH32CS_SNAPPROCESS,
@@ -496,6 +499,63 @@ fn session_desktop_kind(_session_id: u32) -> Option<DesktopKind> {
 ///
 /// Directory where the service records each worker it spawns, so a restarted
 /// instance can recognise its predecessor's workers by pid.
+/// Locks the machine-wide MahoRD directory to SYSTEM and Administrators.
+///
+/// Anything created under %ProgramData% inherits a read grant for
+/// BUILTIN\Users, which would expose the pairing keys in
+/// host-authorizations.json to every local account.
+fn secure_store_directory(path: &Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(parent);
+    let program_data =
+        std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+    for target in crate::windows_session::service_store_hardening_targets(&program_data) {
+        if target.exists() {
+            apply_store_security(&target);
+        }
+    }
+    apply_store_security(parent);
+}
+
+/// Applies the restrictive descriptor to one path, replacing any ACEs it
+/// inherited from the permissive %ProgramData% default.
+fn apply_store_security(target: &Path) {
+    let sddl = wide(OsStr::new(
+        crate::windows_session::service_store_security_descriptor(),
+    ));
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: the SDDL buffer is NUL-terminated and the descriptor is freed below.
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+    };
+    if converted.is_err() {
+        return;
+    }
+    let wide_path = wide(target.as_os_str());
+    // SAFETY: both the path and descriptor remain valid for the call.
+    let applied = unsafe {
+        SetFileSecurityW(
+            PCWSTR(wide_path.as_ptr()),
+            DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    };
+    if !applied.as_bool() {
+        tracing::warn!("could not restrict the machine-wide store");
+    }
+    // SAFETY: descriptor came from the conversion above and is freed once.
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+    }
+}
+
 fn worker_marker_dir() -> std::path::PathBuf {
     std::env::var("ProgramData")
         .map(|root| Path::new(&root).join("MahoRD").join("workers"))
@@ -504,6 +564,7 @@ fn worker_marker_dir() -> std::path::PathBuf {
 
 fn record_worker(process_id: u32) {
     let dir = worker_marker_dir();
+    secure_store_directory(&dir);
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join(format!("{process_id}.txt")), "--session-worker");
 }

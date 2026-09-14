@@ -114,6 +114,29 @@ pub enum CaptureRecovery {
     Abort,
 }
 
+/// Paths the service must re-secure at startup.
+///
+/// Tightening the directory does not rewrite children that already inherited
+/// the permissive `%ProgramData%` ACL, so a credential file created before
+/// hardening stays readable by `BUILTIN\Users`. Both the directory and the store
+/// file are therefore re-applied every time.
+pub fn service_store_hardening_targets(program_data: &str) -> Vec<PathBuf> {
+    let directory = PathBuf::from(program_data).join("MahoRD");
+    let store = service_store_path(program_data);
+    vec![directory, store]
+}
+
+/// SDDL for the machine-wide MahoRD directory.
+///
+/// `host-authorizations.json` holds the pre-shared keys that let a paired client
+/// drive this machine, and anything created under `%ProgramData%` inherits an
+/// ACL granting `BUILTIN\Users` read. `P` cuts that inheritance so the
+/// permissive default cannot flow back in, leaving only SYSTEM and
+/// Administrators, both inheriting to the files inside.
+pub fn service_store_security_descriptor() -> &'static str {
+    "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+}
+
 /// Whether a running process is a session worker left by a previous service
 /// instance, and so safe to terminate at startup.
 ///
@@ -388,6 +411,51 @@ mod tests {
             assert_eq!(
                 reacquire_backoff(attempt as u32),
                 Duration::from_millis(millis),
+            );
+        }
+    }
+
+    #[test]
+    fn hardening_targets_the_store_file_not_only_its_directory() {
+        // Given: a credential file created before the directory was hardened.
+        // Windows keeps the ACEs it already inherited, so tightening the parent
+        // leaves the file itself readable by BUILTIN\Users.
+        let targets = service_store_hardening_targets("C:\\ProgramData");
+
+        // Then: both the directory and the file are re-secured.
+        assert_eq!(targets.len(), 2, "{targets:?}");
+        assert!(
+            targets.iter().any(|path| path.ends_with("MahoRD")),
+            "{targets:?}"
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|path| path.ends_with("host-authorizations.json")),
+            "{targets:?}"
+        );
+    }
+
+    #[test]
+    fn machine_wide_store_is_not_readable_by_every_local_user() {
+        // Given: host-authorizations.json holds the pre-shared keys that let a
+        // paired client take over this machine. Under %ProgramData% it inherits
+        // an ACL granting BUILTIN\Users read, so any local account could copy
+        // the credentials.
+        let descriptor = service_store_security_descriptor();
+
+        // Then: only SYSTEM and Administrators may reach it, and inheritance is
+        // cut so the permissive ProgramData default cannot flow back in.
+        assert!(
+            descriptor.contains("P"),
+            "inheritance must be disabled: {descriptor}"
+        );
+        assert!(descriptor.contains("(A;OICI;FA;;;SY)"), "{descriptor}");
+        assert!(descriptor.contains("(A;OICI;FA;;;BA)"), "{descriptor}");
+        for unwanted in [";;;BU)", ";;;WD)", ";;;AU)"] {
+            assert!(
+                !descriptor.contains(unwanted),
+                "{unwanted} must not appear in {descriptor}"
             );
         }
     }
