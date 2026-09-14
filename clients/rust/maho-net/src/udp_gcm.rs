@@ -24,9 +24,11 @@ pub enum Direction {
 
 impl Direction {
     fn info(self) -> &'static [u8] {
+        // Wire-protocol v3 constants: these bytes are HKDF info inputs that
+        // both peers must agree on. Never rename them.
         match self {
-            Self::ClientToHost => b"maho/udp-c2h/v3",
-            Self::HostToClient => b"maho/udp-h2c/v3",
+            Self::ClientToHost => b"erd/udp-c2h/v3",
+            Self::HostToClient => b"erd/udp-h2c/v3",
         }
     }
 }
@@ -127,7 +129,8 @@ impl DatagramCipher {
             return Err(DatagramError::InvalidSessionSalt);
         }
 
-        let udp_ikm = hkdf_sha256(master_key, session_salt, b"maho/udp-ikm/v3", 32);
+        // Wire-protocol v3 constant: HKDF info input, never rename.
+        let udp_ikm = hkdf_sha256(master_key, session_salt, b"erd/udp-ikm/v3", 32);
         let key = hkdf_sha256(&udp_ikm, session_salt, direction.info(), 32);
         let mut nonce_info = direction.info().to_vec();
         nonce_info.extend_from_slice(b"/nonce");
@@ -302,9 +305,10 @@ pub(crate) mod tests {
 
     #[test]
     fn direction_derivation_matches_v3_vectors() {
-        let udp_ikm = hkdf_sha256(&MASTER_KEY, &SESSION_SALT, b"maho/udp-ikm/v3", 32);
+        // Wire-protocol v3 constants: HKDF info inputs, never rename.
+        let udp_ikm = hkdf_sha256(&MASTER_KEY, &SESSION_SALT, b"erd/udp-ikm/v3", 32);
         assert_eq!(
-            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"maho/udp-c2h/v3", 32),
+            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"erd/udp-c2h/v3", 32),
             [
                 0x7b, 0x6b, 0xe7, 0xd1, 0xaa, 0xe9, 0xb3, 0xd2, 0x3a, 0x4c, 0xb7, 0xcc, 0x9b, 0x56,
                 0x44, 0xcd, 0x88, 0x89, 0x38, 0xdc, 0x81, 0x29, 0x1b, 0x6e, 0x7f, 0x76, 0x98, 0x08,
@@ -312,11 +316,11 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(
-            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"maho/udp-c2h/v3/nonce", 4),
+            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"erd/udp-c2h/v3/nonce", 4),
             [0xe2, 0x6c, 0x23, 0xc1]
         );
         assert_eq!(
-            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"maho/udp-h2c/v3", 32),
+            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"erd/udp-h2c/v3", 32),
             [
                 0x13, 0x56, 0x91, 0xaf, 0x33, 0x8c, 0x20, 0x5f, 0x66, 0x92, 0x40, 0xb4, 0x6b, 0xc4,
                 0x34, 0x86, 0x8d, 0x85, 0xfa, 0x66, 0xf8, 0x36, 0xe0, 0x10, 0xf9, 0x1d, 0x27, 0x05,
@@ -324,7 +328,7 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(
-            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"maho/udp-h2c/v3/nonce", 4),
+            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"erd/udp-h2c/v3/nonce", 4),
             [0xcb, 0xbf, 0xd2, 0xe6]
         );
     }

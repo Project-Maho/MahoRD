@@ -7,18 +7,25 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use openssl::rand::rand_bytes;
-use reqwest::{Client, StatusCode};
+use openssl::{hash::MessageDigest, pkcs5, rand::rand_bytes};
+use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::time::{sleep, timeout, Instant};
 
-use crate::udp_gcm::hkdf_sha256;
+use crate::{tls_psk::BOOTSTRAP_STRETCH_ROUNDS, udp_gcm::hkdf_sha256};
 
-const SIGNALING_SALT: &[u8] = b"maho/signaling/v3";
+/// Wire-protocol v3 constant: this byte string is an HKDF salt input, not an
+/// identifier. Renaming it changes every derived topic and key.
+const SIGNALING_SALT: &[u8] = b"erd/signaling/v3";
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_BASE_URL: &str = "https://ntfy.sh";
+/// Upper bound on one poll response body, enforced while the body streams so a
+/// hostile endpoint cannot exhaust memory before authentication.
+const MAX_POLL_BODY_BYTES: usize = 256 * 1024;
+/// Upper bound on a single JSONL envelope, enforced before base64/GCM work.
+const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCandidate {
@@ -59,6 +66,10 @@ pub enum SignalingError {
     Encode(#[source] serde_json::Error),
     #[error("failed to generate AES-GCM nonce: {0}")]
     Random(#[source] openssl::error::ErrorStack),
+    #[error("failed to stretch signaling PIN: {0}")]
+    Stretch(#[source] openssl::error::ErrorStack),
+    #[error("signaling poll response exceeded {MAX_POLL_BODY_BYTES} bytes")]
+    PollBodyTooLarge,
     #[error("failed to encrypt signaling payload")]
     Encrypt,
     #[error("candidate POST failed: {0}")]
@@ -90,9 +101,24 @@ impl SignalingClient {
         role: impl Into<String>,
         base_url: impl Into<String>,
     ) -> Result<Self, SignalingError> {
-        let topic_seed = hkdf_sha256(pin.as_bytes(), SIGNALING_SALT, b"maho/topic", 32);
+        // The PIN is only 8 digits, so anyone who learns the topic could brute
+        // force it offline against plain HKDF. Stretch it once with the same
+        // PBKDF2 parameters the TLS bootstrap path uses, then derive both
+        // values from the stretched output.
+        let mut stretched = [0_u8; 32];
+        pkcs5::pbkdf2_hmac(
+            pin.as_bytes(),
+            SIGNALING_SALT,
+            BOOTSTRAP_STRETCH_ROUNDS,
+            MessageDigest::sha256(),
+            &mut stretched,
+        )
+        .map_err(SignalingError::Stretch)?;
+        // Wire-protocol v3 constants: these bytes are HKDF info inputs, not
+        // identifiers. Never rename them.
+        let topic_seed = hkdf_sha256(&stretched, SIGNALING_SALT, b"erd/topic", 32);
         let topic = format!("erd3-{}", lower_hex(&topic_seed[..14]));
-        let key = hkdf_sha256(pin.as_bytes(), SIGNALING_SALT, b"maho/payload-key", 32);
+        let key = hkdf_sha256(&stretched, SIGNALING_SALT, b"erd/payload-key", 32);
         let mut payload_key = [0_u8; 32];
         payload_key.copy_from_slice(&key);
         let http = Client::builder()
@@ -143,12 +169,17 @@ impl SignalingClient {
             }
 
             if let Ok(Ok(response)) = timeout(remaining, self.http.get(&poll_url).send()).await {
-                if let Ok(body) = response.bytes().await {
-                    if let Some(candidate) =
-                        peer_candidate_from_jsonl(&body, &self.role, &self.payload_key)
-                    {
-                        return Ok(candidate);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match timeout(remaining, read_bounded_body(response)).await {
+                    Ok(Ok(body)) => {
+                        if let Some(candidate) =
+                            peer_candidate_from_jsonl(&body, &self.role, &self.payload_key)
+                        {
+                            return Ok(candidate);
+                        }
                     }
+                    Ok(Err(error @ SignalingError::PollBodyTooLarge)) => return Err(error),
+                    Ok(Err(_)) | Err(_) => {}
                 }
             }
 
@@ -159,6 +190,22 @@ impl SignalingClient {
             sleep(POLL_INTERVAL.min(remaining)).await;
         }
     }
+}
+
+/// Reads a poll response body, aborting as soon as it exceeds the budget.
+async fn read_bounded_body(mut response: Response) -> Result<Vec<u8>, SignalingError> {
+    if response.content_length().is_some_and(|length| length > MAX_POLL_BODY_BYTES as u64) {
+        return Err(SignalingError::PollBodyTooLarge);
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(SignalingError::Post)? {
+        if body.len() + chunk.len() > MAX_POLL_BODY_BYTES {
+            return Err(SignalingError::PollBodyTooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn encrypt_payload(payload: &[u8], key: &[u8; 32]) -> Result<String, SignalingError> {
@@ -198,6 +245,9 @@ fn peer_candidate_from_jsonl(
 
     let text = std::str::from_utf8(body).ok()?;
     text.lines().rev().find_map(|line| {
+        if line.len() > MAX_ENVELOPE_BYTES {
+            return None;
+        }
         let envelope = serde_json::from_str::<Envelope>(line).ok()?;
         let payload = decrypt_payload(&envelope.message, key)?;
         let candidate = serde_json::from_slice::<SessionCandidate>(&payload).ok()?;
@@ -270,13 +320,16 @@ mod tests {
         let second = SignalingClient::new("12345678", "server").unwrap();
         let different = SignalingClient::new("87654321", "client").unwrap();
         assert_eq!(first.topic(), second.topic());
-        assert_eq!(first.topic(), "erd3-a1ac9ca40211ed7a122586e77c18");
+        // Vector regenerated when PIN stretching was introduced: the topic is now derived
+        // from the PBKDF2-stretched PIN, not the raw PIN. The erd/* HKDF labels themselves
+        // are wire-protocol v3 constants and must never change.
+        assert_eq!(first.topic(), "erd3-f19550820cb1c94272393016910a");
         assert_eq!(
             first.payload_key,
             [
-                0xdd, 0x99, 0x49, 0x59, 0xd1, 0xdd, 0xf2, 0x31, 0x60, 0x4a, 0xc4, 0xad, 0x12, 0x9c,
-                0xf2, 0xb5, 0x65, 0xf6, 0x25, 0xe0, 0x5c, 0x19, 0x69, 0x47, 0x54, 0xe7, 0xa1, 0x7a,
-                0xa3, 0xff, 0xef, 0x28,
+                0x66, 0x04, 0x9a, 0x30, 0x86, 0x3c, 0xab, 0x9e, 0x18, 0xa7, 0x79, 0xc7, 0xc5, 0xc1,
+                0xec, 0xb1, 0xbe, 0x45, 0x2f, 0x97, 0x12, 0x2e, 0xf4, 0x0d, 0xa3, 0xf4, 0x41, 0x6c,
+                0xc9, 0x16, 0xef, 0x95,
             ]
         );
         assert_ne!(first.topic(), different.topic());

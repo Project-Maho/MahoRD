@@ -32,8 +32,10 @@ pub const PSK_CIPHER_LIST: &str = "PSK-AES128-GCM-SHA256:PSK-AES256-GCM-SHA384";
 pub const MAX_PAIRING_ATTEMPTS: usize = 5;
 pub const PAIRING_ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 pub const PAIRING_LOCKOUT: Duration = Duration::from_secs(300);
-const BOOTSTRAP_SALT: &[u8] = b"maho/bootstrap/v3";
-const BOOTSTRAP_STRETCH_ROUNDS: usize = 600_000;
+/// Wire-protocol v3 constant: HKDF salt input shared with every peer
+/// implementation. Never rename.
+const BOOTSTRAP_SALT: &[u8] = b"erd/bootstrap/v3";
+pub(crate) const BOOTSTRAP_STRETCH_ROUNDS: usize = 600_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PskIdentity {
@@ -631,7 +633,8 @@ pub fn bootstrap_psk(pin: &str) -> Result<[u8; 32], TlsPskError> {
         MessageDigest::sha256(),
         &mut stretched,
     )?;
-    let derived = hkdf_sha256(&stretched, BOOTSTRAP_SALT, b"maho/tls-psk", 32);
+    // Wire-protocol v3 constant: HKDF info input, never rename.
+    let derived = hkdf_sha256(&stretched, BOOTSTRAP_SALT, b"erd/tls-psk", 32);
     let mut output = [0_u8; 32];
     output.copy_from_slice(&derived);
     Ok(output)
