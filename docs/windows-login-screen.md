@@ -116,5 +116,19 @@ A host configured to elevate without prompting (`PromptOnSecureDesktop=0`) never
 switches to the secure desktop for elevation, so exercise this path there with the
 lock screen or a logon screen instead.
 
+## Known gap: input after a mid-session desktop switch
+
+When the console switches between the secure desktop and `Default` while a client is
+already connected, the supervisor respawns the worker. Video survives the switch —
+one session decoded 80+ frames straight through and the agent's `frame_id` advanced
+from 46 to 109 with no reconnect — but **input stops**: the TCP control channel was
+bound to the worker that was just terminated, so `POST /api/v1/input/action` answers
+`{"error":"session is not ready"}`. The user sees the screen and cannot click until
+reconnecting.
+
+Connections established while a secure desktop is already active are unaffected.
+Fixing this means either having the client re-handshake when the control channel
+drops, or handing the listening sockets to the replacement worker.
+
 **Not yet verified:** the pre-logon logonUI screen specifically, which requires a
 logoff or reboot on the host.
