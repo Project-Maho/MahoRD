@@ -257,6 +257,8 @@ mod macos {
             }
             let scale = pixel_width as f64 / logical.width;
             Ok(DisplayInfo {
+                desktop_x: 0,
+                desktop_y: 0,
                 logical_width: logical.width.round() as u32,
                 logical_height: logical.height.round() as u32,
                 pixel_width,
@@ -507,6 +509,8 @@ mod macos {
             (
                 MacScreenCapture {
                     display_info: DisplayInfo {
+                        desktop_x: 0,
+                        desktop_y: 0,
                         logical_width: 1,
                         logical_height: 1,
                         pixel_width: 1,

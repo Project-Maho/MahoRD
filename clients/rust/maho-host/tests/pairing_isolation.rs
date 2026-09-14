@@ -74,6 +74,8 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             pairing_store: host_store.clone(),
             host_name: "test-host".into(),
             display: DisplayInfo {
+                desktop_x: 0,
+                desktop_y: 0,
                 logical_width: 640,
                 logical_height: 360,
                 pixel_width: 640,
@@ -137,6 +139,8 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             pairing_store: host_store.clone(),
             host_name: "test-host".into(),
             display: DisplayInfo {
+                desktop_x: 0,
+                desktop_y: 0,
                 logical_width: 640,
                 logical_height: 360,
                 pixel_width: 640,

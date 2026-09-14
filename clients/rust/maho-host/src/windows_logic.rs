@@ -381,6 +381,8 @@ pub struct RawDuplDesc {
 /// Consolidated output geometry describing both physical capture pixels and logical desktop space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectedOutputMetadata {
+    pub desktop_x: i32,
+    pub desktop_y: i32,
     pub pixel_width: u32,
     pub pixel_height: u32,
     pub logical_width: u32,
@@ -428,6 +430,8 @@ pub fn resolve_output_metadata(
     };
 
     Ok(SelectedOutputMetadata {
+        desktop_x: output.desktop_left,
+        desktop_y: output.desktop_top,
         pixel_width,
         pixel_height,
         logical_width,
@@ -637,6 +641,8 @@ mod tests {
 
         // Then physical pixel dimensions match DXGI capture texture (3840x1600),
         // preventing the 5,898,240 vs 9,216,000 NV12 length mismatch.
+        assert_eq!(meta.desktop_x, 0);
+        assert_eq!(meta.desktop_y, 0);
         assert_eq!(meta.pixel_width, 3840);
         assert_eq!(meta.pixel_height, 1600);
         assert_eq!(meta.logical_width, 3072);
@@ -671,6 +677,8 @@ mod tests {
         };
 
         let meta = resolve_output_metadata(&output, &dupl).unwrap();
+        assert_eq!(meta.desktop_x, 0);
+        assert_eq!(meta.desktop_y, 0);
         assert_eq!(meta.pixel_width, 1920);
         assert_eq!(meta.pixel_height, 1080);
         assert_eq!(meta.logical_width, 1920);
@@ -744,5 +752,28 @@ mod tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn windows_geometry_multimonitor_offset() {
+        let output = RawOutputDesc {
+            desktop_left: 1920,
+            desktop_top: -200,
+            desktop_right: 4480,
+            desktop_bottom: 1240,
+            rotation: 1,
+        };
+        let dupl = RawDuplDesc {
+            mode_width: 2560,
+            mode_height: 1440,
+            rotation: 1,
+        };
+        let meta = resolve_output_metadata(&output, &dupl).unwrap();
+        assert_eq!(meta.desktop_x, 1920);
+        assert_eq!(meta.desktop_y, -200);
+        assert_eq!(meta.pixel_width, 2560);
+        assert_eq!(meta.pixel_height, 1440);
+        assert_eq!(meta.logical_width, 2560);
+        assert_eq!(meta.logical_height, 1440);
     }
 }

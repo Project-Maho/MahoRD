@@ -107,6 +107,12 @@ impl WindowsCapture {
         selected_output_metadata(0)
     }
 
+    pub fn selected_output_metadata(
+        display_index: usize,
+    ) -> Result<SelectedOutputMetadata, CaptureError> {
+        selected_output_metadata(display_index)
+    }
+
     pub fn new(display_index: usize, timeout: Duration) -> Result<Self, CaptureError> {
         let mut manager = DXGIManager::new(duration_ms(timeout))
             .map_err(|error| CaptureError::Initialization(error.to_string()))?;
