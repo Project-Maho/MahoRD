@@ -62,6 +62,17 @@ Copy-Item "$env:APPDATA\MahoRD\host-authorizations.json" "$env:ProgramData\MahoR
 Copy-Item "$env:APPDATA\MahoRD\pairing-keys.json"        "$env:ProgramData\MahoRD\" -Force
 ```
 
+That file holds the pre-shared keys a paired client authenticates with, and
+anything under `%ProgramData%` inherits a read grant for `BUILTIN\Users`. The
+service therefore re-applies an ACL of SYSTEM and Administrators only, with
+inheritance severed, to both the directory and the file on every start. Audit it
+with:
+
+```powershell
+(Get-Acl $env:ProgramData\MahoRD\host-authorizations.json).Access
+# expect NT AUTHORITY\SYSTEM and BUILTIN\Administrators only
+```
+
 ## Migrating from the scheduled-task host
 
 Earlier deployments ran `maho-host.exe` from a Windows scheduled task with a logon
