@@ -24,8 +24,11 @@ pub mod inject_linux;
 pub mod inject_macos;
 #[cfg(target_os = "windows")]
 pub mod inject_windows;
+#[cfg(target_os = "windows")]
+pub mod service_windows;
 pub mod session;
 pub mod windows_logic;
+pub mod windows_session;
 
 #[cfg(test)]
 #[path = "../../test-support/allocations.rs"]

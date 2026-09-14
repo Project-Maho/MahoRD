@@ -1,0 +1,338 @@
+//! Supervisor logic for streaming the Windows secure desktop (logon screen,
+//! lock screen, UAC consent). Kept target-independent so it is unit-tested on
+//! every platform.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// A desktop of `WinSta0`. `Winlogon` is the secure desktop: a worker bound to
+/// `Default` loses DXGI access the moment Windows switches to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopKind {
+    Winlogon,
+    Default,
+    Screensaver,
+    Other,
+}
+
+impl DesktopKind {
+    pub fn startup_desktop(self) -> &'static str {
+        match self {
+            Self::Winlogon => "WinSta0\\Winlogon",
+            Self::Screensaver => "WinSta0\\Screen-saver",
+            Self::Default | Self::Other => "WinSta0\\Default",
+        }
+    }
+}
+
+/// Classifies a `GetUserObjectInformationW(UOI_NAME)` desktop name.
+/// Windows desktop names are case-insensitive.
+pub fn desktop_kind(name: &str) -> DesktopKind {
+    if name.eq_ignore_ascii_case("winlogon") {
+        DesktopKind::Winlogon
+    } else if name.eq_ignore_ascii_case("default") {
+        DesktopKind::Default
+    } else if name.eq_ignore_ascii_case("screen-saver") || name.eq_ignore_ascii_case("screensaver")
+    {
+        DesktopKind::Screensaver
+    } else {
+        DesktopKind::Other
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsoleState {
+    /// `None` when `WTSGetActiveConsoleSessionId` reports `0xFFFF_FFFF`, which
+    /// happens while no session is attached to the console.
+    pub session_id: Option<u32>,
+    pub desktop: DesktopKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerState {
+    pub session_id: u32,
+    pub desktop: DesktopKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisorAction {
+    Idle,
+    Spawn {
+        session_id: u32,
+        desktop: DesktopKind,
+    },
+    Respawn {
+        session_id: u32,
+        desktop: DesktopKind,
+    },
+    StopWorker,
+}
+
+pub fn decide_action(console: ConsoleState, worker: Option<WorkerState>) -> SupervisorAction {
+    let Some(session_id) = console.session_id else {
+        return SupervisorAction::StopWorker;
+    };
+    let desktop = console.desktop;
+    match worker {
+        None => SupervisorAction::Spawn {
+            session_id,
+            desktop,
+        },
+        Some(worker) if worker.session_id == session_id && worker.desktop == desktop => {
+            SupervisorAction::Idle
+        }
+        Some(_) => SupervisorAction::Respawn {
+            session_id,
+            desktop,
+        },
+    }
+}
+
+/// Machine-wide pairing store: `%ProgramData%\MahoRD\host-authorizations.json`.
+///
+/// A LocalSystem process resolves the per-user data directory to
+/// `C:\Windows\System32\config\systemprofile`, so service mode cannot use
+/// `PairingStore::default_path` without forcing paired clients back to PIN.
+pub fn service_store_path(program_data: &str) -> PathBuf {
+    PathBuf::from(program_data)
+        .join("MahoRD")
+        .join("host-authorizations.json")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureFailure {
+    AccessLost,
+    /// What a switch to the secure desktop looks like to DXGI.
+    AccessDenied,
+    RefreshFailure,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureRecovery {
+    Reacquire(Duration),
+    Abort,
+}
+
+/// Recovery policy for the native capture loop. Secure-desktop switches surface
+/// as `AccessDenied`/`AccessLost` and MUST keep retrying: aborting there is the
+/// bug that kills streaming at the logon screen.
+pub fn capture_recovery(failure: CaptureFailure, consecutive: u32) -> CaptureRecovery {
+    match failure {
+        CaptureFailure::AccessLost
+        | CaptureFailure::AccessDenied
+        | CaptureFailure::RefreshFailure => {
+            CaptureRecovery::Reacquire(reacquire_backoff(consecutive))
+        }
+        CaptureFailure::Other if consecutive < OTHER_FAILURE_ABORT_THRESHOLD => {
+            CaptureRecovery::Reacquire(reacquire_backoff(consecutive))
+        }
+        CaptureFailure::Other => CaptureRecovery::Abort,
+    }
+}
+
+const OTHER_FAILURE_ABORT_THRESHOLD: u32 = 30;
+const REACQUIRE_FLOOR_MILLIS: u64 = 33;
+const REACQUIRE_CAP_MILLIS: u64 = 1000;
+
+/// Exponential backoff floored at one frame interval and capped so the loop
+/// stays responsive when the desktop switches back.
+pub fn reacquire_backoff(attempt: u32) -> Duration {
+    let millis = REACQUIRE_FLOOR_MILLIS
+        .checked_shl(attempt)
+        .unwrap_or(REACQUIRE_CAP_MILLIS)
+        .min(REACQUIRE_CAP_MILLIS);
+    Duration::from_millis(millis)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_desktop_names_case_insensitively() {
+        for (name, expected) in [
+            ("Winlogon", DesktopKind::Winlogon),
+            ("wINLoGON", DesktopKind::Winlogon),
+            ("Default", DesktopKind::Default),
+            ("dEFAULT", DesktopKind::Default),
+            ("Screen-saver", DesktopKind::Screensaver),
+            ("sCREEN-SAVER", DesktopKind::Screensaver),
+            ("Screensaver", DesktopKind::Screensaver),
+            ("sCREENSAVER", DesktopKind::Screensaver),
+            ("", DesktopKind::Other),
+            ("Custom", DesktopKind::Other),
+            (" Winlogon", DesktopKind::Other),
+            ("Default-extra", DesktopKind::Other),
+        ] {
+            assert_eq!(desktop_kind(name), expected, "name: {name:?}");
+        }
+    }
+
+    #[test]
+    fn startup_desktops_use_winsta0_and_default_fallback() {
+        for (desktop, expected) in [
+            (DesktopKind::Winlogon, "WinSta0\\Winlogon"),
+            (DesktopKind::Default, "WinSta0\\Default"),
+            (DesktopKind::Screensaver, "WinSta0\\Screen-saver"),
+            (DesktopKind::Other, "WinSta0\\Default"),
+        ] {
+            assert_eq!(desktop.startup_desktop(), expected);
+        }
+    }
+
+    #[test]
+    fn no_console_stops_worker_regardless_of_worker_presence() {
+        let console = ConsoleState {
+            session_id: None,
+            desktop: DesktopKind::Winlogon,
+        };
+        for worker in [
+            None,
+            Some(WorkerState {
+                session_id: 7,
+                desktop: DesktopKind::Default,
+            }),
+        ] {
+            assert_eq!(decide_action(console, worker), SupervisorAction::StopWorker);
+        }
+    }
+
+    #[test]
+    fn console_without_worker_spawns_on_its_desktop() {
+        for desktop in [
+            DesktopKind::Winlogon,
+            DesktopKind::Default,
+            DesktopKind::Screensaver,
+            DesktopKind::Other,
+        ] {
+            assert_eq!(
+                decide_action(
+                    ConsoleState {
+                        session_id: Some(7),
+                        desktop,
+                    },
+                    None,
+                ),
+                SupervisorAction::Spawn {
+                    session_id: 7,
+                    desktop,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn matching_worker_is_idle() {
+        assert_eq!(
+            decide_action(
+                ConsoleState {
+                    session_id: Some(7),
+                    desktop: DesktopKind::Winlogon,
+                },
+                Some(WorkerState {
+                    session_id: 7,
+                    desktop: DesktopKind::Winlogon,
+                }),
+            ),
+            SupervisorAction::Idle,
+        );
+    }
+
+    #[test]
+    fn session_or_desktop_change_respawns_on_console_desktop() {
+        let console = ConsoleState {
+            session_id: Some(7),
+            desktop: DesktopKind::Winlogon,
+        };
+        for worker in [
+            WorkerState {
+                session_id: 8,
+                desktop: DesktopKind::Winlogon,
+            },
+            WorkerState {
+                session_id: 7,
+                desktop: DesktopKind::Default,
+            },
+            WorkerState {
+                session_id: 8,
+                desktop: DesktopKind::Default,
+            },
+        ] {
+            assert_eq!(
+                decide_action(console, Some(worker)),
+                SupervisorAction::Respawn {
+                    session_id: 7,
+                    desktop: DesktopKind::Winlogon,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn service_store_joins_machine_wide_path_components() {
+        for program_data in ["/var/program-data", "relative-data", ""] {
+            let expected = PathBuf::from(program_data)
+                .join("MahoRD")
+                .join("host-authorizations.json");
+            assert_eq!(service_store_path(program_data), expected);
+        }
+    }
+
+    #[test]
+    fn secure_desktop_failures_never_abort() {
+        for failure in [
+            CaptureFailure::AccessLost,
+            CaptureFailure::AccessDenied,
+            CaptureFailure::RefreshFailure,
+        ] {
+            for (consecutive, millis) in [
+                (0, 33),
+                (1, 66),
+                (29, 1000),
+                (30, 1000),
+                (10_000, 1000),
+                (u32::MAX, 1000),
+            ] {
+                assert_eq!(
+                    capture_recovery(failure, consecutive),
+                    CaptureRecovery::Reacquire(Duration::from_millis(millis)),
+                    "failure: {failure:?}, consecutive: {consecutive}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn other_capture_failures_abort_at_thirty() {
+        for consecutive in 0..30 {
+            assert_eq!(
+                capture_recovery(CaptureFailure::Other, consecutive),
+                CaptureRecovery::Reacquire(reacquire_backoff(consecutive)),
+            );
+        }
+        for consecutive in [30, 31, 10_000, u32::MAX] {
+            assert_eq!(
+                capture_recovery(CaptureFailure::Other, consecutive),
+                CaptureRecovery::Abort,
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_doubles_from_one_frame_and_caps_at_one_second() {
+        for (attempt, millis) in [33, 66, 132, 264, 528, 1000, 1000].into_iter().enumerate() {
+            assert_eq!(
+                reacquire_backoff(attempt as u32),
+                Duration::from_millis(millis),
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_is_capped_without_overflow_for_large_attempts() {
+        for attempt in [31, 32, 63, 64, 10_000, u32::MAX] {
+            assert_eq!(reacquire_backoff(attempt), Duration::from_millis(1000));
+        }
+    }
+}
