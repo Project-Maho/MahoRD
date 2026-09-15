@@ -25,6 +25,16 @@ use evdev::{
 };
 use maho_proto::{InputEvent as WireInputEvent, InputEventType, Modifiers};
 
+/// Derives evdev absolute axis max limits for uinput setup.
+///
+/// Linux evdev absolute axes are inclusive `[minimum, maximum]`. For a desktop
+/// of width `W` (pixels `0..W-1`), the maximum coordinate index is `W - 1`. Setting
+/// `maximum = W` creates `W + 1` discrete values, causing compositors/libinput to
+/// scale incoming coordinates by `(W - 1) / W` and introducing a systematic -1 pixel boundary error.
+pub fn evdev_abs_axis_max(dimension: u32) -> i32 {
+    dimension.saturating_sub(1) as i32
+}
+
 /// Target output position and dimensions in compositor/global logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputGeometry {
@@ -350,10 +360,10 @@ impl LinuxInputInjector {
         let pointer_keys =
             AttributeSet::from_iter([KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE]);
         let props = AttributeSet::from_iter([evdev::PropType::DIRECT]);
-        let max_x = geometry.desktop_width.max(1) as i32;
-        let max_y = geometry.desktop_height.max(1) as i32;
-        let abs_info_x = AbsInfo::new(0, 0, max_x, 0, 0, 28);
-        let abs_info_y = AbsInfo::new(0, 0, max_y, 0, 0, 28);
+        let max_x = evdev_abs_axis_max(geometry.desktop_width);
+        let max_y = evdev_abs_axis_max(geometry.desktop_height);
+        let abs_info_x = AbsInfo::new(-1, 0, max_x, 0, 0, 28);
+        let abs_info_y = AbsInfo::new(-1, 0, max_y, 0, 0, 28);
         let abs_x = UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, abs_info_x);
         let abs_y = UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs_info_y);
         let pointer = VirtualDevice::builder()?
@@ -665,6 +675,15 @@ impl Drop for LinuxInputInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regression_evdev_abs_axis_max_matches_pixel_index_boundary() {
+        assert_eq!(evdev_abs_axis_max(6400), 6399);
+        assert_eq!(evdev_abs_axis_max(1600), 1599);
+        assert_eq!(evdev_abs_axis_max(3840), 3839);
+        assert_eq!(evdev_abs_axis_max(1), 0);
+        assert_eq!(evdev_abs_axis_max(0), 0);
+    }
 
     #[test]
     fn maps_normalized_coordinates_into_target_output() {

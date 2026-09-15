@@ -575,18 +575,185 @@ pub fn resolve_output_target(
     select_focused_output(monitors)
 }
 
+#[cfg(target_os = "linux")]
+fn find_hyprland_instance_signature() -> Option<String> {
+    if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+        if !sig.is_empty() {
+            return Some(sig);
+        }
+    }
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let uid = unsafe { libc::getuid() };
+            std::path::PathBuf::from(format!("/run/user/{uid}"))
+        });
+    let hypr_dir = runtime_dir.join("hypr");
+    let entries = std::fs::read_dir(hypr_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.join(".socket.sock").exists() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                return Some(name.to_owned());
+            }
+        }
+    }
+    None
+}
+
 /// Probes Hyprland monitors using `hyprctl monitors -j`.
 #[cfg(target_os = "linux")]
 pub fn probe_hyprland_monitors() -> Option<serde_json::Value> {
-    let output = std::process::Command::new("hyprctl")
-        .arg("monitors")
-        .arg("-j")
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("hyprctl");
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+        if let Some(sig) = find_hyprland_instance_signature() {
+            cmd.arg("-i").arg(sig);
+        }
+    }
+    cmd.arg("monitors").arg("-j");
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }
     serde_json::from_slice(&output.stdout).ok()
+}
+
+/// Derives `OutputGeometry` from compositor monitor topology.
+///
+/// Resolves the selected output's logical position and bounds within the full
+/// multi-monitor desktop space, accounting for compositor offsets, monitor
+/// scaling, and rotation transforms.
+#[cfg(target_os = "linux")]
+fn output_geometry_from_monitors(
+    monitors: &serde_json::Value,
+    target_output_name: Option<&str>,
+) -> Option<crate::inject_linux::OutputGeometry> {
+    let array = monitors.as_array()?;
+    if array.is_empty() {
+        return None;
+    }
+
+    struct MonitorInfo<'a> {
+        name: &'a str,
+        x: i32,
+        y: i32,
+        logical_w: u32,
+        logical_h: u32,
+        focused: bool,
+    }
+
+    let mut active_monitors = Vec::new();
+
+    for item in array {
+        let disabled = item
+            .get("disabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if disabled {
+            continue;
+        }
+
+        let name = item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let x = item
+            .get("x")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0) as i32;
+        let y = item
+            .get("y")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0) as i32;
+        let width = item
+            .get("width")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let height = item
+            .get("height")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let scale = item
+            .get("scale")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        let transform = item
+            .get("transform")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let focused = item
+            .get("focused")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        if width <= 0.0 || height <= 0.0 {
+            continue;
+        }
+
+        let (mode_w, mode_h) = match transform {
+            1 | 3 | 5 | 7 => (height, width),
+            _ => (width, height),
+        };
+        let effective_scale = if scale > 0.0 { scale } else { 1.0 };
+        let logical_w = ((mode_w / effective_scale).round() as u32).max(1);
+        let logical_h = ((mode_h / effective_scale).round() as u32).max(1);
+
+        active_monitors.push(MonitorInfo {
+            name,
+            x,
+            y,
+            logical_w,
+            logical_h,
+            focused,
+        });
+    }
+
+    if active_monitors.is_empty() {
+        return None;
+    }
+
+    let desktop_x = active_monitors.iter().map(|m| m.x).min().unwrap();
+    let desktop_y = active_monitors.iter().map(|m| m.y).min().unwrap();
+    let desktop_max_x = active_monitors
+        .iter()
+        .map(|m| m.x as i64 + m.logical_w as i64)
+        .max()
+        .unwrap();
+    let desktop_max_y = active_monitors
+        .iter()
+        .map(|m| m.y as i64 + m.logical_h as i64)
+        .max()
+        .unwrap();
+    let desktop_width = (desktop_max_x - desktop_x as i64).max(1) as u32;
+    let desktop_height = (desktop_max_y - desktop_y as i64).max(1) as u32;
+
+    let target = match target_output_name {
+        Some(name) => active_monitors.iter().find(|m| m.name == name)?,
+        None => active_monitors
+            .iter()
+            .find(|m| m.focused)
+            .or_else(|| active_monitors.first())?,
+    };
+
+    Some(crate::inject_linux::OutputGeometry {
+        x: target.x,
+        y: target.y,
+        width: target.logical_w,
+        height: target.logical_h,
+        desktop_x,
+        desktop_y,
+        desktop_width,
+        desktop_height,
+    })
+}
+
+/// Probes compositor topology to compute the target output geometry and full desktop bounds.
+#[cfg(target_os = "linux")]
+fn probe_linux_input_geometry(
+    target_output_name: Option<&str>,
+) -> Option<crate::inject_linux::OutputGeometry> {
+    let monitors = probe_hyprland_monitors()?;
+    output_geometry_from_monitors(&monitors, target_output_name)
 }
 
 /// Name of the compositor's focused output, for hosts that expose several
@@ -2391,12 +2558,16 @@ impl HostServer {
             WindowsInputInjector::new(Some(target)).map_err(SessionError::Io)?
         };
         #[cfg(all(target_os = "linux", not(test)))]
-        let mut input =
-            LinuxInputInjector::new(crate::inject_linux::OutputGeometry::single_output(
-                self.config.display.pixel_width,
-                self.config.display.pixel_height,
-            ))
-            .map_err(SessionError::Io)?;
+        let mut input = {
+            let geometry = probe_linux_input_geometry(self.config.output_name.as_deref())
+                .unwrap_or_else(|| {
+                    crate::inject_linux::OutputGeometry::single_output(
+                        self.config.display.pixel_width,
+                        self.config.display.pixel_height,
+                    )
+                });
+            LinuxInputInjector::new(geometry).map_err(SessionError::Io)?
+        };
         #[cfg(all(target_os = "linux", test))]
         let mut input = tests::admission_input(self)?;
         // Establish the diagnostic clock before any session-local timestamps.
@@ -3702,10 +3873,14 @@ mod tests {
         if let Some(input) = server.prepared_admission_input.lock().unwrap().take() {
             return Ok(input);
         }
-        LinuxInputInjector::new(crate::inject_linux::OutputGeometry::single_output(
-            server.config.display.pixel_width,
-            server.config.display.pixel_height,
-        ))
+        let geometry = probe_linux_input_geometry(server.config.output_name.as_deref())
+            .unwrap_or_else(|| {
+                crate::inject_linux::OutputGeometry::single_output(
+                    server.config.display.pixel_width,
+                    server.config.display.pixel_height,
+                )
+            });
+        LinuxInputInjector::new(geometry)
     }
 
     fn prepare_admission_input(_server: &mut HostServer) {
@@ -4328,6 +4503,277 @@ mod tests {
 
         let not_an_array: serde_json::Value = serde_json::json!({"name": "HDMI-A-1"});
         assert_eq!(select_focused_output(&not_an_array), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn regression_multi_monitor_output_geometry_matches_desktop_topology() {
+        // 1. Live Linux scenario from diagnosis:
+        // HDMI-A-2: 3840x1600 at (0, 0), HEADLESS-1: 2560x1440 at (3840, 0).
+        // Total desktop bounding box: 6400x1600.
+        let monitors = serde_json::json!([
+            {
+                "name": "HDMI-A-2",
+                "x": 0,
+                "y": 0,
+                "width": 3840,
+                "height": 1600,
+                "scale": 1.0,
+                "transform": 0,
+                "focused": true,
+                "disabled": false
+            },
+            {
+                "name": "HEADLESS-1",
+                "x": 3840,
+                "y": 0,
+                "width": 2560,
+                "height": 1440,
+                "scale": 1.0,
+                "transform": 0,
+                "focused": false,
+                "disabled": false
+            }
+        ]);
+
+        let hdmi =
+            output_geometry_from_monitors(&monitors, Some("HDMI-A-2")).expect("HDMI-A-2 geometry");
+        assert_eq!(hdmi.desktop_x, 0);
+        assert_eq!(hdmi.desktop_y, 0);
+        assert_eq!(hdmi.desktop_width, 6400);
+        assert_eq!(hdmi.desktop_height, 1600);
+        assert_eq!(hdmi.x, 0);
+        assert_eq!(hdmi.y, 0);
+        assert_eq!(hdmi.width, 3840);
+        assert_eq!(hdmi.height, 1600);
+
+        // Verification of coordinate mapping on the 6400x1600 desktop:
+        // Right edge of HDMI-A-2 (x = 1.0) must map to pixel 3839 within the 6400 uinput range,
+        // preventing the horizontal scaling bug where 3839 was scaled across 6400.
+        let (mapped_x, _) = crate::inject_linux::map_normalized_to_output(1.0, 0.5, hdmi);
+        assert_eq!(mapped_x, 3839);
+
+        // Selecting HEADLESS-1 on the same topology:
+        let headless = output_geometry_from_monitors(&monitors, Some("HEADLESS-1"))
+            .expect("HEADLESS-1 geometry");
+        assert_eq!(headless.desktop_width, 6400);
+        assert_eq!(headless.desktop_height, 1600);
+        assert_eq!(headless.x, 3840);
+        assert_eq!(headless.y, 0);
+        assert_eq!(headless.width, 2560);
+        assert_eq!(headless.height, 1440);
+
+        // 2. Omarchy live compositor arrangement:
+        // HEADLESS-1 at (0, 0) 2560x1440, HDMI-A-2 at (2560, 0) 3840x1600.
+        let omarchy_monitors = serde_json::json!([
+            {
+                "name": "HEADLESS-1",
+                "x": 0,
+                "y": 0,
+                "width": 2560,
+                "height": 1440,
+                "scale": 1.0,
+                "transform": 0,
+                "focused": false,
+                "disabled": false
+            },
+            {
+                "name": "HDMI-A-2",
+                "x": 2560,
+                "y": 0,
+                "width": 3840,
+                "height": 1600,
+                "scale": 1.0,
+                "transform": 0,
+                "focused": true,
+                "disabled": false
+            }
+        ]);
+
+        let omarchy_hdmi = output_geometry_from_monitors(&omarchy_monitors, Some("HDMI-A-2"))
+            .expect("Omarchy HDMI-A-2 geometry");
+        assert_eq!(omarchy_hdmi.desktop_width, 6400);
+        assert_eq!(omarchy_hdmi.desktop_height, 1600);
+        assert_eq!(omarchy_hdmi.x, 2560);
+        assert_eq!(omarchy_hdmi.y, 0);
+        assert_eq!(omarchy_hdmi.width, 3840);
+        assert_eq!(omarchy_hdmi.height, 1600);
+
+        let (left_x, _) = crate::inject_linux::map_normalized_to_output(0.0, 1.0, omarchy_hdmi);
+        let (right_x, _) = crate::inject_linux::map_normalized_to_output(1.0, 1.0, omarchy_hdmi);
+        assert_eq!(left_x, 2560);
+        assert_eq!(right_x, 6399);
+
+        // 3. Fallback to focused or first monitor when target_output_name is None:
+        let auto_focused =
+            output_geometry_from_monitors(&omarchy_monitors, None).expect("auto-focused geometry");
+        assert_eq!(auto_focused, omarchy_hdmi);
+
+        // 4. Negative desktop origin:
+        let negative_monitors = serde_json::json!([
+            {
+                "name": "DP-1",
+                "x": -1920,
+                "y": -1080,
+                "width": 1920,
+                "height": 1080,
+                "scale": 1.0,
+                "transform": 0,
+                "disabled": false
+            },
+            {
+                "name": "PRIMARY",
+                "x": 0,
+                "y": 0,
+                "width": 2560,
+                "height": 1440,
+                "scale": 1.0,
+                "transform": 0,
+                "disabled": false
+            }
+        ]);
+        let neg_geom = output_geometry_from_monitors(&negative_monitors, Some("DP-1"))
+            .expect("negative origin geometry");
+        assert_eq!(neg_geom.desktop_x, -1920);
+        assert_eq!(neg_geom.desktop_y, -1080);
+        assert_eq!(neg_geom.desktop_width, 4480);
+        assert_eq!(neg_geom.desktop_height, 2520);
+        assert_eq!(neg_geom.x, -1920);
+        assert_eq!(neg_geom.y, -1080);
+
+        // 5. Scaling and rotation transforms:
+        let transformed_monitors = serde_json::json!([
+            {
+                "name": "SCALED-4K",
+                "x": 0,
+                "y": 0,
+                "width": 3840,
+                "height": 2160,
+                "scale": 2.0,
+                "transform": 0,
+                "disabled": false
+            },
+            {
+                "name": "ROTATED-PORTRAIT",
+                "x": 1920,
+                "y": 0,
+                "width": 1920,
+                "height": 1080,
+                "scale": 1.0,
+                "transform": 1,
+                "disabled": false
+            },
+            {
+                "name": "OFFLINE",
+                "x": 9999,
+                "y": 9999,
+                "width": 1920,
+                "height": 1080,
+                "disabled": true
+            }
+        ]);
+        let scaled = output_geometry_from_monitors(&transformed_monitors, Some("SCALED-4K"))
+            .expect("scaled geometry");
+        assert_eq!(scaled.width, 1920);
+        assert_eq!(scaled.height, 1080);
+        // Total desktop without disabled monitor:
+        // SCALED-4K: (0,0) -> 1920x1080. ROTATED-PORTRAIT: (1920,0) -> 1080x1920.
+        // desktop: x: 0..3000, y: 0..1920.
+        assert_eq!(scaled.desktop_width, 3000);
+        assert_eq!(scaled.desktop_height, 1920);
+
+        // 6. Explicit target missing must strictly return None (never silently fallback):
+        assert_eq!(
+            output_geometry_from_monitors(&monitors, Some("NON_EXISTENT")),
+            None,
+            "missing explicit target must return None"
+        );
+
+        // 7. Invalid / empty monitors returns None:
+        let empty = serde_json::json!([]);
+        assert_eq!(output_geometry_from_monitors(&empty, None), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deterministic_exact_target_selection_and_fallback_precedence() {
+        let monitors = serde_json::json!([
+            {
+                "name": "DP-1",
+                "x": 0,
+                "y": 0,
+                "width": 1920,
+                "height": 1080,
+                "scale": 1.0,
+                "transform": 0,
+                "focused": false,
+                "disabled": false
+            },
+            {
+                "name": "HDMI-A-1",
+                "x": 1920,
+                "y": 0,
+                "width": 2560,
+                "height": 1440,
+                "scale": 1.0,
+                "transform": 0,
+                "focused": true,
+                "disabled": false
+            }
+        ]);
+
+        // Explicit target match selects exact target
+        let exact_dp =
+            output_geometry_from_monitors(&monitors, Some("DP-1")).expect("exact DP-1 selection");
+        assert_eq!(exact_dp.x, 0);
+        assert_eq!(exact_dp.width, 1920);
+
+        let exact_hdmi = output_geometry_from_monitors(&monitors, Some("HDMI-A-1"))
+            .expect("exact HDMI-A-1 selection");
+        assert_eq!(exact_hdmi.x, 1920);
+        assert_eq!(exact_hdmi.width, 2560);
+
+        // Explicit target missing must strictly return None (must NOT silently fall back to focused HDMI-A-1)
+        assert_eq!(
+            output_geometry_from_monitors(&monitors, Some("NON_EXISTENT")),
+            None
+        );
+
+        // Auto-detect with focused monitor selects the focused monitor
+        let auto_focused =
+            output_geometry_from_monitors(&monitors, None).expect("auto focused selection");
+        assert_eq!(auto_focused.x, 1920);
+        assert_eq!(auto_focused.width, 2560);
+
+        // Auto-detect with no focused monitor falls back to first available monitor
+        let monitors_none_focused = serde_json::json!([
+            {
+                "name": "DP-1",
+                "x": 0,
+                "y": 0,
+                "width": 1920,
+                "height": 1080,
+                "scale": 1.0,
+                "transform": 0,
+                "focused": false,
+                "disabled": false
+            },
+            {
+                "name": "HDMI-A-1",
+                "x": 1920,
+                "y": 0,
+                "width": 2560,
+                "height": 1440,
+                "scale": 1.0,
+                "transform": 0,
+                "focused": false,
+                "disabled": false
+            }
+        ]);
+        let auto_first = output_geometry_from_monitors(&monitors_none_focused, None)
+            .expect("auto first selection");
+        assert_eq!(auto_first.x, 0);
+        assert_eq!(auto_first.width, 1920);
     }
 
     #[test]
