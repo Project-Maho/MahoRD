@@ -5,7 +5,7 @@ use std::{
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc, Arc, Condvar, Mutex,
     },
     thread,
@@ -236,6 +236,8 @@ pub struct ClientSession {
     udp_send: Arc<Mutex<Option<DatagramCipher>>>,
     udp_receive: Arc<Mutex<Option<DatagramCipher>>>,
     last_input_ack: Arc<Mutex<Option<(u32, bool, u8)>>>,
+    udp_registered: Arc<AtomicBool>,
+    registration_attempts: Arc<AtomicU32>,
     trace: ReceiverTrace,
     #[cfg(test)]
     tcp_wait: Arc<Mutex<Option<mpsc::Sender<()>>>>,
@@ -261,6 +263,8 @@ impl ClientSession {
             udp_send: Arc::new(Mutex::new(None)),
             udp_receive: Arc::new(Mutex::new(None)),
             last_input_ack: Arc::new(Mutex::new(None)),
+            udp_registered: Arc::new(AtomicBool::new(false)),
+            registration_attempts: Arc::new(AtomicU32::new(0)),
             trace: std::env::var_os("MAHO_RECEIVER_TRACE_PATH")
                 .map(|path| ReceiverTrace::at_path(path.into()))
                 .unwrap_or_default(),
@@ -380,6 +384,23 @@ impl ClientSession {
 
     pub fn send_control(&self, control: ControlMessage) -> Result<(), SessionError> {
         self.send_ready_packet(PacketType::Control, &control.encode()?)
+    }
+
+    /// Resends the authenticated UDP registration ping with a fresh AEAD nonce.
+    pub fn send_udp_registration(&self) -> Result<(), SessionError> {
+        let udp = {
+            let socket_guard = self.udp.lock().map_err(|_| SessionError::Poisoned)?;
+            socket_guard
+                .as_ref()
+                .cloned()
+                .ok_or(SessionError::NotReady)?
+        };
+        let mut cipher_guard = self.udp_send.lock().map_err(|_| SessionError::Poisoned)?;
+        let cipher = cipher_guard.as_mut().ok_or(SessionError::NotReady)?;
+        let reg_header = PacketHeader::new(PacketType::Ping, 0, current_unix_ms() as u32, 0);
+        let reg_packet = cipher.seal_datagram(&reg_header, &[])?;
+        udp.socket.send(&reg_packet)?;
+        Ok(())
     }
 
     pub fn send_udp(&self, packet_type: PacketType, payload: &[u8]) -> Result<(), SessionError> {
@@ -656,6 +677,18 @@ impl ClientSession {
                     _ => -1,
                 };
                 self.trace.record(std::time::Instant::now(), record);
+                if let SessionError::Io(ref io_err) = error {
+                    if matches!(
+                        io_err.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) && !self.udp_registered.load(Ordering::Relaxed)
+                    {
+                        let attempts = self.registration_attempts.fetch_add(1, Ordering::Relaxed);
+                        if attempts < 10 {
+                            let _ = self.send_udp_registration();
+                        }
+                    }
+                }
                 return Err(error);
             }
         };
@@ -696,6 +729,7 @@ impl ClientSession {
             }
         };
         record.event = ReceiverTraceEvent::Authenticated;
+        self.udp_registered.store(true, Ordering::Relaxed);
         record.frame = if self.trace.enabled() {
             match header.packet_type {
                 PacketType::FrameHeader => FrameHeader::decode(&payload).ok().map(|h| h.frame_id),
@@ -963,9 +997,13 @@ impl ClientSession {
         let _ = rustix::net::sockopt::set_socket_send_buffer_size(&udp, 4 * 1024 * 1024);
         udp.connect(udp_address)?;
         udp.set_read_timeout(Some(HEARTBEAT_INTERVAL * 3))?;
-        let reg_header = PacketHeader::new(PacketType::Ping, 0, current_unix_ms() as u32, 0);
-        let reg_packet = udp_send.seal_datagram(&reg_header, &[])?;
-        udp.send(&reg_packet)?;
+        self.udp_registered.store(false, Ordering::Relaxed);
+        self.registration_attempts.store(0, Ordering::Relaxed);
+        for seq in 0..3 {
+            let reg_header = PacketHeader::new(PacketType::Ping, seq, current_unix_ms() as u32, 0);
+            let reg_packet = udp_send.seal_datagram(&reg_header, &[])?;
+            let _ = udp.send(&reg_packet);
+        }
         {
             let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
             if let Some(tcp) = tcp.as_mut() {
@@ -1970,6 +2008,76 @@ mod receiver_clock_tests {
             assembly.max_us <= 5_000,
             "assembly interval must come from the supplied clock, got {assembly:?}"
         );
+        session.disconnect().unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn send_udp_registration_emits_authenticated_ping_burst_and_retry() {
+        let key = [0x5a; 32];
+        let listener = TlsPskServer::new([PskIdentity::pairing("burst", &key).unwrap()])
+            .unwrap()
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = SessionConfig::direct("127.0.0.1", "burst");
+        config.tcp_port = listener.local_addr().unwrap().port();
+        config.udp_port = udp.local_addr().unwrap().port();
+        config.connect_timeout = Duration::from_secs(5);
+        config.handshake_ack_timeout = Duration::from_secs(5);
+        config.pairing_store_path = Some(temporary.path().join("pairings.json"));
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap();
+            stream
+                .ssl_stream()
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let frame = stream.read_frame().unwrap();
+            let handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            let mut ack = PacketHeader::new(PacketType::HandshakeAck, 0, 0, 0)
+                .encode()
+                .unwrap();
+            ack.extend_from_slice(&handshake.encode().unwrap());
+            stream.write_frame(&ack).unwrap();
+            ready_tx.send(handshake.session_salt).unwrap();
+            let _ = stream.read_frame();
+        });
+
+        let session = ClientSession::new(config).unwrap();
+        session
+            .connect_with_pairing(PairingRecord {
+                id: "burst".into(),
+                name: "burst_fixture".into(),
+                key: key.to_vec(),
+                added_at_unix_ms: 0,
+                last_endpoint: None,
+                endpoint_aliases: Vec::new(),
+            })
+            .unwrap();
+        let salt = ready_rx.recv().unwrap();
+        let mut c2h = DatagramCipher::derive(&key, &salt, Direction::ClientToHost).unwrap();
+
+        // 3 initial registration packets were sent during connect
+        let mut probe = [0u8; 1024];
+        for _ in 0..3 {
+            let (len, _) = udp.recv_from(&mut probe).unwrap();
+            let (hdr, payload) = c2h.open_datagram(&probe[..len]).unwrap();
+            assert_eq!(hdr.packet_type, PacketType::Ping);
+            assert!(payload.is_empty());
+        }
+
+        // Resending sends an additional valid registration ping with fresh nonce
+        session.send_udp_registration().unwrap();
+        let (len, _) = udp.recv_from(&mut probe).unwrap();
+        let (hdr, payload) = c2h.open_datagram(&probe[..len]).unwrap();
+        assert_eq!(hdr.packet_type, PacketType::Ping);
+        assert!(payload.is_empty());
+
         session.disconnect().unwrap();
         worker.join().unwrap();
     }
