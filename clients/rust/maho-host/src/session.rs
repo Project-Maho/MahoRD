@@ -82,6 +82,13 @@ pub const PAIRING_WINDOW: Duration = Duration::from_secs(300);
 /// ```
 pub use maho_proto::{TimestampStats, TIMESTAMP_STATS_MAGIC};
 const SWIFT_REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
+
+/// Process-lifetime stream-server counters, read by the session worker's
+/// recycle watchdog: a worker spawned during desktop churn can accept TCP
+/// forever while no TLS handshake ever completes, wedging the logon screen.
+pub static SERVER_ACCEPTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static SERVER_TLS_SUCCESSES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 #[path = "host_trace.rs"]
 pub(crate) mod host_trace;
 
@@ -2159,26 +2166,49 @@ impl HostServer {
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), SessionError> {
         self.tcp_listener.set_nonblocking(true)?;
+        // The accept loop serves each connection inline, so a connection that
+        // stalls parks every later client; these markers make that visible.
+        let bound = self
+            .tcp_listener
+            .local_addr()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|_| "?".to_owned());
+        crate::host_log(&format!("server: listening on {bound}"));
         while !stop.load(std::sync::atomic::Ordering::Relaxed) {
             match self.tcp_listener.accept() {
                 Ok((tcp, peer)) => {
+                    let accept_started = std::time::Instant::now();
                     let _ = tcp.set_nonblocking(false);
                     let admission_deadline = std::time::Instant::now() + self.preauth_timeout;
                     tcp.set_nodelay(true)?;
+                    SERVER_ACCEPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    crate::host_log(&format!("server: accepted {peer}"));
                     let tls_server = maho_net::tls_psk::TlsPskServer::new(self.current_psks()?)?;
                     match tls_server.accept_stream_until(tcp, admission_deadline) {
                         Ok(stream) => {
+                            SERVER_TLS_SUCCESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            crate::host_log(&format!(
+                                "server: TLS established {peer} in {:?}",
+                                accept_started.elapsed()
+                            ));
                             if let Err(error) = self.handle_connection(
                                 stream,
                                 peer,
                                 admission_deadline,
                                 Some(stop.as_ref()),
                             ) {
+                                crate::host_log(&format!(
+                                    "server: connection ended {peer} after {:?}: {error}",
+                                    accept_started.elapsed()
+                                ));
                                 tracing::warn!(%error, "connection ended with an error");
                             }
                         }
                         Err(error) => {
-                            let _ = error;
+                            crate::host_log(&format!(
+                                "server: TLS failed {peer} after {:?}: {error}",
+                                accept_started.elapsed()
+                            ));
                             let locked = self
                                 .lockout
                                 .lock()

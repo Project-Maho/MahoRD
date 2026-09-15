@@ -126,6 +126,8 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         if cli.session_worker {
+            maho_host::service_windows::log_to_file();
+            maho_host::host_log("worker: process started");
             maho_host::service_windows::publish_input_desktop();
         }
     }
@@ -230,11 +232,37 @@ fn main() -> Result<()> {
     if let Some(mbps) = cli.lan_bitrate_mbps {
         config.bitrate = mbps * 1_000_000;
     }
+    if cli.session_worker {
+        maho_host::host_log("worker: display ready; binding server");
+    }
 
     let server = HostServer::bind(config)?;
     println!("MahoRD bootstrap PIN: {pin}");
     println!("TCP listening on {}", server.tcp_addr()?);
     println!("UDP listening on {}", server.udp_addr()?);
+    if cli.session_worker {
+        maho_host::host_log("worker: serving");
+        // Recycle watchdog: a worker spawned during desktop churn can accept
+        // TCP forever while no TLS handshake ever completes (the churn wedge
+        // seen at the logon screen). Retire after the startup grace so the
+        // supervisor respawns a clean worker.
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let (accepts, successes) = maho_host::worker_stream_counters();
+            if maho_host::windows_session::worker_should_recycle(
+                accepts,
+                successes,
+                started.elapsed(),
+                std::time::Duration::from_secs(30),
+            ) {
+                maho_host::host_log(&format!(
+                    "worker: recycling after {accepts} accepts with no completed handshake"
+                ));
+                std::process::exit(0);
+            }
+        });
+    }
     println!("Pairing approval requests will appear in this terminal.");
     server.serve()?;
     Ok(())

@@ -9,15 +9,14 @@ use std::time::Duration;
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
-use windows::Win32::Security::*;
-use windows::Win32::System::Environment::*;
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
+use windows::Win32::Security::*;
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-    TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
+use windows::Win32::System::Environment::*;
 use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 use windows::Win32::System::Services::*;
 use windows::Win32::System::StationsAndDesktops::*;
@@ -84,9 +83,30 @@ pub(crate) fn service_log(message: &str) {
         .append(true)
         .open(path)
     {
-        let _ = writeln!(file, "{message}");
+        let _ = writeln!(file, "[{}] {message}", utc_timestamp());
         let _ = file.flush();
     }
+}
+
+/// UTC wall-clock stamp for log lines, computed without a calendar dependency:
+/// the civil-from-days conversion (Hinnant 2013) maps Unix days to Y-M-D.
+pub(crate) fn utc_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let (h, m, s) = ((secs / 3_600) % 24, (secs % 3_600) / 60, secs % 60);
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
 fn wide(value: &OsStr) -> Vec<u16> {
@@ -133,7 +153,9 @@ impl Drop for ProcessHandle {
     fn drop(&mut self) {
         if !self.0.is_invalid() {
             // SAFETY: the handle came from a Win32 open/snapshot call and is closed once.
-            unsafe { let _ = CloseHandle(self.0); }
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
         }
     }
 }
@@ -346,7 +368,15 @@ fn supervise(worker: &mut Option<WorkerHandle>) -> io::Result<()> {
             desktop,
         } => {
             stop_worker(worker)?;
-            *worker = Some(spawn_session_worker(session_id, desktop)?);
+            let spawned = spawn_session_worker(session_id, desktop);
+            match &spawned {
+                Ok(handle) => service_log(&format!(
+                    "respawned worker pid={} on session {session_id} desktop {desktop:?}",
+                    handle.process_id
+                )),
+                Err(error) => service_log(&format!("respawn failed: {error}")),
+            }
+            *worker = Some(spawned?);
         }
         SupervisorAction::StopWorker => stop_worker(worker)?,
     }
@@ -454,7 +484,15 @@ fn write_input_desktop() {
     // desktop, which this worker has no access to; report it as Winlogon so the
     // supervisor respawns a worker that does.
     let name = current_input_desktop_name().unwrap_or_else(|| "Winlogon".to_owned());
-    let _ = std::fs::write(&path, name);
+    // Write-then-rename: a worker killed mid-write must never leave a truncated
+    // file, which a plain in-place write would (truncate happens before the
+    // bytes land). The rename replaces the target on Windows.
+    let staging = path.with_extension("txt.staging");
+    if std::fs::write(&staging, &name).is_ok() {
+        let _ = std::fs::rename(&staging, &path);
+    } else {
+        let _ = std::fs::write(&path, &name);
+    }
 }
 
 fn current_input_desktop_name() -> Option<String> {
@@ -486,13 +524,13 @@ fn current_input_desktop_name() -> Option<String> {
     Some(String::from_utf16_lossy(&name[..end]))
 }
 
-fn session_desktop_kind(_session_id: u32) -> Option<DesktopKind> {
+fn session_desktop_hint() -> Option<String> {
     let raw = std::fs::read_to_string(desktop_hint_path()).ok()?;
-    let name = raw.trim();
+    let name = raw.trim().to_string();
     if name.is_empty() {
         return None;
     }
-    Some(crate::windows_session::desktop_kind(name))
+    Some(name)
 }
 
 /// Terminates `--session-worker` processes left behind by a previous instance.
@@ -610,9 +648,7 @@ fn reap_previous_workers() {
                 && entry.th32ParentProcessID != current
                 && crate::windows_session::is_reapable_worker(&name, &command)
             {
-                if let Ok(handle) =
-                    OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID)
-                {
+                if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID) {
                     let handle = ProcessHandle(handle);
                     let _ = TerminateProcess(handle.0, 0);
                     forget_worker(entry.th32ProcessID);
@@ -630,52 +666,17 @@ pub fn console_state() -> io::Result<ConsoleState> {
     // SAFETY: this API has no pointer arguments or prerequisites.
     let session = unsafe { WTSGetActiveConsoleSessionId() };
     let session_id = (session != u32::MAX).then_some(session);
-    if let Some(session) = session_id {
-        if let Some(desktop) = session_desktop_kind(session) {
-            return Ok(ConsoleState {
-                session_id,
-                desktop,
-            });
-        }
+    let hint = session_id.as_ref().and_then(|_| session_desktop_hint());
+    if session_id.is_some() && hint.is_none() {
+        // Pre-logon, or the worker died: assume the secure desktop until the
+        // worker republishes. OpenInputDesktop from session 0 describes session
+        // 0, not the console, and at the pre-logon screen it was measured to
+        // block for the whole window; neither may ever run on this path again.
+        service_log("console: no worker hint; assuming Winlogon");
     }
-    // SAFETY: the returned desktop is owned below; no inherited access is requested.
-    let desktop =
-        match unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) } {
-            Ok(handle) => DesktopHandle(handle),
-            Err(_) => {
-                return Ok(ConsoleState {
-                    session_id,
-                    desktop: DesktopKind::Winlogon,
-                });
-            }
-        };
-    let mut needed = 0;
-    // SAFETY: a zero-sized query writes only the required size to the valid output pointer.
-    let sizing = unsafe {
-        GetUserObjectInformationW(HANDLE(desktop.0 .0), UOI_NAME, None, 0, Some(&mut needed))
-    };
-    if let Err(error) = sizing {
-        if error.code() != ERROR_INSUFFICIENT_BUFFER.to_hresult() {
-            return Err(io_error(error));
-        }
-    }
-    let mut name = vec![0u16; (needed as usize).div_ceil(2)];
-    // SAFETY: name has at least needed bytes and the desktop remains open during the query.
-    unsafe {
-        GetUserObjectInformationW(
-            HANDLE(desktop.0 .0),
-            UOI_NAME,
-            Some(name.as_mut_ptr().cast()),
-            needed,
-            Some(&mut needed),
-        )
-        .map_err(io_error)?;
-    }
-    let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
-    let desktop = crate::windows_session::desktop_kind(&String::from_utf16_lossy(&name[..end]));
     Ok(ConsoleState {
         session_id,
-        desktop,
+        desktop: crate::windows_session::console_desktop_from_hint(hint.as_deref()),
     })
 }
 

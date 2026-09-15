@@ -40,6 +40,34 @@ pub fn desktop_kind(name: &str) -> DesktopKind {
     }
 }
 
+/// Maps the worker-published input-desktop hint to the console desktop.
+/// The hint is the ONLY reliable session-1 desktop source: `OpenInputDesktop`
+/// from the service's session 0 describes session 0, not the console, and can
+/// block for the whole pre-logon window. When no live worker has published a
+/// hint yet - the pre-logon state - the console sits on the secure desktop, so
+/// `Winlogon` is the safe assumption; the worker corrects it within 500 ms and
+/// the supervisor respawns onto the real desktop.
+pub fn console_desktop_from_hint(hint: Option<&str>) -> DesktopKind {
+    match hint {
+        Some(name) if !name.trim().is_empty() => desktop_kind(name),
+        _ => DesktopKind::Winlogon,
+    }
+}
+
+/// Decides whether a session worker whose server accepts TCP but never
+/// completes a TLS handshake should recycle itself so the supervisor respawns a
+/// fresh worker. A wedged worker from desktop churn accepts connections
+/// indefinitely while no handshake ever succeeds; a healthy idle worker simply
+/// has no accepts at all, so it never recycles.
+pub fn worker_should_recycle(
+    accepted: u32,
+    successful_handshakes: u32,
+    uptime: Duration,
+    min_uptime: Duration,
+) -> bool {
+    uptime >= min_uptime && accepted >= 3 && successful_handshakes == 0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConsoleState {
     /// `None` when `WTSGetActiveConsoleSessionId` reports `0xFFFF_FFFF`, which
@@ -603,5 +631,90 @@ mod tests {
             );
         }
         assert!(WORKER_OUTPUT_POLL < WORKER_OUTPUT_STARTUP_LIMIT);
+    }
+
+    #[test]
+    fn console_desktop_from_hint_assumes_winlogon_when_no_worker_published() {
+        // RED-first contract: at the pre-logon screen no worker lives to publish
+        // a hint, so the supervisor must assume the secure desktop instead of
+        // asking session 0 what IT sees.
+        use super::console_desktop_from_hint;
+
+        assert_eq!(console_desktop_from_hint(None), DesktopKind::Winlogon);
+        assert_eq!(console_desktop_from_hint(Some("")), DesktopKind::Winlogon);
+        assert_eq!(
+            console_desktop_from_hint(Some("   ")),
+            DesktopKind::Winlogon
+        );
+    }
+
+    #[test]
+    fn console_desktop_from_hint_trusts_published_names() {
+        use super::console_desktop_from_hint;
+
+        assert_eq!(
+            console_desktop_from_hint(Some("Default")),
+            DesktopKind::Default
+        );
+        assert_eq!(
+            console_desktop_from_hint(Some("Winlogon")),
+            DesktopKind::Winlogon
+        );
+        assert_eq!(
+            console_desktop_from_hint(Some("Screen-saver")),
+            DesktopKind::Screensaver
+        );
+        assert_eq!(
+            console_desktop_from_hint(Some("Garbage\\Nope")),
+            DesktopKind::Other
+        );
+    }
+
+    #[test]
+    fn worker_recycles_when_accepts_continue_without_handshakes() {
+        // The churn-wedge signature: TCP accepts pile up (\u003e= 3) while not a
+        // single TLS handshake has ever completed. After the startup grace the
+        // worker must retire so the supervisor respawns a clean one.
+        use super::worker_should_recycle;
+
+        assert!(worker_should_recycle(
+            3,
+            0,
+            Duration::from_secs(60),
+            Duration::from_secs(30)
+        ));
+        assert!(worker_should_recycle(
+            9,
+            0,
+            Duration::from_secs(600),
+            Duration::from_secs(30)
+        ));
+    }
+
+    #[test]
+    fn worker_recycle_spares_healthy_and_fresh_workers() {
+        use super::worker_should_recycle;
+
+        // A handshake has ever completed: healthy, keep it.
+        assert!(!worker_should_recycle(
+            9,
+            1,
+            Duration::from_secs(600),
+            Duration::from_secs(30)
+        ));
+        // No connections at all: idle host, not wedged, keep it.
+        assert!(!worker_should_recycle(
+            0,
+            0,
+            Duration::from_secs(600),
+            Duration::from_secs(30)
+        ));
+        // Within the startup grace: keep it.
+        assert!(!worker_should_recycle(
+            3,
+            0,
+            Duration::from_secs(5),
+            Duration::from_secs(30)
+        ));
     }
 }

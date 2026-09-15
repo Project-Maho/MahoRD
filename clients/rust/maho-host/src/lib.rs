@@ -38,6 +38,28 @@ mod test_alloc;
 pub use capture_macos::{CaptureConfig, CaptureEvent, CaptureFrame, ScreenCapture};
 #[cfg(target_os = "windows")]
 pub use capture_windows::WindowsCapture;
+
+/// Diagnostic log channel available on every target: on Windows it appends to
+/// the service log (which the worker also opens), elsewhere it goes to tracing.
+#[cfg(target_os = "windows")]
+pub fn host_log(message: &str) {
+    service_windows::service_log(message);
+}
+#[cfg(not(target_os = "windows"))]
+pub fn host_log(message: &str) {
+    tracing::info!(target: "maho_host", "{message}");
+}
+
+/// Current process-lifetime accept and TLS-success counts from the inline
+/// accept loop. The session worker's watchdog feeds these to
+/// [`windows_session::worker_should_recycle`].
+pub fn worker_stream_counters() -> (u32, u32) {
+    use std::sync::atomic::Ordering;
+    (
+        session::SERVER_ACCEPTS.load(Ordering::Relaxed),
+        session::SERVER_TLS_SUCCESSES.load(Ordering::Relaxed),
+    )
+}
 #[cfg(target_os = "windows")]
 pub use clipboard_windows::WindowsClipboard;
 #[cfg(target_os = "macos")]
