@@ -2011,7 +2011,7 @@ mod receiver_clock_tests {
     }
 
     #[test]
-    fn send_udp_registration_emits_authenticated_ping_burst_and_retry() {
+    fn send_udp_registration_emits_authenticated_ping_and_retry() {
         let key = [0x5a; 32];
         let listener = TlsPskServer::new([PskIdentity::pairing("burst", &key).unwrap()])
             .unwrap()
@@ -2060,14 +2060,12 @@ mod receiver_clock_tests {
         let salt = ready_rx.recv().unwrap();
         let mut c2h = DatagramCipher::derive(&key, &salt, Direction::ClientToHost).unwrap();
 
-        // 3 initial registration packets were sent during connect
+        // Initial registration packet was sent during connect
         let mut probe = [0u8; 1024];
-        for _ in 0..3 {
-            let (len, _) = udp.recv_from(&mut probe).unwrap();
-            let (hdr, payload) = c2h.open_datagram(&probe[..len]).unwrap();
-            assert_eq!(hdr.packet_type, PacketType::Ping);
-            assert!(payload.is_empty());
-        }
+        let (len, _) = udp.recv_from(&mut probe).unwrap();
+        let (hdr, payload) = c2h.open_datagram(&probe[..len]).unwrap();
+        assert_eq!(hdr.packet_type, PacketType::Ping);
+        assert!(payload.is_empty());
 
         // Resending sends an additional valid registration ping with fresh nonce
         session.send_udp_registration().unwrap();
