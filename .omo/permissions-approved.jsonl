@@ -1,1 +1,3 @@
 {"permission":"eval","pattern":"*","action":"allow"}
+{"permission":"bash","pattern":"git add","action":"allow"}
+{"permission":"bash","pattern":"git add *","action":"allow"}
