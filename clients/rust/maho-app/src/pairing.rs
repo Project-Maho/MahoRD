@@ -390,11 +390,13 @@ impl PairingStore {
             #[cfg(any(target_os = "ios", target_os = "macos"))]
             StoreBackend::Keychain(service) => {
                 let records = load_all_keychain(service)?;
-                if records.is_empty() {
-                    migrate_legacy_keychain(service)
-                } else {
-                    Ok(records)
+                if !is_legacy_migration_completed(service) {
+                    mark_legacy_migration_completed(service)?;
+                    if records.is_empty() {
+                        return migrate_legacy_keychain(service);
+                    }
                 }
+                Ok(records)
             }
             StoreBackend::Ephemeral(records) => {
                 let guard = records
@@ -477,6 +479,7 @@ impl PairingStore {
         record.key_array()?;
         match &self.backend {
             StoreBackend::File(path) => {
+                let _lock = StoreFileLock::acquire(path)?;
                 let mut records = self.load_all()?;
                 records.retain(|existing| existing.id != record.id);
                 records.push(record);
@@ -498,6 +501,7 @@ impl PairingStore {
     pub fn delete(&self, id: &str) -> Result<(), PairingStoreError> {
         match &self.backend {
             StoreBackend::File(path) => {
+                let _lock = StoreFileLock::acquire(path)?;
                 let mut records = self.load_all()?;
                 records.retain(|record| record.id != id);
                 self.write_records(path, &records)
@@ -522,6 +526,7 @@ impl PairingStore {
     ) -> Result<bool, PairingStoreError> {
         match &self.backend {
             StoreBackend::File(path) => {
+                let _lock = StoreFileLock::acquire(path)?;
                 let mut records = self.load_all()?;
                 let Some(record) = records.iter_mut().find(|r| r.id == id) else {
                     return Ok(false);
@@ -643,6 +648,89 @@ fn write_private_and_swap(
         set_private_permissions(path)
     })();
     result.map_err(PairingStoreError::Io)
+}
+
+pub(crate) struct StoreFileLock {
+    file: fs::File,
+}
+
+#[cfg(unix)]
+impl StoreFileLock {
+    pub(crate) fn acquire(path: &Path) -> Result<Self, PairingStoreError> {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "pairing path has no parent")
+        })?;
+        fs::create_dir_all(parent)?;
+        let stem = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("pairings");
+        let lock_path = parent.join(format!(".{stem}.lock"));
+        let file = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .mode(0o600)
+                    .open(&lock_path)?
+            }
+            #[cfg(not(unix))]
+            {
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&lock_path)?
+            }
+        };
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
+        Ok(Self { file })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StoreFileLock {
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.file, rustix::fs::FlockOperation::Unlock);
+    }
+}
+
+#[cfg(not(unix))]
+impl StoreFileLock {
+    pub(crate) fn acquire(path: &Path) -> Result<Self, PairingStoreError> {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "pairing path has no parent")
+        })?;
+        fs::create_dir_all(parent)?;
+        let stem = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("pairings");
+        let lock_path = parent.join(format!(".{stem}.lock"));
+        let start = std::time::Instant::now();
+        loop {
+            match fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+            {
+                Ok(file) => return Ok(Self { file }),
+                Err(_) if start.elapsed() < std::time::Duration::from_secs(5) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
 }
 
 /// Most recent roaming endpoints retained per record; older aliases are dropped.
@@ -979,6 +1067,106 @@ const LEGACY_KEYCHAIN_ACCOUNT_PREFIXES: [&str; 2] = ["erd_pairing_", "maho_pairi
 
 /// Imports pairings from the legacy EclipticRD Keychain service into `service`.
 /// The legacy items are only read here and are left in place.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+const MIGRATION_MARKER_ACCOUNT: &str = "maho_migration_completed_v1";
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn is_legacy_migration_completed(service: &str) -> bool {
+    has_keychain_account(service, MIGRATION_MARKER_ACCOUNT).unwrap_or(false)
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn mark_legacy_migration_completed(service: &str) -> Result<(), PairingStoreError> {
+    save_raw_keychain(service, MIGRATION_MARKER_ACCOUNT, b"completed")
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn has_keychain_account(service: &str, account: &str) -> Result<bool, PairingStoreError> {
+    unsafe {
+        let service_cf = make_cf_string(service).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate service CFString".into())
+        })?;
+        let account_cf = make_cf_string(account).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate account CFString".into())
+        })?;
+        let query_pairs = [
+            (
+                security_ffi::kSecClass as security_ffi::CFTypeRef,
+                security_ffi::kSecClassGenericPassword,
+            ),
+            (
+                security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                service_cf.0,
+            ),
+            (
+                security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                account_cf.0,
+            ),
+        ];
+        let query = make_cf_dictionary(&query_pairs).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate query CFDictionary".into())
+        })?;
+        let status = security_ffi::SecItemCopyMatching(query.0, std::ptr::null_mut());
+        if status == security_ffi::ERR_SEC_ITEM_NOT_FOUND {
+            Ok(false)
+        } else if status == security_ffi::ERR_SEC_SUCCESS {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn save_raw_keychain(service: &str, account: &str, data: &[u8]) -> Result<(), PairingStoreError> {
+    unsafe {
+        let service_cf = make_cf_string(service).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate service CFString".into())
+        })?;
+        let account_cf = make_cf_string(account).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate account CFString".into())
+        })?;
+        let data_cf = make_cf_data(data)
+            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate data CFData".into()))?;
+
+        let pairs = [
+            (
+                security_ffi::kSecClass as security_ffi::CFTypeRef,
+                security_ffi::kSecClassGenericPassword,
+            ),
+            (
+                security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                service_cf.0,
+            ),
+            (
+                security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                account_cf.0,
+            ),
+            (
+                security_ffi::kSecValueData as security_ffi::CFTypeRef,
+                data_cf.0,
+            ),
+            (
+                security_ffi::kSecAttrAccessible as security_ffi::CFTypeRef,
+                security_ffi::kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            ),
+        ];
+        let dict = make_cf_dictionary(&pairs)
+            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate CFDictionary".into()))?;
+
+        let status = security_ffi::SecItemAdd(dict.0, std::ptr::null_mut());
+        if status == security_ffi::ERR_SEC_DUPLICATE_ITEM || status == security_ffi::ERR_SEC_SUCCESS
+        {
+            Ok(())
+        } else {
+            Err(PairingStoreError::Keychain(format!(
+                "SecItemAdd failed: OSStatus {status}"
+            )))
+        }
+    }
+}
+
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 fn migrate_legacy_keychain(service: &str) -> Result<Vec<PairingRecord>, PairingStoreError> {
     if service == LEGACY_KEYCHAIN_SERVICE {
@@ -1663,6 +1851,11 @@ mod tests {
         let entries: Vec<_> = fs::read_dir(temp_dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().path())
+            .filter(|p| {
+                !p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".lock"))
+            })
             .collect();
         assert_eq!(
             entries,
@@ -1671,5 +1864,16 @@ mod tests {
         );
         let mode = fs::metadata(&client_file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "store file must be private");
+    }
+
+    #[test]
+    fn store_file_lock_mutual_exclusion() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_file = temp_dir.path().join("pairings.json");
+        let lock1 = StoreFileLock::acquire(&store_file);
+        assert!(lock1.is_ok());
+        drop(lock1);
+        let lock2 = StoreFileLock::acquire(&store_file);
+        assert!(lock2.is_ok());
     }
 }
