@@ -200,9 +200,6 @@ mod ffmpeg_impl {
     pub struct HevcDecoder {
         decoder: codec::decoder::Video,
         scaler: Option<scaling::Context>,
-        // Owns the buffer AVCodecContext::extradata points at for the decoder's lifetime.
-        #[allow(dead_code)]
-        extradata: Vec<u8>,
         acceleration: HardwareAcceleration,
         hw_device: *mut ffmpeg::ffi::AVBufferRef,
     }
@@ -244,13 +241,16 @@ mod ffmpeg_impl {
             }
             let annex_b = to_annex_b(extradata);
             let raw_len = annex_b.len();
-            let mut owned_extradata = annex_b;
-            owned_extradata.resize(
-                raw_len + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize,
-                0,
-            );
+            let padded_len = raw_len + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+            let buffer = unsafe { ffmpeg::ffi::av_mallocz(padded_len) as *mut u8 };
+            if buffer.is_null() {
+                return Err(DecodeError::Ffmpeg(
+                    "av_mallocz failed for extradata".to_owned(),
+                ));
+            }
             unsafe {
-                (*context.as_mut_ptr()).extradata = owned_extradata.as_mut_ptr();
+                ptr::copy_nonoverlapping(annex_b.as_ptr(), buffer, raw_len);
+                (*context.as_mut_ptr()).extradata = buffer;
                 (*context.as_mut_ptr()).extradata_size = raw_len as i32;
             }
             let (acceleration, hw_device) = configure_hardware(&mut context);
@@ -261,7 +261,6 @@ mod ffmpeg_impl {
             Ok(Self {
                 decoder,
                 scaler: None,
-                extradata: owned_extradata,
                 acceleration,
                 hw_device,
             })
@@ -402,10 +401,6 @@ mod ffmpeg_impl {
                 if !self.hw_device.is_null() {
                     ffmpeg::ffi::av_buffer_unref(&mut self.hw_device);
                 }
-                // Prevent AVCodecContext from freeing the Vec-owned extradata.
-                let context = self.decoder.as_mut_ptr();
-                (*context).extradata = ptr::null_mut();
-                (*context).extradata_size = 0;
             }
         }
     }
@@ -622,6 +617,17 @@ mod tests {
         let result = crate::ffmpeg_impl::copy_nv12(&frame, 0);
         // Then the frame is rejected instead of panicking the decode thread.
         assert!(matches!(result, Err(DecodeError::UnsupportedFrame)));
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn decoder_initialization_with_corrupt_extradata_cleans_up_safely() {
+        // Given random non-parameter bytes passed as extradata
+        let bogus = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33];
+        // When HevcDecoder is initialized
+        let decoder = HevcDecoder::new(&bogus);
+        // It cleans up safely without allocator mismatch or double free
+        drop(decoder);
     }
 
     #[test]
