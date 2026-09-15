@@ -45,6 +45,8 @@ pub struct InputInjector {
     active_mouse_buttons: std::cell::RefCell<HashSet<u8>>,
     #[cfg(target_os = "macos")]
     active_keys: std::cell::RefCell<HashSet<u16>>,
+    #[cfg(target_os = "macos")]
+    pending_surrogate: std::cell::Cell<Option<u16>>,
 }
 
 impl InputInjector {
@@ -73,6 +75,8 @@ impl InputInjector {
             active_mouse_buttons: std::cell::RefCell::new(HashSet::new()),
             #[cfg(target_os = "macos")]
             active_keys: std::cell::RefCell::new(HashSet::new()),
+            #[cfg(target_os = "macos")]
+            pending_surrogate: std::cell::Cell::new(None),
         }
     }
 
@@ -164,12 +168,12 @@ impl InputInjector {
     #[cfg(target_os = "macos")]
     fn create_unicode_release(
         &self,
-        event: &InputEvent,
+        _event: &InputEvent,
     ) -> Result<core_graphics::event::CGEvent, InputError> {
         let release =
             core_graphics::event::CGEvent::new_keyboard_event(self.shared_source()?, 0, false)
                 .map_err(|_| InputError::EventCreation)?;
-        release.set_string(&String::from_utf16_lossy(&[event.key_code]));
+        release.set_string("");
         Ok(release)
     }
 
@@ -191,6 +195,7 @@ impl InputInjector {
 
         // Handle Reset by synthesizing key and button up events for all active state
         if event.event_type == InputEventType::Reset {
+            self.pending_surrogate.set(None);
             let buttons = self.active_mouse_buttons.borrow().clone();
             let keys = self.active_keys.borrow().clone();
             // Synthesize releases for held buttons and keys
@@ -342,8 +347,20 @@ impl InputInjector {
                 )
             }
             InputEventType::UnicodeChar => {
-                // Convert UTF-16 code unit to string and set on keyboard event
-                let unicode_str = String::from_utf16_lossy(&[event.key_code]);
+                let code = event.key_code;
+                let unicode_str = if (0xD800..=0xDBFF).contains(&code) {
+                    self.pending_surrogate.set(Some(code));
+                    return Ok(None);
+                } else if (0xDC00..=0xDFFF).contains(&code) {
+                    if let Some(high) = self.pending_surrogate.take() {
+                        String::from_utf16_lossy(&[high, code])
+                    } else {
+                        String::from_utf16_lossy(&[code])
+                    }
+                } else {
+                    self.pending_surrogate.set(None);
+                    String::from_utf16_lossy(&[code])
+                };
                 let cg_event = CGEvent::new_keyboard_event(source()?, 0, true)
                     .map_err(|_| InputError::EventCreation)?;
                 cg_event.set_string(&unicode_str);
@@ -459,6 +476,7 @@ pub fn request_accessibility() -> bool {
 #[cfg(target_os = "macos")]
 impl Drop for InputInjector {
     fn drop(&mut self) {
+        self.pending_surrogate.set(None);
         if self.active_mouse_buttons.borrow().is_empty() && self.active_keys.borrow().is_empty() {
             return;
         }
@@ -877,5 +895,50 @@ mod tests {
             injector.map_coordinates(&event),
             Err(InputError::InvalidCoordinates)
         ));
+    }
+
+    #[test]
+    fn unicode_surrogate_pairs_are_combined_into_single_event() {
+        let injector = InputInjector::new(1920.0, 1080.0);
+        // Emoji '😀' (U+1F600) encoded in UTF-16: 0xD83D (high), 0xDE00 (low)
+        let high = InputEvent {
+            event_type: InputEventType::UnicodeChar,
+            x: 0.0,
+            y: 0.0,
+            key_code: 0xD83D,
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+        let low = InputEvent {
+            event_type: InputEventType::UnicodeChar,
+            x: 0.0,
+            y: 0.0,
+            key_code: 0xDE00,
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+
+        // High surrogate alone returns None (waits for low surrogate)
+        let res_high = injector.create_event(&high).unwrap();
+        assert!(res_high.is_none());
+
+        // Low surrogate completes the pair and produces the combined emoji event
+        let res_low = injector.create_event(&low).unwrap();
+        assert!(res_low.is_some());
+
+        // Regular BMP char ('A' = 0x0041) produces event immediately
+        let bmp = InputEvent {
+            event_type: InputEventType::UnicodeChar,
+            x: 0.0,
+            y: 0.0,
+            key_code: 0x0041,
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+        let res_bmp = injector.create_event(&bmp).unwrap();
+        assert!(res_bmp.is_some());
     }
 }

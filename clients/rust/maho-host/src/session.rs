@@ -16,9 +16,9 @@ use maho_net::{
 use maho_proto::{
     AudioFragmentHeader, BitrateAdjust, Capabilities, ControlMessage, CursorUpdate, FrameHeader,
     Handshake, InputAckMessage, InputEvent, PacketHeader, PacketType, PairingGrant, PairingReject,
-    PairingRejectReason, PairingRequest, StreamConfigurationErrorCode, StreamConfigurationReject,
-    StreamConfigurationResponse, WireCodec, MAX_AUDIO_FRAGMENT_BYTES, MAX_VIDEO_CHUNK_BYTES,
-    PROTOCOL_VERSION,
+    PairingRejectReason, PairingRequest, StreamConfiguration, StreamConfigurationErrorCode,
+    StreamConfigurationReject, StreamConfigurationResponse, WireCodec, MAX_AUDIO_FRAGMENT_BYTES,
+    MAX_VIDEO_CHUNK_BYTES, PROTOCOL_VERSION,
 };
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use maho_proto::{ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdate};
@@ -2870,12 +2870,19 @@ impl HostServer {
                                         match applied {
                                             Ok(bitrate) => {
                                                 active_bitrate = bitrate;
+                                                let active = StreamConfiguration {
+                                                    width: self.config.display.pixel_width,
+                                                    height: self.config.display.pixel_height,
+                                                    bitrate: active_bitrate,
+                                                    frames_per_second: self.config.frames_per_second
+                                                        as u16,
+                                                };
                                                 send_tcp_control(
                                                     &mut stream,
                                                     ControlMessage::StreamConfigResponse(
                                                         StreamConfigurationResponse {
                                                             request_id: req.request_id,
-                                                            active: req.desired,
+                                                            active,
                                                         },
                                                     ),
                                                 )?;
@@ -4689,12 +4696,12 @@ mod tests {
             other => panic!("expected reject, got {other:?}"),
         }
 
-        // When: client requests valid configuration.
+        // When: client requests valid configuration matching host display.
         let valid_req = maho_proto::StreamConfigurationRequest {
             request_id: 103,
             desired: maho_proto::StreamConfiguration {
-                width: 2560,
-                height: 1440,
+                width: 640,
+                height: 360,
                 bitrate: 8_000_000,
                 frames_per_second: 60,
             },
@@ -4710,8 +4717,31 @@ mod tests {
             other => panic!("expected response, got {other:?}"),
         }
 
-        // Then: host updated encoder with negotiated bitrate.
-        assert_eq!(*bitrates.lock().unwrap(), vec![8_000_000]);
+        // When: client requests different resolution, host applies bitrate but returns actual active geometry.
+        let diff_dim = maho_proto::StreamConfigurationRequest {
+            request_id: 104,
+            desired: maho_proto::StreamConfiguration {
+                width: 1920,
+                height: 1080,
+                bitrate: 10_000_000,
+                frames_per_second: 60,
+            },
+        };
+        send_tcp_control(&mut tcp, ControlMessage::StreamConfigRequest(diff_dim)).unwrap();
+        let resp_frame = tcp.read_frame().unwrap();
+        let (_, payload) = decode_tcp_packet(&resp_frame);
+        match ControlMessage::decode(payload).unwrap() {
+            ControlMessage::StreamConfigResponse(resp) => {
+                assert_eq!(resp.request_id, 104);
+                assert_eq!(resp.active.width, 640);
+                assert_eq!(resp.active.height, 360);
+                assert_eq!(resp.active.bitrate, 10_000_000);
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+
+        // Then: host updated encoder with negotiated bitrates.
+        assert_eq!(*bitrates.lock().unwrap(), vec![8_000_000, 10_000_000]);
 
         send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
         server_thread.join().unwrap();
