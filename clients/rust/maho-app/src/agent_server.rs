@@ -175,11 +175,8 @@ impl AgentServer {
             loop {
                 interval.tick().await;
                 let pos = *watchdog_pos.lock().await;
-                if let Ok(mut t) = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    watchdog_tracker.lock(),
-                )
-                .await
+                if let Ok(mut t) =
+                    tokio::time::timeout(Duration::from_millis(100), watchdog_tracker.lock()).await
                 {
                     if t.is_timed_out() {
                         // Detection is non-destructive: the error-aware release keeps the held
@@ -441,7 +438,7 @@ async fn handle_connection(
     let header_end = request_str
         .find("\r\n\r\n")
         .or_else(|| request_str.find("\n\n"));
-    
+
     let headers_text = match header_end {
         Some(idx) => &request_str[..idx],
         None => &request_str,
@@ -552,7 +549,7 @@ async fn handle_connection(
             let query = path.split('?').nth(1).unwrap_or("");
             let mut last_frame_id: Option<u64> = None;
             let mut timeout_ms: u64 = 5000;
-            
+
             for param in query.split('&') {
                 if let Some((key, value)) = param.split_once('=') {
                     match key {
@@ -570,7 +567,7 @@ async fn handle_connection(
                     }
                 }
             }
-            
+
             let start = tokio::time::Instant::now();
             let poll_interval = Duration::from_millis(25);
             let timeout_dur = Duration::from_millis(timeout_ms);
@@ -587,7 +584,7 @@ async fn handle_connection(
                         });
                     }
                 }
-                
+
                 if start.elapsed() >= timeout_dur {
                     break serde_json::json!({
                         "ok": true,
@@ -595,7 +592,7 @@ async fn handle_connection(
                         "frame_id": last_frame_id.unwrap_or(0),
                     });
                 }
-                
+
                 tokio::time::sleep(poll_interval).await;
             };
             let json = serde_json::to_vec(&resp)?;
@@ -1735,7 +1732,8 @@ mod tests {
         let tracker = server.tracker.clone();
         let (shutdown, rx) = tokio::sync::watch::channel(false);
         let worker = tokio::spawn(server.run(rx));
-        let body = r#"[{"action":"mouse_down","button":"left"},{"action":"mouse_up","button":"left"}]"#;
+        let body =
+            r#"[{"action":"mouse_down","button":"left"},{"action":"mouse_up","button":"left"}]"#;
         // When the batch is dispatched.
         let (status, response) = http_roundtrip(
             addr,
@@ -1933,7 +1931,11 @@ mod tests {
             .position(|w| w == delimiter)
             .expect("header delimiter");
         let header_str = std::str::from_utf8(&resp_bytes[..header_end]).unwrap();
-        assert!(header_str.starts_with("HTTP/1.1 200 OK"), "expected 200 OK, got: {}", header_str);
+        assert!(
+            header_str.starts_with("HTTP/1.1 200 OK"),
+            "expected 200 OK, got: {}",
+            header_str
+        );
         let body_bytes = &resp_bytes[header_end + delimiter.len()..];
         let body_val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap();
         assert_eq!(body_val["width"], 1920);
@@ -1971,7 +1973,11 @@ mod tests {
             .position(|w| w == delimiter)
             .expect("header delimiter");
         let header_str = std::str::from_utf8(&resp_bytes[..header_end]).unwrap();
-        assert!(header_str.starts_with("HTTP/1.1 200 OK"), "expected 200 OK, got: {}", header_str);
+        assert!(
+            header_str.starts_with("HTTP/1.1 200 OK"),
+            "expected 200 OK, got: {}",
+            header_str
+        );
         let body_bytes = &resp_bytes[header_end + delimiter.len()..];
         let body_val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap();
         assert_eq!(body_val["width"], 1920);
@@ -2046,7 +2052,10 @@ mod tests {
             .position(|w| w == delimiter)
             .expect("header delimiter");
         let header_str = std::str::from_utf8(&resp_bytes[..header_end]).unwrap();
-        assert!(!header_str.contains("Access-Control-Allow-Origin"), "CORS wildcard must not be present");
+        assert!(
+            !header_str.contains("Access-Control-Allow-Origin"),
+            "CORS wildcard must not be present"
+        );
         shutdown.send(true).unwrap();
         task.await.unwrap().unwrap();
     }
@@ -2220,7 +2229,9 @@ mod tests {
                 age_ms: 50,
             })),
         });
-        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend).await.unwrap();
+        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend)
+            .await
+            .unwrap();
         let (shutdown, rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(server.run(rx));
 
@@ -2231,13 +2242,10 @@ mod tests {
             .unwrap();
 
         let mut resp_bytes = Vec::new();
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            stream.read_to_end(&mut resp_bytes),
-        )
-        .await
-        .expect("screenshot read timeout")
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut resp_bytes))
+            .await
+            .expect("screenshot read timeout")
+            .unwrap();
 
         let header_end = resp_bytes
             .windows(4)
@@ -2263,7 +2271,9 @@ mod tests {
                 age_ms: 10,
             })),
         });
-        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend).await.unwrap();
+        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend)
+            .await
+            .unwrap();
         let (shutdown, rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(server.run(rx));
 
@@ -2274,13 +2284,10 @@ mod tests {
             .unwrap();
 
         let mut resp_bytes = Vec::new();
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            stream.read_to_end(&mut resp_bytes),
-        )
-        .await
-        .expect("wait_change read timeout")
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut resp_bytes))
+            .await
+            .expect("wait_change read timeout")
+            .unwrap();
 
         let header_end = resp_bytes
             .windows(4)
@@ -2306,7 +2313,9 @@ mod tests {
                 age_ms: 20,
             })),
         });
-        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend).await.unwrap();
+        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend)
+            .await
+            .unwrap();
         let (shutdown, rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(server.run(rx));
 
@@ -2317,13 +2326,10 @@ mod tests {
             .unwrap();
 
         let mut resp_bytes = Vec::new();
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            stream.read_to_end(&mut resp_bytes),
-        )
-        .await
-        .expect("wait_change read timeout")
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut resp_bytes))
+            .await
+            .expect("wait_change read timeout")
+            .unwrap();
 
         let header_end = resp_bytes
             .windows(4)
@@ -2349,7 +2355,9 @@ mod tests {
                 age_ms: 30,
             })),
         });
-        let (mut server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend).await.unwrap();
+        let (mut server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend)
+            .await
+            .unwrap();
         server.set_auth_token("secret-token");
         let (shutdown, rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(server.run(rx));
@@ -2362,16 +2370,18 @@ mod tests {
             .unwrap();
 
         let mut resp_bytes = Vec::new();
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            stream.read_to_end(&mut resp_bytes),
-        )
-        .await
-        .expect("read timeout")
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut resp_bytes))
+            .await
+            .expect("read timeout")
+            .unwrap();
 
-        let header_line = String::from_utf8_lossy(&resp_bytes[..resp_bytes.iter().position(|&b| b == b'\n').unwrap()]);
-        assert!(header_line.contains("401"), "should return 401 Unauthorized without auth");
+        let header_line = String::from_utf8_lossy(
+            &resp_bytes[..resp_bytes.iter().position(|&b| b == b'\n').unwrap()],
+        );
+        assert!(
+            header_line.contains("401"),
+            "should return 401 Unauthorized without auth"
+        );
 
         // Test with valid auth header should succeed
         let mut stream2 = TcpStream::connect(addr).await.unwrap();
@@ -2389,8 +2399,13 @@ mod tests {
         .expect("read timeout")
         .unwrap();
 
-        let header_line2 = String::from_utf8_lossy(&resp_bytes2[..resp_bytes2.iter().position(|&b| b == b'\n').unwrap()]);
-        assert!(header_line2.contains("200"), "should return 200 OK with valid auth");
+        let header_line2 = String::from_utf8_lossy(
+            &resp_bytes2[..resp_bytes2.iter().position(|&b| b == b'\n').unwrap()],
+        );
+        assert!(
+            header_line2.contains("200"),
+            "should return 200 OK with valid auth"
+        );
 
         shutdown.send(true).unwrap();
         task.await.unwrap().unwrap();

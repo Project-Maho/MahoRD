@@ -125,7 +125,8 @@ pub(super) async fn handle_mcp_message_cancellable(
     pos: &mut (f32, f32),
 ) -> Option<String> {
     if let Some((id, last_frame_id, timeout_ms)) = parse_wait_for_screen_change(msg) {
-        let content = wait_for_screen_change_async(backend.as_ref(), last_frame_id, timeout_ms).await;
+        let content =
+            wait_for_screen_change_async(backend.as_ref(), last_frame_id, timeout_ms).await;
         return Some(
             json!({"jsonrpc":"2.0","id":id,"result":{"content":content,"isError":false}})
                 .to_string(),

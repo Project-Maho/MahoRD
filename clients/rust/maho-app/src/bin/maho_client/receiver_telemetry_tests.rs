@@ -2,9 +2,10 @@ use super::*;
 
 #[test]
 fn receiver_export_retains_legacy_flat_fields_and_rank_meaning() {
-    // Given: lifetime count exceeds the ring, with distinct two-value ranks.
-    let mut recorder = LatencyRecorder::with_capacity(2);
-    for value in [999, 10, 20] {
+    // Given: lifetime count exceeds the ring, with distinct percentile ranks
+    // so every reported field has a unique expected value.
+    let mut recorder = LatencyRecorder::with_capacity(100);
+    for value in 1..=150_u64 {
         recorder.record_us(value);
     }
     let temporary = tempfile::tempdir().unwrap();
@@ -16,13 +17,14 @@ fn receiver_export_retains_legacy_flat_fields_and_rank_meaning() {
         &stats_json(&recorder, &session.receiver_snapshot().unwrap()).unwrap(),
     )
     .unwrap();
-    // Then: all five legacy fields preserve lifetime count and upper median.
+    // Then: frames preserves the lifetime count, and each percentile keeps its
+    // rank over the retained ring (samples 51..=150, so p50 < p95 < p99 < max).
     for (field, value) in [
-        ("frames", 3),
-        ("p50_us", 20),
-        ("p95_us", 20),
-        ("p99_us", 20),
-        ("max_us", 20),
+        ("frames", 150),
+        ("p50_us", 101),
+        ("p95_us", 145),
+        ("p99_us", 149),
+        ("max_us", 150),
     ] {
         assert_eq!(json[field], value, "{field}");
     }

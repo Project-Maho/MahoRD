@@ -69,7 +69,8 @@ async fn execute(scenario: Scenario, unwritable: bool) -> Option<Value> {
             let mut probe = [0; 1024];
             let (probe_len, address) = udp.recv_from(&mut probe).unwrap();
             let mut c2h =
-                DatagramCipher::derive(&key, &handshake.session_salt, Direction::ClientToHost).unwrap();
+                DatagramCipher::derive(&key, &handshake.session_salt, Direction::ClientToHost)
+                    .unwrap();
             let (probe_hdr, _) = c2h.open_datagram(&probe[..probe_len]).unwrap();
             assert_eq!(probe_hdr.packet_type, PacketType::Ping);
             let mut cipher =

@@ -6,8 +6,8 @@ use std::{
 };
 
 use base64::Engine;
-use maho_proto::{InputEvent, InputEventType, Modifiers};
 use image::{codecs::jpeg::JpegEncoder, codecs::png::PngEncoder, ColorType, ImageEncoder};
+use maho_proto::{InputEvent, InputEventType, Modifiers};
 use serde::{Deserialize, Serialize};
 
 use crate::input::InputKey;
@@ -69,12 +69,20 @@ pub enum ScreenshotFormat {
 pub fn nv12_to_rgb(width: u32, height: u32, nv12_buf: &[u8]) -> Option<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
-    let expected_len = w * h * 3 / 2;
-    if nv12_buf.len() < expected_len || w == 0 || h == 0 {
+    // The tightly packed NV12 contract assumes even dimensions: odd width has
+    // no defined chroma stride, and odd height would need rounded-up chroma
+    // extents. Checked arithmetic keeps extreme dimensions from overflowing
+    // the advertised-length comparison or the RGB allocation.
+    if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
+        return None;
+    }
+    let luma = w.checked_mul(h)?;
+    let expected_len = luma.checked_mul(3)? / 2;
+    if nv12_buf.len() < expected_len {
         return None;
     }
 
-    let mut rgb = Vec::with_capacity(w * h * 3);
+    let mut rgb = Vec::with_capacity(luma.checked_mul(3)?);
     let uv_plane_start = w * h;
 
     for y in 0..h {
@@ -523,7 +531,10 @@ impl InputStateTracker {
 
     pub fn record_key_down(&mut self, key_code: u16, modifiers: Modifiers) {
         self.active_keys.insert(key_code);
-        *self.key_modifiers.entry(key_code).or_insert(Modifiers::empty()) |= modifiers;
+        *self
+            .key_modifiers
+            .entry(key_code)
+            .or_insert(Modifiers::empty()) |= modifiers;
         self.active_modifiers |= modifiers;
         self.last_action_at = Instant::now();
     }
@@ -914,7 +925,11 @@ pub fn convert_agent_action_to_events(
                     let mut utf16_buf = [0u16; 2];
                     let len = ch.encode_utf16(&mut utf16_buf).len();
                     for code_unit in &utf16_buf[..len] {
-                        events.push(InputEvent::unicode_char(*code_unit, current_pos.0, current_pos.1));
+                        events.push(InputEvent::unicode_char(
+                            *code_unit,
+                            current_pos.0,
+                            current_pos.1,
+                        ));
                     }
                 }
             }
@@ -977,7 +992,10 @@ mod tests {
             let (key, _) = parse_key_name(name).unwrap();
             let code = require_macos_keycode(key, name).expect("function key must map");
             assert_eq!(code, expected, "{name} mapped to unexpected keycode");
-            assert!(seen.insert(code), "{name} keycode collides with another key");
+            assert!(
+                seen.insert(code),
+                "{name} keycode collides with another key"
+            );
         }
     }
 
@@ -987,9 +1005,7 @@ mod tests {
         let mut position = (0.5, 0.5);
 
         let down = convert_agent_action_to_events(
-            &AgentAction::KeyDown {
-                key: "ctrl".into(),
-            },
+            &AgentAction::KeyDown { key: "ctrl".into() },
             &mut tracker,
             &mut position,
             800.0,
@@ -999,9 +1015,7 @@ mod tests {
         assert!(down[0].modifiers.contains(Modifiers::CONTROL));
 
         convert_agent_action_to_events(
-            &AgentAction::KeyUp {
-                key: "ctrl".into(),
-            },
+            &AgentAction::KeyUp { key: "ctrl".into() },
             &mut tracker,
             &mut position,
             800.0,
@@ -1262,6 +1276,19 @@ mod tests {
     }
 
     #[test]
+    fn nv12_to_rgb_rejects_odd_and_underflowing_dimensions() {
+        // Advertised length passes the old size check but the first pixel read
+        // its V component past the end of the buffer.
+        assert_eq!(nv12_to_rgb(2, 1, &[16, 16, 128]), None);
+        // Odd width has no defined chroma stride in this packed contract.
+        assert_eq!(nv12_to_rgb(3, 2, &[16; 9]), None);
+        // Real even dimensions still convert: BT.601 with neutral chroma maps
+        // Y=16 to RGB 16 on every channel.
+        let rgb = nv12_to_rgb(2, 2, &[16, 16, 16, 16, 128, 128]).unwrap();
+        assert_eq!(rgb, vec![16; 12]);
+    }
+
+    #[test]
     fn encodes_nv12_screenshot_to_valid_png_and_jpeg() {
         let width = 64u32;
         let height = 64u32;
@@ -1305,7 +1332,10 @@ mod tests {
         let has_right_dragged = events
             .iter()
             .any(|e| e.event_type == InputEventType::RightMouseDragged);
-        assert!(has_right_dragged, "drag with right button must emit RightMouseDragged events");
+        assert!(
+            has_right_dragged,
+            "drag with right button must emit RightMouseDragged events"
+        );
         let has_right_down = events
             .iter()
             .any(|e| e.event_type == InputEventType::RightMouseDown);
@@ -1380,7 +1410,10 @@ mod tests {
         let has_left_dragged = events
             .iter()
             .any(|e| e.event_type == InputEventType::LeftMouseDragged);
-        assert!(has_left_dragged, "drag with left button must emit LeftMouseDragged events");
+        assert!(
+            has_left_dragged,
+            "drag with left button must emit LeftMouseDragged events"
+        );
         let has_left_down = events
             .iter()
             .any(|e| e.event_type == InputEventType::LeftMouseDown);
@@ -1528,7 +1561,9 @@ mod tests {
         assert!(normalize_agent_coordinates(f32::NAN, 0.0, true, 1920.0, 1080.0).is_err());
         assert!(normalize_agent_coordinates(0.0, f32::NAN, true, 1920.0, 1080.0).is_err());
         assert!(normalize_agent_coordinates(f32::INFINITY, 0.0, false, 1920.0, 1080.0).is_err());
-        assert!(normalize_agent_coordinates(0.0, f32::NEG_INFINITY, false, 1920.0, 1080.0).is_err());
+        assert!(
+            normalize_agent_coordinates(0.0, f32::NEG_INFINITY, false, 1920.0, 1080.0).is_err()
+        );
     }
 
     #[test]

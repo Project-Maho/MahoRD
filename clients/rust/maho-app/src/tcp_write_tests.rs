@@ -51,7 +51,8 @@ fn fixture() -> Fixture {
         let mut wake = [0; 1024];
         let (wake_len, _) = server_udp.recv_from(&mut wake).unwrap();
         let mut c2h =
-            DatagramCipher::derive(&[19; 32], &hello.session_salt, Direction::ClientToHost).unwrap();
+            DatagramCipher::derive(&[19; 32], &hello.session_salt, Direction::ClientToHost)
+                .unwrap();
         let (wake_hdr, _) = c2h.open_datagram(&wake[..wake_len]).unwrap();
         assert_eq!(wake_hdr.packet_type, PacketType::Ping);
         peer_tx.send(peer).unwrap();

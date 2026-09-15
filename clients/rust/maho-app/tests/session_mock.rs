@@ -77,7 +77,12 @@ fn mock_server_pairing_handshake_and_input_round_trip() {
 
         let mut ping = [0_u8; 1024];
         let (ping_len, _) = udp.recv_from(&mut ping).unwrap();
-        let mut c2h = maho_net::DatagramCipher::derive(&grant.key, &handshake.session_salt, maho_net::Direction::ClientToHost).unwrap();
+        let mut c2h = maho_net::DatagramCipher::derive(
+            &grant.key,
+            &handshake.session_salt,
+            maho_net::Direction::ClientToHost,
+        )
+        .unwrap();
         let (ping_hdr, _) = c2h.open_datagram(&ping[..ping_len]).unwrap();
         assert_eq!(ping_hdr.packet_type, PacketType::Ping);
 
@@ -214,7 +219,12 @@ fn connect_with_pairing_direct_round_trip() {
 
         let mut ping = [0_u8; 1024];
         let (ping_len, _) = udp.recv_from(&mut ping).unwrap();
-        let mut c2h = maho_net::DatagramCipher::derive(&key, &handshake.session_salt, maho_net::Direction::ClientToHost).unwrap();
+        let mut c2h = maho_net::DatagramCipher::derive(
+            &key,
+            &handshake.session_salt,
+            maho_net::Direction::ClientToHost,
+        )
+        .unwrap();
         let (ping_hdr, _) = c2h.open_datagram(&ping[..ping_len]).unwrap();
         assert_eq!(ping_hdr.packet_type, PacketType::Ping);
     });
@@ -354,9 +364,9 @@ fn stalled_consumer_retains_latest_clipboard_and_terminal_error() {
     }
     session.disconnect().unwrap();
     assert!(events.len() <= 3, "retained {} events", events.len());
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, Ok(maho_app::SessionEvent::Clipboard(text)) if text == "127")));
+    assert!(events.iter().any(
+        |event| matches!(event, Ok(maho_app::SessionEvent::Clipboard(text)) if text == "127")
+    ));
     assert!(
         events.iter().any(|event| event.is_err()),
         "terminal error must be retained"
@@ -582,7 +592,8 @@ fn udp_client_rejects_host_missing_authenticated_registration_capability() {
         tcp_port: tcp_address.port(),
         udp_port,
         client_name: "rust-client".to_owned(),
-        capabilities: Capabilities::STREAM_CONFIGURATION | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+        capabilities: Capabilities::STREAM_CONFIGURATION
+            | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
         pairing_store_path: None,
         connect_timeout: Duration::from_secs(2),
         handshake_ack_timeout: Duration::from_secs(2),
@@ -636,7 +647,8 @@ fn udp_client_sends_authenticated_registration_and_preserves_nonce() {
             height: 1080,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: Capabilities::STREAM_CONFIGURATION | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+            capabilities: Capabilities::STREAM_CONFIGURATION
+                | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_id: String::new(),
             session_salt: [0; 16],
         };
@@ -652,20 +664,38 @@ fn udp_client_sends_authenticated_registration_and_preserves_nonce() {
         let (reg_len, _client_udp_addr) = udp.recv_from(&mut reg_buf).unwrap();
 
         // Must open cleanly with ClientToHost cipher (consuming nonce counter 1)
-        let mut c2h_cipher = maho_net::DatagramCipher::derive(&key, &salt, maho_net::Direction::ClientToHost).unwrap();
+        let mut c2h_cipher =
+            maho_net::DatagramCipher::derive(&key, &salt, maho_net::Direction::ClientToHost)
+                .unwrap();
         let (reg_header, reg_payload) = c2h_cipher.open_datagram(&reg_buf[..reg_len]).unwrap();
-        assert_eq!(reg_header.packet_type, PacketType::Ping, "registration must be PacketType::Ping");
-        assert!(reg_payload.is_empty(), "registration ping payload must be empty");
+        assert_eq!(
+            reg_header.packet_type,
+            PacketType::Ping,
+            "registration must be PacketType::Ping"
+        );
+        assert!(
+            reg_payload.is_empty(),
+            "registration ping payload must be empty"
+        );
 
         // The nonce counter 1 was consumed by registration. Replaying counter 1 must fail.
-        assert!(c2h_cipher.open(&reg_buf[PacketHeader::SIZE..reg_len], &reg_buf[..PacketHeader::SIZE]).is_err(), "replayed counter 1 must be rejected by host replay window");
+        assert!(
+            c2h_cipher
+                .open(
+                    &reg_buf[PacketHeader::SIZE..reg_len],
+                    &reg_buf[..PacketHeader::SIZE]
+                )
+                .is_err(),
+            "replayed counter 1 must be rejected by host replay window"
+        );
 
         // Next, host awaits subsequent session UDP datagram sent by the client.
         // If the client preserved cipher nonce ownership, this packet uses nonce counter 2,
         // which the SAME host c2h_cipher cleanly opens and verifies.
         let mut subseq_buf = [0_u8; 1024];
         let (subseq_len, _) = udp.recv_from(&mut subseq_buf).unwrap();
-        let (subseq_header, subseq_payload) = c2h_cipher.open_datagram(&subseq_buf[..subseq_len]).unwrap();
+        let (subseq_header, subseq_payload) =
+            c2h_cipher.open_datagram(&subseq_buf[..subseq_len]).unwrap();
         assert_eq!(subseq_header.packet_type, PacketType::Ping);
         assert_eq!(subseq_payload, b"subsequent-session-packet");
         assert_eq!(subseq_header.sequence, 1);
@@ -676,7 +706,8 @@ fn udp_client_sends_authenticated_registration_and_preserves_nonce() {
         tcp_port: tcp_address.port(),
         udp_port,
         client_name: "rust-client".to_owned(),
-        capabilities: Capabilities::STREAM_CONFIGURATION | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+        capabilities: Capabilities::STREAM_CONFIGURATION
+            | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
         pairing_store_path: None,
         connect_timeout: Duration::from_secs(2),
         handshake_ack_timeout: Duration::from_secs(2),
@@ -695,7 +726,9 @@ fn udp_client_sends_authenticated_registration_and_preserves_nonce() {
     assert_eq!(session.state().unwrap(), SessionState::Ready);
 
     // Exercise actual subsequent session UDP send to prove client sender was not re-derived
-    session.send_udp(PacketType::Ping, b"subsequent-session-packet").unwrap();
+    session
+        .send_udp(PacketType::Ping, b"subsequent-session-packet")
+        .unwrap();
 
     server.join().unwrap();
 }

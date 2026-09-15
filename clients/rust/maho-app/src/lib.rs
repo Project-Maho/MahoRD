@@ -5,8 +5,8 @@ pub mod agent_input;
 pub mod agent_server;
 mod audio;
 mod clipboard;
-pub mod frame_queue;
 pub mod error;
+pub mod frame_queue;
 mod input;
 pub mod latency;
 pub mod mcp_server;
@@ -27,7 +27,6 @@ pub use mcp_server::*;
 pub use media::*;
 pub use pairing::*;
 pub use receiver_stats::{
-    ReceiverSnapshot, RECEIVER_REORDER_GRACE, RECEIVER_STATS_WINDOW,
-    RECEIVER_TELEMETRY_CAPACITY,
+    ReceiverSnapshot, RECEIVER_REORDER_GRACE, RECEIVER_STATS_WINDOW, RECEIVER_TELEMETRY_CAPACITY,
 };
 pub use session::*;

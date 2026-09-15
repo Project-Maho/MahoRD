@@ -1,5 +1,5 @@
-use std::fmt;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -125,11 +125,19 @@ impl IpcError {
     }
 
     pub fn pairing_required(message: impl Into<String>) -> Self {
-        Self::new(IpcErrorCode::PairingRequired, IpcErrorStage::Preauth, message)
+        Self::new(
+            IpcErrorCode::PairingRequired,
+            IpcErrorStage::Preauth,
+            message,
+        )
     }
 
     pub fn credential_rejected(message: impl Into<String>) -> Self {
-        Self::new(IpcErrorCode::CredentialRejected, IpcErrorStage::TlsPsk, message)
+        Self::new(
+            IpcErrorCode::CredentialRejected,
+            IpcErrorStage::TlsPsk,
+            message,
+        )
     }
 
     pub fn invalid_pin(message: impl Into<String>) -> Self {
@@ -137,7 +145,11 @@ impl IpcError {
     }
 
     pub fn incompatible_peer(message: impl Into<String>) -> Self {
-        Self::new(IpcErrorCode::IncompatiblePeer, IpcErrorStage::Handshake, message)
+        Self::new(
+            IpcErrorCode::IncompatiblePeer,
+            IpcErrorStage::Handshake,
+            message,
+        )
     }
 
     pub fn connection_failed(stage: IpcErrorStage, message: impl Into<String>) -> Self {
@@ -147,7 +159,13 @@ impl IpcError {
 
 impl fmt::Display for IpcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}: {}] {}", self.stage.as_str(), self.code.as_str(), self.message)
+        write!(
+            f,
+            "[{}: {}] {}",
+            self.stage.as_str(),
+            self.code.as_str(),
+            self.message
+        )
     }
 }
 

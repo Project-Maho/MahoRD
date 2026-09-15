@@ -29,7 +29,7 @@ impl PairingEndpoint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairingRecord {
     pub id: String,
@@ -51,6 +51,20 @@ pub struct PairingRecord {
     pub last_endpoint: Option<PairingEndpoint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoint_aliases: Vec<PairingEndpoint>,
+}
+
+impl fmt::Debug for PairingRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The pre-shared key must never appear in debug output or core dumps.
+        f.debug_struct("PairingRecord")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("key", &"[REDACTED]")
+            .field("added_at_unix_ms", &self.added_at_unix_ms)
+            .field("last_endpoint", &self.last_endpoint)
+            .field("endpoint_aliases", &self.endpoint_aliases)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,7 +299,9 @@ impl PairingStore {
 
     pub fn new_ephemeral() -> Self {
         Self {
-            backend: StoreBackend::Ephemeral(std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))),
+            backend: StoreBackend::Ephemeral(std::sync::Arc::new(
+                std::sync::Mutex::new(Vec::new()),
+            )),
             fallback_path: PathBuf::new(),
         }
     }
@@ -545,7 +561,11 @@ impl PairingStore {
         }
     }
 
-    fn write_records(&self, path: &Path, records: &[PairingRecord]) -> Result<(), PairingStoreError> {
+    fn write_records(
+        &self,
+        path: &Path,
+        records: &[PairingRecord],
+    ) -> Result<(), PairingStoreError> {
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -553,14 +573,80 @@ impl PairingStore {
             )
         })?;
         fs::create_dir_all(parent)?;
-        let temporary = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec(records)?;
-        write_private(&temporary, &bytes)?;
-        fs::rename(&temporary, path)?;
-        set_private_permissions(path)?;
+        // A unique temporary in the target directory: concurrent writers (for
+        // example the headless CLI beside the GUI client) cannot collide on a
+        // fixed name, and create_new guarantees the private mode below applies
+        // to a freshly created file rather than an inherited one.
+        let stem = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("pairings");
+        let mut opened = None;
+        for _ in 0..8 {
+            let candidate = parent.join(format!(".{stem}.{}.tmp", rand::random::<u32>()));
+            match open_private_new(&candidate) {
+                Ok(file) => {
+                    opened = Some((candidate, file));
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let Some((temporary_path, file)) = opened else {
+            return Err(PairingStoreError::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "could not create a unique private temporary file",
+            )));
+        };
+        let result = write_private_and_swap(&temporary_path, file, &bytes, path);
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(error);
+        }
         Ok(())
     }
 }
+
+fn open_private_new(path: &Path) -> io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    }
+}
+
+fn write_private_and_swap(
+    temporary_path: &Path,
+    mut file: fs::File,
+    bytes: &[u8],
+    path: &Path,
+) -> Result<(), PairingStoreError> {
+    use std::io::Write;
+    let result = (|| -> io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(temporary_path, path)?;
+        set_private_permissions(path)
+    })();
+    result.map_err(PairingStoreError::Io)
+}
+
+/// Most recent roaming endpoints retained per record; older aliases are dropped.
+const MAX_ENDPOINT_ALIASES: usize = 16;
 
 fn update_record_endpoint(record: &mut PairingRecord, endpoint: PairingEndpoint) {
     record.endpoint_aliases.retain(|a| a != &endpoint);
@@ -568,6 +654,10 @@ fn update_record_endpoint(record: &mut PairingRecord, endpoint: PairingEndpoint)
         if prev != endpoint && !record.endpoint_aliases.contains(&prev) {
             record.endpoint_aliases.push(prev);
         }
+    }
+    // Bound roaming history: keep the most recent aliases, drop the oldest.
+    while record.endpoint_aliases.len() > MAX_ENDPOINT_ALIASES {
+        record.endpoint_aliases.remove(0);
     }
     record.last_endpoint = Some(endpoint);
 }
@@ -606,7 +696,10 @@ mod security_ffi {
 
         pub fn SecItemAdd(attributes: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
         pub fn SecItemCopyMatching(query: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
-        pub fn SecItemUpdate(query: CFDictionaryRef, attributesToUpdate: CFDictionaryRef) -> OSStatus;
+        pub fn SecItemUpdate(
+            query: CFDictionaryRef,
+            attributesToUpdate: CFDictionaryRef,
+        ) -> OSStatus;
         pub fn SecItemDelete(query: CFDictionaryRef) -> OSStatus;
     }
 
@@ -684,11 +777,7 @@ fn make_cf_string(s: &str) -> Option<CfWrapper<std::os::raw::c_void>> {
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 fn make_cf_data(bytes: &[u8]) -> Option<CfWrapper<std::os::raw::c_void>> {
     unsafe {
-        let cf = security_ffi::CFDataCreate(
-            std::ptr::null(),
-            bytes.as_ptr(),
-            bytes.len() as isize,
-        );
+        let cf = security_ffi::CFDataCreate(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize);
         if cf.is_null() {
             None
         } else {
@@ -741,19 +830,36 @@ fn save_keychain(service: &str, record: &PairingRecord) -> Result<(), PairingSto
     let key = format!("maho_pairing_{}", record.id);
     let bytes = serde_json::to_vec(record)?;
     unsafe {
-        let service_cf = make_cf_string(service)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate service CFString".into()))?;
-        let account_cf = make_cf_string(&key)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate account CFString".into()))?;
+        let service_cf = make_cf_string(service).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate service CFString".into())
+        })?;
+        let account_cf = make_cf_string(&key).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate account CFString".into())
+        })?;
         let data_cf = make_cf_data(&bytes)
             .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate data CFData".into()))?;
 
         let pairs = [
-            (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-            (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-            (security_ffi::kSecAttrAccount as security_ffi::CFTypeRef, account_cf.0),
-            (security_ffi::kSecValueData as security_ffi::CFTypeRef, data_cf.0),
-            (security_ffi::kSecAttrAccessible as security_ffi::CFTypeRef, security_ffi::kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly),
+            (
+                security_ffi::kSecClass as security_ffi::CFTypeRef,
+                security_ffi::kSecClassGenericPassword,
+            ),
+            (
+                security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                service_cf.0,
+            ),
+            (
+                security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                account_cf.0,
+            ),
+            (
+                security_ffi::kSecValueData as security_ffi::CFTypeRef,
+                data_cf.0,
+            ),
+            (
+                security_ffi::kSecAttrAccessible as security_ffi::CFTypeRef,
+                security_ffi::kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            ),
         ];
         let dict = make_cf_dictionary(&pairs)
             .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate CFDictionary".into()))?;
@@ -761,25 +867,41 @@ fn save_keychain(service: &str, record: &PairingRecord) -> Result<(), PairingSto
         let status = security_ffi::SecItemAdd(dict.0, std::ptr::null_mut());
         if status == security_ffi::ERR_SEC_DUPLICATE_ITEM {
             let query_pairs = [
-                (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-                (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-                (security_ffi::kSecAttrAccount as security_ffi::CFTypeRef, account_cf.0),
+                (
+                    security_ffi::kSecClass as security_ffi::CFTypeRef,
+                    security_ffi::kSecClassGenericPassword,
+                ),
+                (
+                    security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                    service_cf.0,
+                ),
+                (
+                    security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                    account_cf.0,
+                ),
             ];
-            let query_dict = make_cf_dictionary(&query_pairs)
-                .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate query CFDictionary".into()))?;
-            let update_pairs = [
-                (security_ffi::kSecValueData as security_ffi::CFTypeRef, data_cf.0),
-            ];
-            let update_dict = make_cf_dictionary(&update_pairs)
-                .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate update CFDictionary".into()))?;
+            let query_dict = make_cf_dictionary(&query_pairs).ok_or_else(|| {
+                PairingStoreError::Keychain("Failed to allocate query CFDictionary".into())
+            })?;
+            let update_pairs = [(
+                security_ffi::kSecValueData as security_ffi::CFTypeRef,
+                data_cf.0,
+            )];
+            let update_dict = make_cf_dictionary(&update_pairs).ok_or_else(|| {
+                PairingStoreError::Keychain("Failed to allocate update CFDictionary".into())
+            })?;
 
             let update_status = security_ffi::SecItemUpdate(query_dict.0, update_dict.0);
             if update_status != security_ffi::ERR_SEC_SUCCESS {
-                return Err(PairingStoreError::Keychain(format!("SecItemUpdate failed: OSStatus {update_status}")));
+                return Err(PairingStoreError::Keychain(format!(
+                    "SecItemUpdate failed: OSStatus {update_status}"
+                )));
             }
             Ok(())
         } else if status != security_ffi::ERR_SEC_SUCCESS {
-            Err(PairingStoreError::Keychain(format!("SecItemAdd failed: OSStatus {status}")))
+            Err(PairingStoreError::Keychain(format!(
+                "SecItemAdd failed: OSStatus {status}"
+            )))
         } else {
             Ok(())
         }
@@ -790,20 +912,38 @@ fn save_keychain(service: &str, record: &PairingRecord) -> Result<(), PairingSto
 fn load_keychain(service: &str, id: &str) -> Result<Option<PairingRecord>, PairingStoreError> {
     let key = format!("maho_pairing_{id}");
     unsafe {
-        let service_cf = make_cf_string(service)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate service CFString".into()))?;
-        let account_cf = make_cf_string(&key)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate account CFString".into()))?;
+        let service_cf = make_cf_string(service).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate service CFString".into())
+        })?;
+        let account_cf = make_cf_string(&key).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate account CFString".into())
+        })?;
 
         let query_pairs = [
-            (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-            (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-            (security_ffi::kSecAttrAccount as security_ffi::CFTypeRef, account_cf.0),
-            (security_ffi::kSecReturnData as security_ffi::CFTypeRef, security_ffi::kCFBooleanTrue),
-            (security_ffi::kSecMatchLimit as security_ffi::CFTypeRef, security_ffi::kSecMatchLimitOne),
+            (
+                security_ffi::kSecClass as security_ffi::CFTypeRef,
+                security_ffi::kSecClassGenericPassword,
+            ),
+            (
+                security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                service_cf.0,
+            ),
+            (
+                security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                account_cf.0,
+            ),
+            (
+                security_ffi::kSecReturnData as security_ffi::CFTypeRef,
+                security_ffi::kCFBooleanTrue,
+            ),
+            (
+                security_ffi::kSecMatchLimit as security_ffi::CFTypeRef,
+                security_ffi::kSecMatchLimitOne,
+            ),
         ];
-        let query = make_cf_dictionary(&query_pairs)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate query CFDictionary".into()))?;
+        let query = make_cf_dictionary(&query_pairs).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate query CFDictionary".into())
+        })?;
 
         let mut result: security_ffi::CFTypeRef = std::ptr::null();
         let status = security_ffi::SecItemCopyMatching(query.0, &mut result);
@@ -811,7 +951,9 @@ fn load_keychain(service: &str, id: &str) -> Result<Option<PairingRecord>, Pairi
             return Ok(None);
         }
         if status != security_ffi::ERR_SEC_SUCCESS {
-            return Err(PairingStoreError::Keychain(format!("SecItemCopyMatching failed: OSStatus {status}")));
+            return Err(PairingStoreError::Keychain(format!(
+                "SecItemCopyMatching failed: OSStatus {status}"
+            )));
         }
         if result.is_null() {
             return Ok(None);
@@ -880,18 +1022,35 @@ fn load_keychain_matching(
     account_prefixes: Option<&[&str]>,
 ) -> Result<Vec<PairingRecord>, PairingStoreError> {
     unsafe {
-        let service_cf = make_cf_string(service)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate service CFString".into()))?;
+        let service_cf = make_cf_string(service).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate service CFString".into())
+        })?;
 
         let query_pairs = [
-            (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-            (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-            (security_ffi::kSecReturnAttributes as security_ffi::CFTypeRef, security_ffi::kCFBooleanTrue),
-            (security_ffi::kSecReturnData as security_ffi::CFTypeRef, security_ffi::kCFBooleanTrue),
-            (security_ffi::kSecMatchLimit as security_ffi::CFTypeRef, security_ffi::kSecMatchLimitAll),
+            (
+                security_ffi::kSecClass as security_ffi::CFTypeRef,
+                security_ffi::kSecClassGenericPassword,
+            ),
+            (
+                security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                service_cf.0,
+            ),
+            (
+                security_ffi::kSecReturnAttributes as security_ffi::CFTypeRef,
+                security_ffi::kCFBooleanTrue,
+            ),
+            (
+                security_ffi::kSecReturnData as security_ffi::CFTypeRef,
+                security_ffi::kCFBooleanTrue,
+            ),
+            (
+                security_ffi::kSecMatchLimit as security_ffi::CFTypeRef,
+                security_ffi::kSecMatchLimitAll,
+            ),
         ];
-        let query = make_cf_dictionary(&query_pairs)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate query CFDictionary".into()))?;
+        let query = make_cf_dictionary(&query_pairs).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate query CFDictionary".into())
+        })?;
 
         let mut result: security_ffi::CFTypeRef = std::ptr::null();
         let status = security_ffi::SecItemCopyMatching(query.0, &mut result);
@@ -899,7 +1058,9 @@ fn load_keychain_matching(
             return Ok(Vec::new());
         }
         if status != security_ffi::ERR_SEC_SUCCESS {
-            return Err(PairingStoreError::Keychain(format!("SecItemCopyMatching list failed: OSStatus {status}")));
+            return Err(PairingStoreError::Keychain(format!(
+                "SecItemCopyMatching list failed: OSStatus {status}"
+            )));
         }
         if result.is_null() {
             return Ok(Vec::new());
@@ -927,7 +1088,10 @@ fn load_keychain_matching(
                         continue;
                     }
                 }
-                let data_val = security_ffi::CFDictionaryGetValue(dict, security_ffi::kSecValueData as security_ffi::CFTypeRef);
+                let data_val = security_ffi::CFDictionaryGetValue(
+                    dict,
+                    security_ffi::kSecValueData as security_ffi::CFTypeRef,
+                );
                 if !data_val.is_null() {
                     let bytes = cf_data_to_vec(data_val);
                     if let Ok(record) = serde_json::from_slice::<PairingRecord>(&bytes) {
@@ -946,46 +1110,40 @@ fn load_keychain_matching(
 fn delete_keychain(service: &str, id: &str) -> Result<(), PairingStoreError> {
     let key = format!("maho_pairing_{id}");
     unsafe {
-        let service_cf = make_cf_string(service)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate service CFString".into()))?;
-        let account_cf = make_cf_string(&key)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate account CFString".into()))?;
+        let service_cf = make_cf_string(service).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate service CFString".into())
+        })?;
+        let account_cf = make_cf_string(&key).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate account CFString".into())
+        })?;
 
         let query_pairs = [
-            (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-            (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-            (security_ffi::kSecAttrAccount as security_ffi::CFTypeRef, account_cf.0),
+            (
+                security_ffi::kSecClass as security_ffi::CFTypeRef,
+                security_ffi::kSecClassGenericPassword,
+            ),
+            (
+                security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                service_cf.0,
+            ),
+            (
+                security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                account_cf.0,
+            ),
         ];
-        let query = make_cf_dictionary(&query_pairs)
-            .ok_or_else(|| PairingStoreError::Keychain("Failed to allocate query CFDictionary".into()))?;
+        let query = make_cf_dictionary(&query_pairs).ok_or_else(|| {
+            PairingStoreError::Keychain("Failed to allocate query CFDictionary".into())
+        })?;
 
         let status = security_ffi::SecItemDelete(query.0);
-        if status == security_ffi::ERR_SEC_SUCCESS || status == security_ffi::ERR_SEC_ITEM_NOT_FOUND {
+        if status == security_ffi::ERR_SEC_SUCCESS || status == security_ffi::ERR_SEC_ITEM_NOT_FOUND
+        {
             Ok(())
         } else {
-            Err(PairingStoreError::Keychain(format!("SecItemDelete failed: OSStatus {status}")))
+            Err(PairingStoreError::Keychain(format!(
+                "SecItemDelete failed: OSStatus {status}"
+            )))
         }
-    }
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, bytes)
     }
 }
 
@@ -1182,7 +1340,10 @@ mod tests {
         let records = store.load_all().unwrap();
         assert_eq!(records.len(), 1, "only the valid record must load");
         assert_eq!(records[0].id, "intact");
-        assert_eq!(store.load("intact").unwrap().map(|r| r.id), Some("intact".to_owned()));
+        assert_eq!(
+            store.load("intact").unwrap().map(|r| r.id),
+            Some("intact".to_owned())
+        );
         assert_eq!(store.load("broken").unwrap(), None);
     }
 
@@ -1197,19 +1358,29 @@ mod tests {
 
         // Ensure temporary file was client-pairings.json.tmp and was cleanly renamed
         let tmp_file = client_file.with_extension("json.tmp");
-        assert!(!tmp_file.exists(), "Temporary file must be cleaned up / renamed");
+        assert!(
+            !tmp_file.exists(),
+            "Temporary file must be cleaned up / renamed"
+        );
         assert!(client_file.exists());
     }
 
     #[test]
     fn ephemeral_pairing_store_roundtrip_and_delete() {
         let store = PairingStore::new_ephemeral();
-        let record = PairingRecord::new("host-ephemeral-1", "Server", vec![0x55; 32], 1700000000000);
+        let record =
+            PairingRecord::new("host-ephemeral-1", "Server", vec![0x55; 32], 1700000000000);
 
         store.save(record.clone()).unwrap();
-        assert_eq!(store.load("host-ephemeral-1").unwrap(), Some(record.clone()));
+        assert_eq!(
+            store.load("host-ephemeral-1").unwrap(),
+            Some(record.clone())
+        );
         assert_eq!(store.find_by_host("server").unwrap(), Some(record.clone()));
-        assert_eq!(store.find_by_host("host-ephemeral-1").unwrap(), Some(record.clone()));
+        assert_eq!(
+            store.find_by_host("host-ephemeral-1").unwrap(),
+            Some(record.clone())
+        );
 
         let all = store.load_all().unwrap();
         assert_eq!(all.len(), 1);
@@ -1258,7 +1429,9 @@ mod tests {
         let ep2 = PairingEndpoint::new("100.91.254.71", 19730, 19731);
 
         // When: remember_endpoint called for ep1
-        let updated = store.remember_endpoint("host-id-1", &key, ep1.clone()).unwrap();
+        let updated = store
+            .remember_endpoint("host-id-1", &key, ep1.clone())
+            .unwrap();
         assert!(updated);
 
         // Then: last_endpoint is ep1, aliases empty
@@ -1267,7 +1440,9 @@ mod tests {
         assert!(loaded.endpoint_aliases.is_empty());
 
         // When: remember_endpoint called again with same ep1 (idempotent / dedup)
-        let updated2 = store.remember_endpoint("host-id-1", &key, ep1.clone()).unwrap();
+        let updated2 = store
+            .remember_endpoint("host-id-1", &key, ep1.clone())
+            .unwrap();
         assert!(updated2);
 
         // Then: last_endpoint remains ep1, aliases still empty (no duplicate added)
@@ -1276,7 +1451,9 @@ mod tests {
         assert!(loaded2.endpoint_aliases.is_empty());
 
         // When: remember_endpoint called with ep2
-        let updated3 = store.remember_endpoint("host-id-1", &key, ep2.clone()).unwrap();
+        let updated3 = store
+            .remember_endpoint("host-id-1", &key, ep2.clone())
+            .unwrap();
         assert!(updated3);
 
         // Then: last_endpoint is ep2, ep1 is shifted to aliases
@@ -1285,7 +1462,9 @@ mod tests {
         assert_eq!(loaded3.endpoint_aliases, vec![ep1.clone()]);
 
         // When: remember_endpoint called with ep1 again
-        let updated4 = store.remember_endpoint("host-id-1", &key, ep1.clone()).unwrap();
+        let updated4 = store
+            .remember_endpoint("host-id-1", &key, ep1.clone())
+            .unwrap();
         assert!(updated4);
 
         // Then: last_endpoint is ep1, ep2 is in aliases, ep1 is deduped from aliases
@@ -1307,13 +1486,20 @@ mod tests {
         let original_id = "cred-preserve-id";
         let original_name = "PreservedHost";
         let original_time = 1712345678900;
-        let record = PairingRecord::new(original_id, original_name, original_key.clone(), original_time);
+        let record = PairingRecord::new(
+            original_id,
+            original_name,
+            original_key.clone(),
+            original_time,
+        );
         store.save(record).unwrap();
 
         let ep = PairingEndpoint::new("10.0.0.5", 19730, 19731);
 
         // When: remember_endpoint updates endpoint metadata
-        let updated = store.remember_endpoint(original_id, &original_key, ep.clone()).unwrap();
+        let updated = store
+            .remember_endpoint(original_id, &original_key, ep.clone())
+            .unwrap();
         assert!(updated);
 
         // Then: secret key bytes, id, name, and added_at_unix_ms remain strictly identical
@@ -1333,7 +1519,9 @@ mod tests {
         let ep = PairingEndpoint::new("192.168.1.1", 19730, 19731);
 
         // When: remember_endpoint called for non-existent ID
-        let updated = store.remember_endpoint("non-existent-uuid", &key, ep).unwrap();
+        let updated = store
+            .remember_endpoint("non-existent-uuid", &key, ep)
+            .unwrap();
 
         // Then: returns false and does NOT resurrect or create any record
         assert!(!updated);
@@ -1347,13 +1535,20 @@ mod tests {
         let store = PairingStore::new_ephemeral();
         let correct_key = vec![0x44; 32];
         let wrong_key = vec![0x99; 32];
-        let record = PairingRecord::new("target-id", "TargetHost", correct_key.clone(), 1700000000000);
+        let record = PairingRecord::new(
+            "target-id",
+            "TargetHost",
+            correct_key.clone(),
+            1700000000000,
+        );
         store.save(record.clone()).unwrap();
 
         let ep = PairingEndpoint::new("192.168.1.200", 19730, 19731);
 
         // When: remember_endpoint called with mismatched expected_key
-        let updated = store.remember_endpoint("target-id", &wrong_key, ep).unwrap();
+        let updated = store
+            .remember_endpoint("target-id", &wrong_key, ep)
+            .unwrap();
 
         // Then: returns false and stored record is completely unmutated
         assert!(!updated);
@@ -1388,12 +1583,93 @@ mod tests {
         let obj = val.as_object().unwrap();
         let mut keys: Vec<&String> = obj.keys().collect();
         keys.sort();
-        assert_eq!(keys, vec!["addedAtUnixMs", "hostName", "id", "lastEndpoint"]);
+        assert_eq!(
+            keys,
+            vec!["addedAtUnixMs", "hostName", "id", "lastEndpoint"]
+        );
 
         // Endpoint preserves IPv6 scope and concrete ports
         let ep_val = &val["lastEndpoint"];
         assert_eq!(ep_val["host"], "[fe80::1%en0]");
         assert_eq!(ep_val["tcpPort"], 19730);
         assert_eq!(ep_val["udpPort"], 19731);
+    }
+
+    #[test]
+    fn pairing_record_debug_redacts_the_secret_key() {
+        let secret: &[u8] = &[0xAB; 32];
+        let record = PairingRecord::new("debug-id", "DebugHost", secret.to_vec(), 0);
+        let rendered = format!("{record:?}");
+        assert!(rendered.contains("[REDACTED]"), "got {rendered}");
+        assert!(!rendered.contains(&format!("{:?}", secret)));
+        assert!(
+            !rendered.contains("171"),
+            "decimal key bytes leaked: {rendered}"
+        );
+    }
+
+    #[test]
+    fn endpoint_aliases_stay_bounded_while_roaming() {
+        let store = PairingStore::new_ephemeral();
+        let key = vec![0x77; 32];
+        store
+            .save(PairingRecord::new("roam-id", "RoamHost", key.clone(), 0))
+            .unwrap();
+        let mut latest = None;
+        for i in 0..40_u8 {
+            let endpoint = PairingEndpoint::new(format!("10.0.0.{i}"), 19730, 19731);
+            store
+                .remember_endpoint("roam-id", &key, endpoint.clone())
+                .unwrap();
+            latest = Some(endpoint);
+        }
+        let loaded = store.load("roam-id").unwrap().unwrap();
+        assert_eq!(loaded.last_endpoint, latest);
+        assert!(
+            loaded.endpoint_aliases.len() <= 16,
+            "alias history is unbounded: {}",
+            loaded.endpoint_aliases.len()
+        );
+        // The most recent aliases survive truncation: 10.0.0.39 is the current
+        // last_endpoint (never an alias), so 10.0.0.38 is the newest alias.
+        assert!(loaded
+            .endpoint_aliases
+            .contains(&PairingEndpoint::new("10.0.0.38", 19730, 19731)));
+        assert!(!loaded
+            .endpoint_aliases
+            .contains(&PairingEndpoint::new("10.0.0.0", 19730, 19731)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_pairings_use_a_unique_private_temporary_and_leave_no_strays() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client_file = temp_dir.path().join("client-pairings.json");
+        let store = PairingStore::new(&client_file);
+        // A pre-existing target (as on a rewritten store) and repeated saves
+        // must never expose key material world-readable.
+        fs::write(&client_file, b"[]").unwrap();
+        for i in 0..3 {
+            store
+                .save(PairingRecord::new(
+                    format!("private-{i}"),
+                    "Host",
+                    vec![0x11; 32],
+                    0,
+                ))
+                .unwrap();
+        }
+        let entries: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![client_file.clone()],
+            "stray temporary files remain"
+        );
+        let mode = fs::metadata(&client_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "store file must be private");
     }
 }

@@ -293,8 +293,7 @@ mod bounded_io_tests {
 
     impl AgentServerBackend for CountingBackend {
         fn send_input_event(&self, _event: maho_proto::InputEvent) -> Result<(), String> {
-            self.sent
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
         fn get_screen_info(&self) -> ScreenInfo {

@@ -26,7 +26,7 @@ const DEFAULT_TCP_PORT: u16 = 19730;
 const DEFAULT_UDP_PORT: u16 = 19731;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "maho-client",
     about = "MahoRD headless testing client for VM E2E driving",
@@ -46,7 +46,7 @@ struct Cli {
     udp_port: Option<u16>,
 
     /// 8-digit bootstrap PIN for pairing with the host.
-    #[arg(long, conflicts_with = "psk_hex")]
+    #[arg(long, conflicts_with = "psk_hex", value_parser = parse_pin)]
     pin: Option<String>,
 
     /// 64-character hexadecimal pre-shared key (32 bytes) if pairing store is unavailable.
@@ -98,6 +98,49 @@ struct Cli {
     /// Start stdio Model Context Protocol (MCP) server for direct agent driving.
     #[arg(long)]
     mcp: bool,
+}
+
+impl std::fmt::Debug for Cli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // PIN, PSK, and bearer-token arguments must never reach debug output.
+        let secret = |value: &Option<String>| {
+            value
+                .as_ref()
+                .map(|_| "[REDACTED]".to_string())
+                .unwrap_or_else(|| "None".to_string())
+        };
+        f.debug_struct("Cli")
+            .field("host", &self.host)
+            .field("tcp_port", &self.tcp_port)
+            .field("udp_port", &self.udp_port)
+            .field("pin", &secret(&self.pin))
+            .field("psk_hex", &secret(&self.psk_hex))
+            .field("nudge_ms", &self.nudge_ms)
+            .field("pairing_id", &self.pairing_id)
+            .field("pairing_store", &self.pairing_store)
+            .field("frames", &self.frames)
+            .field("stats_json", &self.stats_json)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("client_name", &self.client_name)
+            .field("agent_server", &self.agent_server)
+            .field("agent_token", &secret(&self.agent_token))
+            .field(
+                "allow_unauthenticated_agent",
+                &self.allow_unauthenticated_agent,
+            )
+            .field("mcp", &self.mcp)
+            .finish()
+    }
+}
+
+/// Validates the bootstrap PIN up front so a malformed value is reported as a
+/// clap usage error instead of the misleading PSK identity failure downstream.
+fn parse_pin(pin: &str) -> Result<String, String> {
+    if pin.len() == 8 && pin.bytes().all(|byte| byte.is_ascii_digit()) {
+        Ok(pin.to_string())
+    } else {
+        Err("--pin must be exactly 8 digits".to_string())
+    }
 }
 
 type LatestFrameHolder = Arc<std::sync::Mutex<Option<(u32, u32, Arc<Vec<u8>>)>>>;
@@ -441,11 +484,9 @@ fn run_client(mut cli: Cli) -> Result<()> {
                     // gone: "10.0.0.5" must not match a record named "10".
                     records.into_iter().rev().find(|r| {
                         cli.host.eq_ignore_ascii_case(&r.name)
-                            || r.last_endpoint
-                                .as_ref()
-                                .is_some_and(|endpoint| {
-                                    endpoint.host.eq_ignore_ascii_case(&cli.host)
-                                })
+                            || r.last_endpoint.as_ref().is_some_and(|endpoint| {
+                                endpoint.host.eq_ignore_ascii_case(&cli.host)
+                            })
                             || r.endpoint_aliases
                                 .iter()
                                 .any(|endpoint| endpoint.host.eq_ignore_ascii_case(&cli.host))
@@ -561,6 +602,12 @@ fn run_client(mut cli: Cli) -> Result<()> {
             .name("maho-client-nudge".into())
             .spawn(move || {
                 let mut flip = false;
+                // The nudge only makes sense once streaming has actually started:
+                // injecting mouse moves before the first video frame would churn
+                // the host during handshake for no benefit.
+                while r_nudge.load(Ordering::Relaxed) && !_first.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(nudge_ms.clamp(1, 20)));
+                }
                 while r_nudge.load(Ordering::Relaxed) {
                     let x = if flip { 0.501_5 } else { 0.5 };
                     flip = !flip;
@@ -598,8 +645,12 @@ fn run_client(mut cli: Cli) -> Result<()> {
                 width: ready.server.width as u32,
                 height: ready.server.height as u32,
                 scale: ready.server.scale,
-                logical_width: Some((ready.server.width as f32 / ready.server.scale.max(0.1)).round() as u32),
-                logical_height: Some((ready.server.height as f32 / ready.server.scale.max(0.1)).round() as u32),
+                logical_width: Some(
+                    (ready.server.width as f32 / ready.server.scale.max(0.1)).round() as u32,
+                ),
+                logical_height: Some(
+                    (ready.server.height as f32 / ready.server.scale.max(0.1)).round() as u32,
+                ),
                 monitors: vec![maho_app::agent_input::MonitorInfo {
                     id: 0,
                     name: "Primary Display".to_string(),
@@ -1015,23 +1066,81 @@ fn ctrlc_handler<F>(f: F) -> Result<()>
 where
     F: Fn() + Send + Sync + 'static,
 {
-    // Best-effort ctrl-c handler without extra crate
-    // On Unix, standard signal hooks can be set or ignored gracefully.
     #[cfg(unix)]
     {
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            // Nothing required if signal handler isn't needed, standard SIGINT exits process
-        });
+        use std::sync::OnceLock;
+
+        extern "C" {
+            fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
+        }
+
+        const SIGINT: i32 = 2;
+        const SIG_ERR: usize = usize::MAX;
+
+        extern "C" fn on_signal(_signum: i32) {
+            // The callback only performs an atomic store on the shutdown flag.
+            if let Some(callback) = SIGNAL_CALLBACK.get() {
+                callback();
+            }
+        }
+
+        static SIGNAL_CALLBACK: OnceLock<&'static (dyn Fn() + Send + Sync)> = OnceLock::new();
+        let leaked: &'static (dyn Fn() + Send + Sync) = Box::leak(Box::new(f));
+        if SIGNAL_CALLBACK.set(leaked).is_err() {
+            bail!("ctrl-c handler already installed");
+        }
+        let previous = unsafe { signal(SIGINT, on_signal) };
+        if previous == SIG_ERR {
+            bail!("failed to install SIGINT handler");
+        }
     }
-    let _ = f;
+    #[cfg(not(unix))]
+    {
+        // Best-effort without a signal facility: keep the default handler.
+        let _ = f;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod pipeline_tests {
     use super::*;
+
+    #[test]
+    fn pin_must_be_exactly_eight_digits() {
+        assert!(
+            Cli::try_parse_from(["maho-client", "--host", "fixture", "--pin", "12345678"]).is_ok()
+        );
+        for bad in ["1234567", "123456789", "1234567a", "1234 678", "12345678\n"] {
+            assert!(
+                Cli::try_parse_from(["maho-client", "--host", "fixture", "--pin", bad]).is_err(),
+                "--pin {bad:?} must be rejected by the value parser"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_debug_redacts_secret_arguments() {
+        let pin_cli = Cli::parse_from(["maho-client", "--host", "fixture", "--pin", "12345678"]);
+        let pin_debug = format!("{pin_cli:?}");
+        assert!(pin_debug.contains("[REDACTED]"), "got {pin_debug}");
+        assert!(!pin_debug.contains("12345678"), "got {pin_debug}");
+
+        let psk = "a".repeat(64);
+        let psk_cli = Cli::parse_from([
+            "maho-client",
+            "--host",
+            "fixture",
+            "--psk-hex",
+            &psk,
+            "--agent-token",
+            "bearer-token",
+        ]);
+        let psk_debug = format!("{psk_cli:?}");
+        assert!(psk_debug.contains("[REDACTED]"), "got {psk_debug}");
+        assert!(!psk_debug.contains(&psk), "got {psk_debug}");
+        assert!(!psk_debug.contains("bearer-token"), "got {psk_debug}");
+    }
 
     #[test]
     fn agent_default_has_no_deadline() {

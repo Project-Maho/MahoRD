@@ -95,7 +95,11 @@ pub enum SessionEvent {
     Cursor(CursorState),
     Clipboard(String),
     StreamConfig(ControlMessage),
-    InputAck { sequence: u32, success: bool, error_code: u8 },
+    InputAck {
+        sequence: u32,
+        success: bool,
+        error_code: u8,
+    },
     Ping,
     Ignored,
 }
@@ -699,7 +703,9 @@ impl ClientSession {
                     .get(..4)
                     .and_then(|bytes| bytes.try_into().ok())
                     .map(u32::from_le_bytes),
-                PacketType::Ping => maho_proto::TimestampStats::decode(&payload).map(|s| s.frame_id),
+                PacketType::Ping => {
+                    maho_proto::TimestampStats::decode(&payload).map(|s| s.frame_id)
+                }
                 _ => None,
             }
         } else {
@@ -847,7 +853,10 @@ impl ClientSession {
         tcp.set_nodelay(true)?;
 
         let interrupt_clone = tcp.try_clone()?;
-        *self.interrupt_socket.lock().map_err(|_| SessionError::Poisoned)? = Some(interrupt_clone);
+        *self
+            .interrupt_socket
+            .lock()
+            .map_err(|_| SessionError::Poisoned)? = Some(interrupt_clone);
 
         if self.cancelled.load(Ordering::SeqCst) {
             let _ = tcp.shutdown(std::net::Shutdown::Both);
@@ -865,7 +874,10 @@ impl ClientSession {
         };
 
         if self.cancelled.load(Ordering::SeqCst) {
-            let _ = stream.ssl_stream().get_ref().shutdown(std::net::Shutdown::Both);
+            let _ = stream
+                .ssl_stream()
+                .get_ref()
+                .shutdown(std::net::Shutdown::Both);
             return Err(SessionError::Cancelled);
         }
 
@@ -1085,9 +1097,11 @@ impl ClientSession {
                         .push_chunk(FrameChunk::decode(&payload)?, received_at)?
                 };
                 if let Some(started_at) = state.frames.take_completed_started_at() {
-                    state
-                        .receiver
-                        .record_assembly(started_at, std::time::Instant::now());
+                    // Completion time comes from the same receive clock that
+                    // started the assembly: mixing a supplied logical start
+                    // with a wall-clock end would invert or skew the interval
+                    // under explicit-clock replay ingress.
+                    state.receiver.record_assembly(started_at, received_at);
                 }
                 Ok(frame.map_or(SessionEvent::Ignored, SessionEvent::Frame))
             }
@@ -1467,8 +1481,8 @@ mod cancellation_tests {
     #[test]
     fn runtime_events_retain_stream_configuration_results() {
         let events = RuntimeEvents::default();
-        let response = ControlMessage::StreamConfigResponse(
-            maho_proto::StreamConfigurationResponse {
+        let response =
+            ControlMessage::StreamConfigResponse(maho_proto::StreamConfigurationResponse {
                 request_id: 7,
                 active: maho_proto::StreamConfiguration {
                     width: 1920,
@@ -1476,8 +1490,7 @@ mod cancellation_tests {
                     bitrate: 8_000_000,
                     frames_per_second: 60,
                 },
-            },
-        );
+            });
         let reject = ControlMessage::StreamConfigReject(maho_proto::StreamConfigurationReject {
             request_id: 8,
             reason: maho_proto::StreamConfigurationErrorCode::UnsupportedDimensions,
@@ -1487,7 +1500,10 @@ mod cancellation_tests {
         events.push(Ok(SessionEvent::StreamConfig(reject.clone())));
 
         assert_eq!(
-            events.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
+            events
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap(),
             SessionEvent::StreamConfig(response)
         );
         assert_eq!(
@@ -1832,5 +1848,129 @@ mod cancellation_tests {
                 "expected no reconnect for {error:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod receiver_clock_tests {
+    use super::*;
+    use maho_net::TlsPskServer;
+    use std::time::Instant;
+
+    #[test]
+    fn explicit_clock_ingress_records_assembly_interval_on_that_clock() {
+        let key = [0x39; 32];
+        let listener = TlsPskServer::new([PskIdentity::pairing("clock", &key).unwrap()])
+            .unwrap()
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let udp_peer = udp.try_clone().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = SessionConfig::direct("127.0.0.1", "clock");
+        config.tcp_port = listener.local_addr().unwrap().port();
+        config.udp_port = udp.local_addr().unwrap().port();
+        config.connect_timeout = Duration::from_secs(5);
+        config.handshake_ack_timeout = Duration::from_secs(5);
+        config.pairing_store_path = Some(temporary.path().join("pairings.json"));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap();
+            stream
+                .ssl_stream()
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let frame = stream.read_frame().unwrap();
+            let handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            let mut ack = PacketHeader::new(PacketType::HandshakeAck, 0, 0, 0)
+                .encode()
+                .unwrap();
+            ack.extend_from_slice(&handshake.encode().unwrap());
+            stream.write_frame(&ack).unwrap();
+            let mut probe = [0; 1024];
+            let (probe_len, peer) = udp.recv_from(&mut probe).unwrap();
+            let c2h =
+                DatagramCipher::derive(&key, &handshake.session_salt, Direction::ClientToHost)
+                    .unwrap();
+            let mut c2h = c2h;
+            let (probe_hdr, _) = c2h.open_datagram(&probe[..probe_len]).unwrap();
+            assert_eq!(probe_hdr.packet_type, PacketType::Ping);
+            ready_tx.send((peer, handshake.session_salt)).unwrap();
+            // Stay readable until the client disconnects at teardown.
+            let _ = stream.read_frame();
+        });
+        let session = ClientSession::new(config).unwrap();
+        session
+            .connect_with_pairing(PairingRecord {
+                id: "clock".into(),
+                name: "fixture".into(),
+                key: key.to_vec(),
+                added_at_unix_ms: 0,
+                last_endpoint: None,
+                endpoint_aliases: Vec::new(),
+            })
+            .unwrap();
+        session
+            .set_udp_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let (peer, salt) = ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut cipher = DatagramCipher::derive(&key, &salt, Direction::HostToClient).unwrap();
+        let header_datagram = cipher
+            .seal_datagram(
+                &PacketHeader::new(PacketType::FrameHeader, 1, 0, 0),
+                &FrameHeader {
+                    frame_id: 7,
+                    width: 1,
+                    height: 1,
+                    is_key_frame: true,
+                    total_chunks: 1,
+                    total_size: 1,
+                }
+                .encode()
+                .unwrap(),
+            )
+            .unwrap();
+        let chunk_datagram = cipher
+            .seal_datagram(
+                &PacketHeader::new(PacketType::FrameChunk, 2, 0, 0),
+                &FrameChunk {
+                    frame_id: 7,
+                    chunk_index: 0,
+                    data: vec![1],
+                }
+                .encode()
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Future logical instants: wall-clock completion sampling would produce
+        // a reversed interval and silently drop the assembly sample.
+        let start = Instant::now() + Duration::from_secs(3600);
+        udp_peer.send_to(&header_datagram, peer).unwrap();
+        assert_eq!(
+            session.receive_udp_event_at(start).unwrap(),
+            SessionEvent::Ignored
+        );
+        udp_peer.send_to(&chunk_datagram, peer).unwrap();
+        assert!(matches!(
+            session
+                .receive_udp_event_at(start + Duration::from_millis(5))
+                .unwrap(),
+            SessionEvent::Frame(_)
+        ));
+        let snapshot = session
+            .receiver_snapshot_at(start + Duration::from_millis(6))
+            .unwrap();
+        let assembly = snapshot
+            .receive_assembly_us
+            .expect("explicit-clock assembly interval must be recorded");
+        assert!(
+            assembly.max_us <= 5_000,
+            "assembly interval must come from the supplied clock, got {assembly:?}"
+        );
+        session.disconnect().unwrap();
+        worker.join().unwrap();
     }
 }

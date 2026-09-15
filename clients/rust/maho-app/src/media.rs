@@ -7,6 +7,8 @@ use std::{
 use maho_proto::{CursorUpdate, FrameChunk, FrameHeader, MAX_CHUNKS_PER_FRAME, MAX_FRAME_BYTES};
 use thiserror::Error;
 
+/// Half of the u32 serial-number ring: wrapping distances below this mean "forward".
+const SERIAL_HALF_RANGE: u32 = 1 << 31;
 const MAX_ORPHAN_FRAMES: usize = 16;
 const MAX_INCOMPLETE_FRAMES: usize = 16;
 const MAX_LOSS_SAMPLES: usize = 4096;
@@ -25,6 +27,7 @@ struct FrameAssembly {
     chunks: BTreeMap<u16, Vec<u8>>,
     started: Instant,
     timestamp_ms: u32,
+    payload_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -52,6 +55,36 @@ pub struct FrameAssembler {
     recent_loss: VecDeque<(Instant, u64, u64)>,
     completed_frames: u64,
     completed_started_at: Option<Instant>,
+}
+
+/// Serial-number ordering on the u32 frame-id ring: is `a` at or after `b`?
+fn serial_not_before(a: u32, b: u32) -> bool {
+    a.wrapping_sub(b) < SERIAL_HALF_RANGE
+}
+
+/// Admits chunks into an assembly, rejecting anything outside the declared
+/// frame or past the declared payload size: headerless chunks and retransmits
+/// must never push a single assembly past its per-frame bounds.
+fn admit_chunks(
+    chunks: &mut BTreeMap<u16, Vec<u8>>,
+    payload_bytes: &mut usize,
+    incoming: BTreeMap<u16, Vec<u8>>,
+    header: &FrameHeader,
+) {
+    use std::collections::btree_map::Entry;
+    for (index, data) in incoming {
+        if index >= header.total_chunks || *payload_bytes + data.len() > header.total_size as usize
+        {
+            continue;
+        }
+        match chunks.entry(index) {
+            Entry::Vacant(entry) => {
+                *payload_bytes += data.len();
+                entry.insert(data);
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
 }
 
 impl FrameAssembler {
@@ -82,7 +115,8 @@ impl FrameAssembler {
         self.track_loss(header.frame_id, now);
         if header.is_key_frame {
             self.frames.retain(|frame_id, assembly| {
-                let keep = *frame_id >= header.frame_id || Self::complete(assembly);
+                let keep =
+                    serial_not_before(*frame_id, header.frame_id) || Self::complete(assembly);
                 if !keep {
                     Self::trace_frame(
                         &self.trace,
@@ -94,31 +128,45 @@ impl FrameAssembler {
                 keep
             });
         }
-        let (chunks, started) = self.orphans.remove(&header.frame_id).map_or_else(
+        let frame_id = header.frame_id;
+        let (chunks, started) = self.orphans.remove(&frame_id).map_or_else(
             || (BTreeMap::new(), now),
             |orphan| (orphan.chunks, orphan.started),
         );
-        let frame_id = header.frame_id;
-        let started = self
-            .frames
-            .get(&frame_id)
-            .map_or(started, |assembly| assembly.started.min(started));
         // A retransmitted header must not discard chunks already collected for
         // this frame: replacing the assembly with an empty map means a frame
-        // whose header arrives twice mid-stream can never complete.
+        // whose header arrives twice mid-stream can never complete. An
+        // identical header is idempotent and refreshes only its metadata; a
+        // conflicting header cannot be trusted to describe the in-progress
+        // assembly and is rejected outright.
         if let Some(existing) = self.frames.get_mut(&frame_id) {
-            existing.started = started;
-            existing.timestamp_ms = timestamp_ms;
-            existing.header = header;
-            for (index, data) in chunks {
-                existing.chunks.entry(index).or_insert(data);
+            if existing.header != header {
+                Self::trace_frame(
+                    &self.trace,
+                    now,
+                    frame_id,
+                    crate::ReceiverTraceEvent::AssemblyInvalid,
+                );
+                return Ok(None);
             }
+            existing.started = existing.started.min(started);
+            existing.timestamp_ms = timestamp_ms;
+            admit_chunks(
+                &mut existing.chunks,
+                &mut existing.payload_bytes,
+                chunks,
+                &existing.header,
+            );
         } else {
+            let mut payload_bytes = 0;
+            let mut admitted = BTreeMap::new();
+            admit_chunks(&mut admitted, &mut payload_bytes, chunks, &header);
             let assembly = FrameAssembly {
                 header,
-                chunks,
+                chunks: admitted,
                 started,
                 timestamp_ms,
+                payload_bytes,
             };
             self.frames.insert(frame_id, assembly);
         }
@@ -158,6 +206,20 @@ impl FrameAssembler {
                 );
                 return Err(MediaAssemblyError::InvalidChunkIndex);
             }
+            if !assembly.chunks.contains_key(&chunk.chunk_index)
+                && assembly.payload_bytes + chunk.data.len() > assembly.header.total_size as usize
+            {
+                Self::trace_frame(
+                    &self.trace,
+                    now,
+                    chunk.frame_id,
+                    crate::ReceiverTraceEvent::AssemblyInvalid,
+                );
+                return Ok(None);
+            }
+            if !assembly.chunks.contains_key(&chunk.chunk_index) {
+                assembly.payload_bytes += chunk.data.len();
+            }
             assembly
                 .chunks
                 .entry(chunk.chunk_index)
@@ -171,6 +233,15 @@ impl FrameAssembler {
                 now,
                 chunk.frame_id,
                 crate::ReceiverTraceEvent::AssemblyCapacity,
+            );
+            return Ok(None);
+        }
+        if chunk.chunk_index >= MAX_CHUNKS_PER_FRAME {
+            Self::trace_frame(
+                &self.trace,
+                now,
+                chunk.frame_id,
+                crate::ReceiverTraceEvent::AssemblyInvalid,
             );
             return Ok(None);
         }
@@ -313,16 +384,26 @@ impl FrameAssembler {
     }
 
     fn track_loss(&mut self, frame_id: u32, now: Instant) {
-        let lost = self
-            .expected_frame_id
-            .map_or(0, |expected| frame_id.saturating_sub(expected) as u64);
-        self.recent_loss.push_back((now, lost, lost + 1));
-        self.expected_frame_id = Some(
+        // Only forward serial progress counts a gap; reordered or wrapped IDs
+        // are retransmissions, not losses.
+        let lost =
             self.expected_frame_id
-                .map_or(frame_id.wrapping_add(1), |expected| {
-                    expected.max(frame_id.wrapping_add(1))
-                }),
-        );
+                .map_or(0, |expected| match frame_id.wrapping_sub(expected) {
+                    forward if forward < SERIAL_HALF_RANGE => forward as u64,
+                    _ => 0,
+                });
+        self.recent_loss.push_back((now, lost, lost + 1));
+        let successor = frame_id.wrapping_add(1);
+        self.expected_frame_id = Some(match self.expected_frame_id {
+            None => successor,
+            Some(expected) => {
+                if successor != expected && serial_not_before(successor, expected) {
+                    successor
+                } else {
+                    expected
+                }
+            }
+        });
         self.trim_loss(now);
     }
 
@@ -566,6 +647,260 @@ mod receiver_timing_tests {
         assert_eq!(frames.take_completed_started_at(), None);
         frames.clear();
         assert_eq!(frames.take_completed_started_at(), None);
+    }
+
+    #[test]
+    fn retransmitted_header_preserves_chunks_and_completes() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        frames.push_header(header(), 42, now).unwrap();
+        frames
+            .push_chunk(chunk(0), now + Duration::from_millis(1))
+            .unwrap();
+        // A repeated header mid-frame must not erase chunk 0.
+        frames
+            .push_header(header(), 42, now + Duration::from_millis(2))
+            .unwrap();
+        assert!(frames.frames[&1].chunks.contains_key(&0));
+        let completed = frames
+            .push_chunk(chunk(1), now + Duration::from_millis(3))
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.data, [0, 1]);
+    }
+
+    #[test]
+    fn conflicting_header_for_existing_frame_is_rejected() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        frames.push_header(header(), 42, now).unwrap();
+        frames.push_chunk(chunk(0), now).unwrap();
+        // A conflicting header for the same frame id cannot silently replace
+        // the in-progress assembly.
+        assert!(frames
+            .push_header(
+                FrameHeader {
+                    total_chunks: 3,
+                    total_size: 3,
+                    ..header()
+                },
+                7,
+                now + Duration::from_millis(1),
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(frames.frames[&1].header.total_chunks, 2);
+        assert!(frames.frames[&1].chunks.contains_key(&0));
+        // The frame still completes under its original header.
+        let completed = frames
+            .push_chunk(chunk(1), now + Duration::from_millis(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.header.total_chunks, 2);
+        assert_eq!(completed.data, [0, 1]);
+    }
+
+    #[test]
+    fn promotion_validates_orphan_indices_and_payload_budget() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        // Out-of-range orphan indices and an over-budget payload cannot join
+        // the assembly once the header declares its real shape.
+        for index in [2_u16, 3] {
+            frames
+                .push_chunk(
+                    FrameChunk {
+                        frame_id: 100,
+                        chunk_index: index,
+                        data: vec![index as u8; 2],
+                    },
+                    now,
+                )
+                .unwrap();
+        }
+        frames
+            .push_header(
+                FrameHeader {
+                    frame_id: 100,
+                    ..header()
+                },
+                42,
+                now,
+            )
+            .unwrap();
+        assert!(frames.frames[&100].chunks.is_empty());
+        // The frame only completes with the genuine index set.
+        for index in 0..2 {
+            let completed = frames
+                .push_chunk(
+                    FrameChunk {
+                        frame_id: 100,
+                        chunk_index: index,
+                        data: vec![index as u8],
+                    },
+                    now + Duration::from_millis(1),
+                )
+                .unwrap();
+            if index == 1 {
+                assert_eq!(completed.unwrap().data, [0, 1]);
+            } else {
+                assert!(completed.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn chunks_past_the_declared_payload_size_are_not_retained() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        frames.push_header(header(), 42, now).unwrap();
+        frames.push_chunk(chunk(0), now).unwrap();
+        // header() declares two 1-byte chunks; oversized duplicates and new
+        // chunks must not inflate the assembly past the declared size.
+        let oversized = FrameChunk {
+            frame_id: 1,
+            chunk_index: 0,
+            data: vec![9; 4],
+        };
+        let oversized_new = FrameChunk {
+            frame_id: 1,
+            chunk_index: 1,
+            data: vec![9; 4],
+        };
+        frames.push_chunk(oversized, now).unwrap();
+        frames.push_chunk(oversized_new, now).unwrap();
+        assert_eq!(frames.frames[&1].payload_bytes, 1);
+        assert_eq!(frames.frames[&1].chunks[&0], vec![0]);
+        assert!(!frames.frames[&1].chunks.contains_key(&1));
+        // The frame still completes with genuine chunks.
+        let completed = frames.push_chunk(chunk(1), now).unwrap().unwrap();
+        assert_eq!(completed.data, [0, 1]);
+    }
+
+    #[test]
+    fn orphan_chunks_above_the_chunk_cap_are_not_stored() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        frames
+            .push_chunk(
+                FrameChunk {
+                    frame_id: 7,
+                    chunk_index: MAX_CHUNKS_PER_FRAME,
+                    data: vec![1],
+                },
+                now,
+            )
+            .unwrap();
+        frames
+            .push_header(
+                FrameHeader {
+                    frame_id: 7,
+                    total_chunks: 1,
+                    total_size: 1,
+                    ..header()
+                },
+                42,
+                now,
+            )
+            .unwrap();
+        // The rejected orphan index was never retained, so chunk 0 completes.
+        let completed = frames
+            .push_chunk(
+                FrameChunk {
+                    frame_id: 7,
+                    chunk_index: 0,
+                    data: vec![0],
+                },
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.data, [0]);
+    }
+
+    #[test]
+    fn loss_tracking_survives_u32_wrap() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        for frame_id in [u32::MAX - 1, u32::MAX, 0] {
+            frames
+                .push_header(
+                    FrameHeader {
+                        frame_id,
+                        ..header()
+                    },
+                    42,
+                    now,
+                )
+                .unwrap();
+        }
+        // Receiving 2 while 1 is missing must count the gap after the wrap.
+        frames
+            .push_header(
+                FrameHeader {
+                    frame_id: 2,
+                    ..header()
+                },
+                42,
+                now,
+            )
+            .unwrap();
+        assert_eq!(frames.loss_ratio(now), 1.0 / 5.0);
+    }
+
+    #[test]
+    fn keyframe_pruning_uses_serial_order_across_wrap() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        frames
+            .push_header(
+                FrameHeader {
+                    frame_id: 0,
+                    is_key_frame: false,
+                    ..header()
+                },
+                42,
+                now,
+            )
+            .unwrap();
+        // A reordered pre-wrap keyframe must not delete the post-wrap assembly.
+        frames
+            .push_header(
+                FrameHeader {
+                    frame_id: u32::MAX - 1,
+                    is_key_frame: true,
+                    ..header()
+                },
+                42,
+                now + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert!(frames.frames.contains_key(&0));
+        // An older frame on the same side of the wrap is still pruned.
+        frames
+            .push_header(
+                FrameHeader {
+                    frame_id: 3,
+                    is_key_frame: false,
+                    ..header()
+                },
+                42,
+                now + Duration::from_millis(2),
+            )
+            .unwrap();
+        frames
+            .push_header(
+                FrameHeader {
+                    frame_id: 4,
+                    is_key_frame: true,
+                    ..header()
+                },
+                42,
+                now + Duration::from_millis(3),
+            )
+            .unwrap();
+        assert!(!frames.frames.contains_key(&3));
+        assert!(frames.frames.contains_key(&4));
     }
 
     #[test]
