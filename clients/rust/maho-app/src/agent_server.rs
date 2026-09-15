@@ -65,12 +65,30 @@ impl ConnectionWork {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct FrameSnapshot {
+    pub width: u32,
+    pub height: u32,
+    pub buffer: Arc<Vec<u8>>,
+    pub metadata: Option<FrameMetadata>,
+}
+
 pub trait AgentServerBackend: Send + Sync + 'static {
     fn send_input_event(&self, event: maho_proto::InputEvent) -> Result<(), String>;
     fn get_screen_info(&self) -> ScreenInfo;
     fn get_latest_frame_nv12(&self) -> Option<(u32, u32, Arc<Vec<u8>>)>;
     fn get_latest_frame_metadata(&self) -> Option<FrameMetadata> {
         None
+    }
+    fn get_latest_frame_snapshot(&self) -> Option<FrameSnapshot> {
+        let (width, height, buffer) = self.get_latest_frame_nv12()?;
+        let metadata = self.get_latest_frame_metadata();
+        Some(FrameSnapshot {
+            width,
+            height,
+            buffer,
+            metadata,
+        })
     }
 
     /// Whether the backend owns a remote session it can gracefully stop via
@@ -511,15 +529,15 @@ async fn handle_connection(
             let (status, text, resp) =
                 work.blocking(move || {
                     let _permit = permit;
-                    match backend.get_latest_frame_nv12() {
-                    Some((width, height, nv12_buf)) => {
-                        match encode_nv12_screenshot(width, height, &nv12_buf, format) {
+                    match backend.get_latest_frame_snapshot() {
+                    Some(snapshot) => {
+                        match encode_nv12_screenshot(snapshot.width, snapshot.height, &snapshot.buffer, format) {
                             Ok(base64_data) => {
                                 let mut json_resp = serde_json::json!({
-                                    "ok": true, "format": format, "width": width,
-                                    "height": height, "base64": base64_data,
+                                    "ok": true, "format": format, "width": snapshot.width,
+                                    "height": snapshot.height, "base64": base64_data,
                                 });
-                                if let Some(meta) = backend.get_latest_frame_metadata() {
+                                if let Some(meta) = snapshot.metadata {
                                     json_resp["frame_id"] = serde_json::json!(meta.frame_id);
                                     json_resp["timestamp_ms"] = serde_json::json!(meta.timestamp_ms);
                                     json_resp["age_ms"] = serde_json::json!(meta.age_ms);

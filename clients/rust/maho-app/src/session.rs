@@ -999,11 +999,9 @@ impl ClientSession {
         udp.set_read_timeout(Some(HEARTBEAT_INTERVAL * 3))?;
         self.udp_registered.store(false, Ordering::Relaxed);
         self.registration_attempts.store(0, Ordering::Relaxed);
-        for seq in 0..3 {
-            let reg_header = PacketHeader::new(PacketType::Ping, seq, current_unix_ms() as u32, 0);
-            let reg_packet = udp_send.seal_datagram(&reg_header, &[])?;
-            let _ = udp.send(&reg_packet);
-        }
+        let reg_header = PacketHeader::new(PacketType::Ping, 0, current_unix_ms() as u32, 0);
+        let reg_packet = udp_send.seal_datagram(&reg_header, &[])?;
+        let _ = udp.send(&reg_packet);
         {
             let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
             if let Some(tcp) = tcp.as_mut() {

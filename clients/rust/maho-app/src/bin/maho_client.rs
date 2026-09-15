@@ -145,6 +145,8 @@ fn parse_pin(pin: &str) -> Result<String, String> {
 
 type LatestFrameHolder = Arc<std::sync::Mutex<Option<(u32, u32, Arc<Vec<u8>>)>>>;
 type FrameMetadataHolder = Arc<std::sync::Mutex<Option<(FrameMetadata, Instant)>>>;
+type FrameSnapshotHolder =
+    Arc<std::sync::Mutex<Option<(u32, u32, Arc<Vec<u8>>, FrameMetadata, Instant)>>>;
 
 impl Cli {
     fn deadline_expired(&self, elapsed: Duration) -> bool {
@@ -164,6 +166,7 @@ struct ClientBackend {
     screen_info: ScreenInfo,
     latest_frame: LatestFrameHolder,
     frame_metadata: FrameMetadataHolder,
+    frame_snapshot: FrameSnapshotHolder,
     running: Arc<AtomicBool>,
 }
 
@@ -206,6 +209,18 @@ impl AgentServerBackend for ClientBackend {
         Some(meta)
     }
 
+    fn get_latest_frame_snapshot(&self) -> Option<maho_app::agent_server::FrameSnapshot> {
+        let lock = self.frame_snapshot.lock().ok()?;
+        let (width, height, buffer, mut meta, received_at) = lock.as_ref()?.clone();
+        meta.age_ms = received_at.elapsed().as_millis() as u64;
+        Some(maho_app::agent_server::FrameSnapshot {
+            width,
+            height,
+            buffer,
+            metadata: Some(meta),
+        })
+    }
+
     fn supports_session_disconnect(&self) -> bool {
         true
     }
@@ -222,6 +237,7 @@ impl AgentServerBackend for ClientBackend {
 fn store_latest_frame(
     latest_frame: &LatestFrameHolder,
     frame_metadata: &FrameMetadataHolder,
+    frame_snapshot: &FrameSnapshotHolder,
     last: &maho_decode::Nv12Frame,
     frame_id: u64,
     enabled: bool,
@@ -229,36 +245,39 @@ fn store_latest_frame(
     if !enabled {
         return;
     }
+    let w = last.width as usize;
+    let h = last.height as usize;
+    let y_len = w * h;
+    let uv_len = w * h.div_ceil(2);
+    let mut buf = Vec::with_capacity(y_len + uv_len);
+    if last.y_plane.len() >= y_len {
+        buf.extend_from_slice(&last.y_plane[..y_len]);
+    } else {
+        buf.extend_from_slice(&last.y_plane);
+        buf.resize(y_len, 0);
+    }
+    if last.uv_plane.len() >= uv_len {
+        buf.extend_from_slice(&last.uv_plane[..uv_len]);
+    } else {
+        buf.extend_from_slice(&last.uv_plane);
+        buf.resize(y_len + uv_len, 128);
+    }
+    let buf_arc = Arc::new(buf);
+    let now = Instant::now();
+    let meta = FrameMetadata {
+        frame_id,
+        timestamp_ms: last.timestamp_ms as u64,
+        age_ms: 0,
+    };
+    if let Ok(mut lock) = frame_snapshot.lock() {
+        *lock = Some((last.width, last.height, buf_arc.clone(), meta, now));
+    }
     if let Ok(mut lock) = latest_frame.lock() {
-        let w = last.width as usize;
-        let h = last.height as usize;
-        let y_len = w * h;
-        let uv_len = w * (h / 2);
-        let mut buf = Vec::with_capacity(y_len + uv_len);
-        if last.y_plane.len() >= y_len {
-            buf.extend_from_slice(&last.y_plane[..y_len]);
-        } else {
-            buf.extend_from_slice(&last.y_plane);
-            buf.resize(y_len, 0);
-        }
-        if last.uv_plane.len() >= uv_len {
-            buf.extend_from_slice(&last.uv_plane[..uv_len]);
-        } else {
-            buf.extend_from_slice(&last.uv_plane);
-            buf.resize(y_len + uv_len, 128);
-        }
-        *lock = Some((last.width, last.height, Arc::new(buf)));
+        *lock = Some((last.width, last.height, buf_arc));
     }
     // Update frame metadata
     if let Ok(mut lock) = frame_metadata.lock() {
-        *lock = Some((
-            FrameMetadata {
-                frame_id,
-                timestamp_ms: last.timestamp_ms as u64,
-                age_ms: 0,
-            },
-            Instant::now(),
-        ));
+        *lock = Some((meta, now));
     }
 }
 
@@ -631,6 +650,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
 
     let latest_frame: LatestFrameHolder = Arc::new(std::sync::Mutex::new(None));
     let frame_metadata: FrameMetadataHolder = Arc::new(std::sync::Mutex::new(None));
+    let frame_snapshot: FrameSnapshotHolder = Arc::new(std::sync::Mutex::new(None));
 
     let mut agent_server_handle: Option<std::thread::JoinHandle<std::io::Result<()>>> = None;
     let mut agent_spawn_result = Ok(());
@@ -638,26 +658,27 @@ fn run_client(mut cli: Cli) -> Result<()> {
     let mut mcp_handle = None;
     let mut mcp_stop = None;
     if cli.agent_server.is_some() || cli.mcp {
+        let scale = ready.server.scale.max(0.1);
+        let logical_w = ready.server.width as u32;
+        let logical_h = ready.server.height as u32;
+        let phys_w = (logical_w as f32 * scale).round() as u32;
+        let phys_h = (logical_h as f32 * scale).round() as u32;
         let backend = Arc::new(ClientBackend {
             session: session.clone(),
             pairing_id: cli.pairing_id.clone(),
             screen_info: ScreenInfo {
-                width: ready.server.width as u32,
-                height: ready.server.height as u32,
+                width: phys_w,
+                height: phys_h,
                 scale: ready.server.scale,
-                logical_width: Some(
-                    (ready.server.width as f32 / ready.server.scale.max(0.1)).round() as u32,
-                ),
-                logical_height: Some(
-                    (ready.server.height as f32 / ready.server.scale.max(0.1)).round() as u32,
-                ),
+                logical_width: Some(logical_w),
+                logical_height: Some(logical_h),
                 monitors: vec![maho_app::agent_input::MonitorInfo {
                     id: 0,
                     name: "Primary Display".to_string(),
                     x: 0,
                     y: 0,
-                    width: ready.server.width as u32,
-                    height: ready.server.height as u32,
+                    width: phys_w,
+                    height: phys_h,
                     scale: ready.server.scale,
                     is_primary: true,
                 }],
@@ -665,6 +686,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
             },
             latest_frame: latest_frame.clone(),
             frame_metadata: frame_metadata.clone(),
+            frame_snapshot: frame_snapshot.clone(),
             running: running.clone(),
         });
 
@@ -859,6 +881,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
                                     store_latest_frame(
                                         &latest_frame,
                                         &frame_metadata,
+                                        &frame_snapshot,
                                         last,
                                         assembled_frame.header.frame_id as u64,
                                         cli.agent_server.is_some() || cli.mcp,
@@ -1170,6 +1193,7 @@ mod pipeline_tests {
     fn screenshot_snapshot_shares_storage_after_new_frame_is_published() {
         let holder: LatestFrameHolder = Arc::new(std::sync::Mutex::new(None));
         let meta_holder: FrameMetadataHolder = Arc::new(std::sync::Mutex::new(None));
+        let snap_holder: FrameSnapshotHolder = Arc::new(std::sync::Mutex::new(None));
         let frame = maho_decode::Nv12Frame {
             width: 2,
             height: 2,
@@ -1177,7 +1201,7 @@ mod pipeline_tests {
             uv_plane: vec![128, 128],
             ..nv12()
         };
-        store_latest_frame(&holder, &meta_holder, &frame, 1, true);
+        store_latest_frame(&holder, &meta_holder, &snap_holder, &frame, 1, true);
         let current = holder.lock().unwrap();
         let stored_ptr = current.as_ref().unwrap().2.as_ptr();
         let snapshot = current.clone().unwrap();
@@ -1194,7 +1218,7 @@ mod pipeline_tests {
             uv_plane: vec![20; 2],
             ..nv12()
         };
-        store_latest_frame(&holder, &meta_holder, &replacement, 2, true);
+        store_latest_frame(&holder, &meta_holder, &snap_holder, &replacement, 2, true);
         assert_eq!(&snapshot.2[..], &[16, 17, 18, 19, 128, 128]);
     }
 
@@ -1300,8 +1324,9 @@ mod pipeline_tests {
         // Given: no agent/MCP consumer.
         let latest = Arc::new(std::sync::Mutex::new(None));
         let meta = Arc::new(std::sync::Mutex::new(None));
+        let snap = Arc::new(std::sync::Mutex::new(None));
         // When: decoded pixels are offered for storage.
-        store_latest_frame(&latest, &meta, &nv12(), 1, false);
+        store_latest_frame(&latest, &meta, &snap, &nv12(), 1, false);
         // Then: no pixels are retained.
         assert!(latest.lock().unwrap().is_none());
     }
@@ -1311,8 +1336,9 @@ mod pipeline_tests {
         // Given: an agent/MCP consumer.
         let latest = Arc::new(std::sync::Mutex::new(None));
         let meta = Arc::new(std::sync::Mutex::new(None));
+        let snap = Arc::new(std::sync::Mutex::new(None));
         // When: decoded pixels are offered for storage.
-        store_latest_frame(&latest, &meta, &nv12(), 1, true);
+        store_latest_frame(&latest, &meta, &snap, &nv12(), 1, true);
         // Then: packed NV12 remains available to the backend.
         assert_eq!(
             *latest.lock().unwrap(),
