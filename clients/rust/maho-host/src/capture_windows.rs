@@ -46,8 +46,10 @@ pub struct DirtyRect {
 /// A DXGI move operation. Moves precede dirty rectangles when applying damage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveRect {
-    pub source_x: u32,
-    pub source_y: u32,
+    /// Signed like the Windows POINT type: negative source coordinates are
+    /// valid and must not silently drop the move operation.
+    pub source_x: i32,
+    pub source_y: i32,
     pub destination: DirtyRect,
 }
 
@@ -199,8 +201,8 @@ impl WindowsCapture {
                     region.destination_rect.3,
                 )?;
                 Some(MoveRect {
-                    source_x: u32::try_from(region.source_point.0).ok()?,
-                    source_y: u32::try_from(region.source_point.1).ok()?,
+                    source_x: region.source_point.0,
+                    source_y: region.source_point.1,
                     destination,
                 })
             })

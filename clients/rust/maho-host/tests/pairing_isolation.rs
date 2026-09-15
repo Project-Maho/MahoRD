@@ -1,10 +1,4 @@
-use std::{
-    env, fs,
-    process::Command,
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::{env, fs, process::Command, sync::mpsc, thread, time::Duration};
 
 use maho_host::{
     DisplayInfo, HostConfig, HostServer, PairingRecord as HostPairingRecord,
@@ -97,10 +91,9 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             let _ = server_done_tx.send(res);
         });
 
-        let tls_client = TlsPskClient::new(
-            PskIdentity::pairing(&client_record.id, &client_record.key).unwrap(),
-        )
-        .unwrap();
+        let tls_client =
+            TlsPskClient::new(PskIdentity::pairing(&client_record.id, &client_record.key).unwrap())
+                .unwrap();
         let connect_res = tls_client.connect(tcp_addr);
         assert!(
             connect_res.is_err(),
@@ -162,10 +155,9 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             let _ = server2_done_tx.send(res);
         });
 
-        let tls_client2 = TlsPskClient::new(
-            PskIdentity::pairing(&host_record.id, &host_record.key).unwrap(),
-        )
-        .unwrap();
+        let tls_client2 =
+            TlsPskClient::new(PskIdentity::pairing(&host_record.id, &host_record.key).unwrap())
+                .unwrap();
         let connect_res2 = tls_client2.connect(tcp_addr2);
         assert!(
             connect_res2.is_ok(),
@@ -177,14 +169,10 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
         // so the server cleanly terminates the connection without hanging or erroring.
         let mut stream2 = connect_res2.unwrap();
         let disconnect_payload = maho_proto::ControlMessage::Disconnect.encode().unwrap();
-        let mut disconnect_packet = maho_proto::PacketHeader::new(
-            maho_proto::PacketType::Control,
-            0,
-            0,
-            0,
-        )
-        .encode()
-        .unwrap();
+        let mut disconnect_packet =
+            maho_proto::PacketHeader::new(maho_proto::PacketType::Control, 0, 0, 0)
+                .encode()
+                .unwrap();
         disconnect_packet.extend_from_slice(&disconnect_payload);
         let _ = stream2.write_frame(&disconnect_packet);
         drop(stream2);
@@ -238,7 +226,9 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
 
 #[test]
 fn test_legacy_pairing_keys_not_auto_imported_by_host_and_migrated_by_client() {
-    if env::var("MAHO_PAIRING_ISOLATION_CASE").as_deref() == Ok("legacy-migration-and-host-isolation") {
+    if env::var("MAHO_PAIRING_ISOLATION_CASE").as_deref()
+        == Ok("legacy-migration-and-host-isolation")
+    {
         // Step 1: Observable host non-auto-import isolation ahead of filename checks
         let host_store = HostPairingStore::host_default().unwrap();
         let host_records = host_store.load_all().unwrap();
@@ -267,7 +257,10 @@ fn test_legacy_pairing_keys_not_auto_imported_by_host_and_migrated_by_client() {
         // Step 3: Verify legacy file is preserved intact and unmodified
         let parent = client_file.parent().unwrap();
         let legacy_file = parent.join("pairing-keys.json");
-        assert!(legacy_file.exists(), "Legacy pairing-keys.json must be preserved");
+        assert!(
+            legacy_file.exists(),
+            "Legacy pairing-keys.json must be preserved"
+        );
         let legacy_data: serde_json::Value =
             serde_json::from_slice(&fs::read(&legacy_file).unwrap()).unwrap();
         assert_eq!(legacy_data[0]["id"], "legacy-client-1");
@@ -275,7 +268,10 @@ fn test_legacy_pairing_keys_not_auto_imported_by_host_and_migrated_by_client() {
         // Step 4: Deleting from client store does not delete or touch legacy file
         client_store.delete("legacy-client-1").unwrap();
         assert!(client_store.load_all().unwrap().is_empty());
-        assert!(legacy_file.exists(), "Legacy pairing-keys.json must remain after client store deletion");
+        assert!(
+            legacy_file.exists(),
+            "Legacy pairing-keys.json must remain after client store deletion"
+        );
         return;
     }
 

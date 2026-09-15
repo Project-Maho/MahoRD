@@ -1184,7 +1184,16 @@ mod cursor_jiggle {
 }
 
 #[cfg(target_os = "windows")]
-struct WindowsSessionEncoder(MediaFoundationEncoder);
+use std::sync::atomic::AtomicU64;
+
+#[cfg(target_os = "windows")]
+struct WindowsSessionEncoder {
+    encoder: MediaFoundationEncoder,
+    /// `(width << 32) | height` of the newest captured frame, reported by the
+    /// capture worker so a desktop resolution change can be adopted instead
+    /// of failing every subsequent frame with a size mismatch.
+    frame_dims: Arc<AtomicU64>,
+}
 
 #[cfg(target_os = "windows")]
 impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
@@ -1204,11 +1213,11 @@ impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
     }
 
     fn force_keyframe(&mut self) {
-        self.0.force_key_frame();
+        self.encoder.force_key_frame();
     }
 
     fn bitrate(&mut self, bitrate: u32) -> Result<Vec<VideoFrame>, String> {
-        self.0
+        self.encoder
             .update_bitrate(bitrate)
             .map_err(|error| format!("mf bitrate: {error}"))?;
         Ok(Vec::new())
@@ -1238,7 +1247,23 @@ impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
             }
         }
         let started = trace.map(|_| Instant::now());
-        let result = self.0.encode_nv12(&frame.nv12, frame.captured_at);
+        if frame.nv12.len() != self.encoder.frame_bytes() {
+            use std::sync::atomic::Ordering;
+            let dims = self.frame_dims.load(Ordering::Relaxed);
+            let (width, height) = ((dims >> 32) as u32, dims as u32);
+            let resized = crate::encode_windows::nv12_len(width, height)
+                .map_err(|error| format!("mf encode: {error}"))?;
+            if (width, height) == self.encoder.dimensions() || resized != frame.nv12.len() {
+                // The frame matches neither the current nor the reported
+                // mode: a stale pre-resize keepalive. Skip it instead of
+                // killing the encoder worker.
+                return Ok(Vec::new());
+            }
+            self.encoder
+                .reconfigure(width, height)
+                .map_err(|error| format!("mf resize: {error}"))?;
+        }
+        let result = self.encoder.encode_nv12(&frame.nv12, frame.captured_at);
         if let (Some(trace), Some(started)) = (trace, started) {
             trace.record(host_trace::Record {
                 event: 40,
@@ -1268,13 +1293,17 @@ impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
 #[cfg(target_os = "windows")]
 impl MediaSource for WindowsMediaSource {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         let mut workers = native_pipeline::Workers::<WindowsRawFrame>::new();
         let first_keyframe_emitted = Arc::new(AtomicBool::new(false));
+        let frame_dims = Arc::new(AtomicU64::new(
+            (u64::from(self.width) << 32) | u64::from(self.height),
+        ));
         {
             let sender = sender.clone();
             let first_keyframe_emitted = Arc::clone(&first_keyframe_emitted);
+            let frame_dims = Arc::clone(&frame_dims);
             let display_index = self.display_index;
             let fps = self.fps.max(1);
             let origin_x = self.desktop_x;
@@ -1377,6 +1406,10 @@ impl MediaSource for WindowsMediaSource {
                     match capture.acquire_next_frame(Duration::from_millis(33)) {
                         Ok(frame) => {
                             consecutive_failures = 0;
+                            frame_dims.store(
+                                (u64::from(frame.width) << 32) | u64::from(frame.height),
+                                Ordering::Relaxed,
+                            );
                             if let Some(trace) = host_trace::enabled() {
                                 trace.record(host_trace::Record {
                                     event: 10,
@@ -1584,11 +1617,15 @@ impl MediaSource for WindowsMediaSource {
             preferred_codec: self.codec,
         };
         workers.spawn("maho-win-encode", true, move |handoff| {
+            let frame_dims = Arc::clone(&frame_dims);
             let result = native_pipeline::run_encoder(
                 &handoff,
                 || {
                     MediaFoundationEncoder::new(config)
-                        .map(WindowsSessionEncoder)
+                        .map(|encoder| WindowsSessionEncoder {
+                            encoder,
+                            frame_dims,
+                        })
                         .map_err(|error| format!("mf init: {error}"))
                 },
                 |frame| {
@@ -1670,6 +1707,8 @@ struct LinuxMediaSource {
 struct LinuxRawFrame {
     bgra: Vec<u8>,
     stride: usize,
+    width: u32,
+    height: u32,
     captured_at: Instant,
 }
 
@@ -1723,12 +1762,26 @@ impl native_pipeline::Encoder<LinuxRawFrame> for LinuxSessionEncoder {
     }
 
     fn encode(&mut self, frame: LinuxRawFrame) -> Result<Vec<VideoFrame>, String> {
+        let mut frames = Vec::new();
+        if (frame.width, frame.height) != self.encoder.dimensions() {
+            // Capture resolution changed: adopt it instead of failing the
+            // pipeline on every subsequent InvalidFrame.
+            let drained = self
+                .encoder
+                .reconfigure(frame.width, frame.height)
+                .map_err(|error| format!("encoder resize: {error}"))?;
+            frames = self.output(drained)?;
+        }
+        // Record the input only after the encoder accepts it: a rejected
+        // frame must not advance FrameTimes past the encoder's PTS counter,
+        // and its pending entry must not leak.
         self.times.submitted(frame.captured_at, Instant::now());
-        let frames = self
+        let encoded = self
             .encoder
             .encode_bgra(&frame.bgra, frame.stride)
             .map_err(|error| format!("encode: {error}"))?;
-        self.output(frames)
+        frames.extend(self.output(encoded)?);
+        Ok(frames)
     }
 }
 
@@ -1769,6 +1822,8 @@ impl MediaSource for LinuxMediaSource {
                             if !handoff.publish(LinuxRawFrame {
                                 bgra: frame.bgra,
                                 stride: frame.stride as usize,
+                                width: frame.width,
+                                height: frame.height,
                                 captured_at: Instant::now(),
                             }) {
                                 break;

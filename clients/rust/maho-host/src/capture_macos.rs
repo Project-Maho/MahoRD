@@ -246,6 +246,9 @@ mod macos {
         pub fn display_info() -> Result<DisplayInfo, CaptureError> {
             let display = CGDisplay::main();
             let logical = display.bounds().size;
+            // Secondary displays live at non-zero (possibly negative) origins in
+            // CoreGraphics global coordinates; input normalization needs them.
+            let origin = display.bounds().origin;
             let pixel_width = display.pixels_wide() as u32;
             let pixel_height = display.pixels_high() as u32;
             if pixel_width == 0
@@ -257,8 +260,8 @@ mod macos {
             }
             let scale = pixel_width as f64 / logical.width;
             Ok(DisplayInfo {
-                desktop_x: 0,
-                desktop_y: 0,
+                desktop_x: origin.x.round() as i32,
+                desktop_y: origin.y.round() as i32,
                 logical_width: logical.width.round() as u32,
                 logical_height: logical.height.round() as u32,
                 pixel_width,

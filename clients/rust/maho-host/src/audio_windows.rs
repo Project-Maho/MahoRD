@@ -12,17 +12,16 @@ mod imp {
     use crate::windows_logic::{convert_to_wire_audio, SourceAudioFormat};
     use windows::core::GUID;
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-        IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-        WAVEFORMATEXTENSIBLE, WAVEFORMATEX,
+        eMultimedia, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
+        WAVEFORMATEXTENSIBLE,
     };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
     };
 
     /// KSDATAFORMAT_SUBTYPE_IEEE_FLOAT.
-    const IEEE_FLOAT_SUBFORMAT: GUID =
-        GUID::from_u128(0x0000_0003_0000_0010_8000_00aa_0038_9b71);
+    const IEEE_FLOAT_SUBFORMAT: GUID = GUID::from_u128(0x0000_0003_0000_0010_8000_00aa_0038_9b71);
     const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
     const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
     const WAVE_FORMAT_PCM: u16 = 1;
@@ -59,17 +58,24 @@ mod imp {
                 if format_ptr.is_null() {
                     return Err("mix format was null".into());
                 }
-                let source = parse_mix_format(format_ptr)?;
-                audio_client
-                    .Initialize(
-                        AUDCLNT_SHAREMODE_SHARED,
-                        AUDCLNT_STREAMFLAGS_LOOPBACK,
-                        2_000_000, // 200 ms buffer, drained far faster
-                        0,
-                        format_ptr,
-                        None,
-                    )
-                    .map_err(|error| format!("loopback initialize: {error}"))?;
+                let source = match parse_mix_format(format_ptr) {
+                    Ok(source) => source,
+                    Err(message) => {
+                        CoTaskMemFree(Some(format_ptr.cast()));
+                        return Err(message);
+                    }
+                };
+                if let Err(error) = audio_client.Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_LOOPBACK,
+                    2_000_000, // 200 ms buffer, drained far faster
+                    0,
+                    format_ptr,
+                    None,
+                ) {
+                    CoTaskMemFree(Some(format_ptr.cast()));
+                    return Err(format!("loopback initialize: {error}"));
+                }
                 CoTaskMemFree(Some(format_ptr.cast()));
                 let capture_client: IAudioCaptureClient = audio_client
                     .GetService()
@@ -104,19 +110,13 @@ mod imp {
                 let mut frames = 0_u32;
                 let mut flags = 0_u32;
                 if let Err(error) = unsafe {
-                    self.capture_client.GetBuffer(
-                        &mut data,
-                        &mut frames,
-                        &mut flags,
-                        None,
-                        None,
-                    )
+                    self.capture_client
+                        .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
                 } {
                     tracing::debug!("audio GetBuffer failed: {error}");
                     break;
                 }
-                let frame_bytes =
-                    self.source.channels * if self.source.is_float { 4 } else { 2 };
+                let frame_bytes = self.source.channels * if self.source.is_float { 4 } else { 2 };
                 if flags & AUDCLNT_BUFFERFLAGS_SILENT != 0 {
                     // Buffer contents are undefined while the flag is set.
                     raw.resize(raw.len() + frames as usize * frame_bytes, 0);
@@ -163,9 +163,22 @@ mod imp {
             WAVE_FORMAT_PCM => false,
             tag => return Err(format!("unsupported mix format tag: {tag:#x}")),
         };
+        // `convert_to_wire_audio` assumes 32-bit float or 16-bit int frames;
+        // any other width would desynchronize the wire samples.
+        let expected_bits = if is_float { 32 } else { 16 };
+        // WAVEFORMATEX is packed: copy fields to locals before formatting them.
+        let bits_per_sample = header.wBitsPerSample;
+        if bits_per_sample != expected_bits {
+            return Err(format!(
+                "unsupported sample width: {bits_per_sample} bits (expected {expected_bits})"
+            ));
+        }
         let channels = header.nChannels as usize;
         if channels == 0 {
             return Err("mix format has no channels".into());
+        }
+        if header.nSamplesPerSec == 0 {
+            return Err("mix format has no sample rate".into());
         }
         Ok(SourceAudioFormat {
             channels,

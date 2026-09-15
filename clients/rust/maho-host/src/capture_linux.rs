@@ -190,12 +190,13 @@ impl CaptureState {
         frame: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
         qh: &QueueHandle<Self>,
     ) -> Result<(), CaptureError> {
-        let description = self.offered_buffer.take().ok_or_else(|| {
-            match self.rejected_formats.first() {
-                Some(format) => CaptureError::UnsupportedFormat(format.clone()),
-                None => CaptureError::InvalidBuffer("missing wl_shm buffer offer"),
-            }
-        })?;
+        let description =
+            self.offered_buffer
+                .take()
+                .ok_or_else(|| match self.rejected_formats.first() {
+                    Some(format) => CaptureError::UnsupportedFormat(format.clone()),
+                    None => CaptureError::InvalidBuffer("missing wl_shm buffer offer"),
+                })?;
         let size = u64::from(description.stride)
             .checked_mul(u64::from(description.height))
             .ok_or(CaptureError::InvalidBuffer("buffer size overflow"))?;
@@ -221,7 +222,7 @@ impl CaptureState {
         };
 
         if !is_cached_valid {
-            let mut file = tempfile::tempfile()?;
+            let mut file = anonymous_mem_file()?;
             file.set_len(size)?;
             file.seek(SeekFrom::Start(0))?;
 
@@ -508,6 +509,24 @@ fn check_startup(stop: &AtomicBool, deadline: Instant) -> Result<(), CaptureErro
     Ok(())
 }
 
+/// Anonymous in-memory file backing the `wl_shm` pool. `memfd_create` keeps
+/// frame pixels out of any filesystem entirely, so the per-frame `read_exact`
+/// is a pure kernel memcpy and never touches a disk. Kernels without memfd
+/// (older than 3.17) fall back to an unlinked tempfile.
+fn anonymous_mem_file() -> std::io::Result<File> {
+    use std::os::fd::FromRawFd;
+
+    let name = b"maho-wl-shm\0";
+    // SAFETY: name is a NUL-terminated literal; the returned descriptor, when
+    // positive, is freshly created and exclusively owned by the caller.
+    let fd = unsafe { libc::memfd_create(name.as_ptr().cast(), libc::MFD_CLOEXEC) };
+    if fd >= 0 {
+        // SAFETY: we own the descriptor created above.
+        return Ok(unsafe { File::from_raw_fd(fd) });
+    }
+    tempfile::tempfile()
+}
+
 fn dispatch_slice(
     queue: &mut wayland_client::EventQueue<CaptureState>,
     state: &mut CaptureState,
@@ -754,6 +773,18 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for CaptureSt
 mod tests {
     use super::*;
     use std::{os::unix::net::UnixStream, sync::mpsc, thread};
+
+    #[test]
+    fn anonymous_mem_file_supports_len_and_readback() {
+        let mut file = anonymous_mem_file().expect("allocate anonymous frame buffer");
+        file.set_len(16).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        std::io::Write::write_all(&mut file, &[7_u8; 16]).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut read_back = [0_u8; 16];
+        file.read_exact(&mut read_back).unwrap();
+        assert_eq!(read_back, [7_u8; 16]);
+    }
 
     #[test]
     fn cancelled_initialization_does_not_wait_for_compositor() {

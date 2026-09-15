@@ -19,11 +19,11 @@
 
 use std::io;
 
-use maho_proto::{InputEvent as WireInputEvent, InputEventType, Modifiers};
 use evdev::{
     uinput::VirtualDevice, AbsInfo, AbsoluteAxisCode, AbsoluteAxisEvent, AttributeSet, EventType,
     InputEvent, KeyCode, RelativeAxisCode, UinputAbsSetup,
 };
+use maho_proto::{InputEvent as WireInputEvent, InputEventType, Modifiers};
 
 /// Target output position and dimensions in compositor/global logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,15 +197,33 @@ pub fn ascii_to_evdev(ch: char) -> Option<(KeyCode, bool)> {
     match ch {
         'a'..='z' => {
             let key = match ch {
-                'a' => KeyCode::KEY_A, 'b' => KeyCode::KEY_B, 'c' => KeyCode::KEY_C,
-                'd' => KeyCode::KEY_D, 'e' => KeyCode::KEY_E, 'f' => KeyCode::KEY_F,
-                'g' => KeyCode::KEY_G, 'h' => KeyCode::KEY_H, 'i' => KeyCode::KEY_I,
-                'j' => KeyCode::KEY_J, 'k' => KeyCode::KEY_K, 'l' => KeyCode::KEY_L,
-                'm' => KeyCode::KEY_M, 'n' => KeyCode::KEY_N, 'o' => KeyCode::KEY_O,
-                'p' => KeyCode::KEY_P, 'q' => KeyCode::KEY_Q, 'r' => KeyCode::KEY_R,
-                's' => KeyCode::KEY_S, 't' => KeyCode::KEY_T, 'u' => KeyCode::KEY_U,
-                'v' => KeyCode::KEY_V, 'w' => KeyCode::KEY_W, 'x' => KeyCode::KEY_X,
-                'y' => KeyCode::KEY_Y, 'z' => KeyCode::KEY_Z, _ => unreachable!(),
+                'a' => KeyCode::KEY_A,
+                'b' => KeyCode::KEY_B,
+                'c' => KeyCode::KEY_C,
+                'd' => KeyCode::KEY_D,
+                'e' => KeyCode::KEY_E,
+                'f' => KeyCode::KEY_F,
+                'g' => KeyCode::KEY_G,
+                'h' => KeyCode::KEY_H,
+                'i' => KeyCode::KEY_I,
+                'j' => KeyCode::KEY_J,
+                'k' => KeyCode::KEY_K,
+                'l' => KeyCode::KEY_L,
+                'm' => KeyCode::KEY_M,
+                'n' => KeyCode::KEY_N,
+                'o' => KeyCode::KEY_O,
+                'p' => KeyCode::KEY_P,
+                'q' => KeyCode::KEY_Q,
+                'r' => KeyCode::KEY_R,
+                's' => KeyCode::KEY_S,
+                't' => KeyCode::KEY_T,
+                'u' => KeyCode::KEY_U,
+                'v' => KeyCode::KEY_V,
+                'w' => KeyCode::KEY_W,
+                'x' => KeyCode::KEY_X,
+                'y' => KeyCode::KEY_Y,
+                'z' => KeyCode::KEY_Z,
+                _ => unreachable!(),
             };
             Some((key, false))
         }
@@ -215,10 +233,17 @@ pub fn ascii_to_evdev(ch: char) -> Option<(KeyCode, bool)> {
         }
         '0'..='9' => {
             let key = match ch {
-                '0' => KeyCode::KEY_0, '1' => KeyCode::KEY_1, '2' => KeyCode::KEY_2,
-                '3' => KeyCode::KEY_3, '4' => KeyCode::KEY_4, '5' => KeyCode::KEY_5,
-                '6' => KeyCode::KEY_6, '7' => KeyCode::KEY_7, '8' => KeyCode::KEY_8,
-                '9' => KeyCode::KEY_9, _ => unreachable!(),
+                '0' => KeyCode::KEY_0,
+                '1' => KeyCode::KEY_1,
+                '2' => KeyCode::KEY_2,
+                '3' => KeyCode::KEY_3,
+                '4' => KeyCode::KEY_4,
+                '5' => KeyCode::KEY_5,
+                '6' => KeyCode::KEY_6,
+                '7' => KeyCode::KEY_7,
+                '8' => KeyCode::KEY_8,
+                '9' => KeyCode::KEY_9,
+                _ => unreachable!(),
             };
             Some((key, false))
         }
@@ -563,18 +588,32 @@ impl LinuxInputInjector {
             InputEventType::UnicodeChar => {
                 if let Some(ch) = char::from_u32(u32::from(event.key_code)) {
                     if let Some((key, needs_shift)) = ascii_to_evdev(ch) {
-                        let mut events = Vec::with_capacity(4);
+                        // One SYN_REPORT per transition: events inside a single
+                        // sync report are simultaneous state changes, so batching
+                        // the down and the up together drops the keypress.
                         if needs_shift {
-                            events.push(InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 1));
+                            self.keyboard.emit(&[InputEvent::new(
+                                EventType::KEY.0,
+                                KeyCode::KEY_LEFTSHIFT.code(),
+                                1,
+                            )])?;
                         }
-                        events.push(InputEvent::new(EventType::KEY.0, key.code(), 1));
-                        events.push(InputEvent::new(EventType::KEY.0, key.code(), 0));
+                        self.keyboard
+                            .emit(&[InputEvent::new(EventType::KEY.0, key.code(), 1)])?;
+                        self.keyboard
+                            .emit(&[InputEvent::new(EventType::KEY.0, key.code(), 0)])?;
                         if needs_shift {
-                            events.push(InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 0));
+                            self.keyboard.emit(&[InputEvent::new(
+                                EventType::KEY.0,
+                                KeyCode::KEY_LEFTSHIFT.code(),
+                                0,
+                            )])?;
                         }
-                        self.keyboard.emit(&events)?;
                     } else {
-                        tracing::debug!(code_unit = event.key_code, "Linux uinput skipping non-ASCII Unicode char");
+                        tracing::debug!(
+                            code_unit = event.key_code,
+                            "Linux uinput skipping non-ASCII Unicode char"
+                        );
                     }
                 }
                 Ok(())

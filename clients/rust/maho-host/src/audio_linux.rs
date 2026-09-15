@@ -354,11 +354,31 @@ pub fn fragment_audio(frame_id: u32, pcm: &[u8]) -> Vec<AudioFragment> {
 }
 
 fn command_available(name: &str) -> bool {
-    env::var_os("PATH")
+    // Split into owned directories first: `split_paths` borrows its argument,
+    // so the borrowed iterator cannot outlive the owned `PATH` value.
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+    command_available_in(name, env::split_paths(&paths).collect::<Vec<_>>())
+}
+
+fn command_available_in<I>(name: &str, directories: I) -> bool
+where
+    I: IntoIterator,
+    I::Item: AsRef<std::path::Path>,
+{
+    use std::os::unix::fs::PermissionsExt;
+
+    directories
         .into_iter()
-        .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
-        .map(|directory| directory.join(name))
-        .any(|candidate| candidate.is_file())
+        .map(|directory| directory.as_ref().join(name))
+        .any(|candidate| {
+            candidate.is_file()
+                && candidate
+                    .metadata()
+                    .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+        })
 }
 
 fn default_pulse_monitor_source(stop: &AtomicBool) -> Result<Option<String>, AudioError> {
@@ -423,6 +443,28 @@ mod tests {
             Ok((true, true)),
             "pactl query must cancel and reap while stdout remains open"
         );
+    }
+
+    #[test]
+    fn command_available_requires_executable_permission() {
+        use std::fs;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("parec");
+        fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let blocked = directory.path().join("pactl");
+        fs::write(&blocked, b"#!/bin/sh\n").unwrap();
+
+        assert!(command_available_in("parec", [directory.path()]));
+        assert!(!command_available_in("pactl", [directory.path()]));
+        assert!(!command_available_in(
+            "parec",
+            [directory.path().join("empty")]
+        ));
     }
 
     #[test]

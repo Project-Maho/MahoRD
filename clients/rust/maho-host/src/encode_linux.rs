@@ -204,6 +204,41 @@ impl LinuxVideoEncoder {
         self.open.codec
     }
 
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
+    /// Rebuilds the transform when the capture resolution changes, returning
+    /// packets drained from the previous encoder so their PTS stay resolvable.
+    /// The fresh transform forces a keyframe so the client receives parameter
+    /// sets for the new size.
+    pub fn reconfigure(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<EncodedFrame>, EncodeError> {
+        if width == self.config.width && height == self.config.height {
+            return Ok(Vec::new());
+        }
+        let config = EncoderConfig {
+            width,
+            height,
+            ..self.config
+        }
+        .validate()?;
+        let replacement = match self.open.backend {
+            EncoderBackend::Nvenc => open_nvenc(config, self.open.codec)?,
+            EncoderBackend::Vaapi => open_vaapi(config, self.open.codec)?,
+            EncoderBackend::X264 => open_x264(config)?,
+        };
+        let drained = self.drain()?;
+        self.open = replacement;
+        self.config = config;
+        self.parameter_sets.clear();
+        self.force_keyframe = true;
+        Ok(drained)
+    }
+
     pub fn force_key_frame(&mut self) {
         self.force_keyframe = true;
     }
@@ -266,7 +301,8 @@ impl LinuxVideoEncoder {
                     let b = s_row[p] as i32;
                     let g = s_row[p + 1] as i32;
                     let r = s_row[p + 2] as i32;
-                    *dst_pixel = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+                    *dst_pixel =
+                        (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
                 }
             }
 
@@ -665,10 +701,7 @@ fn extract_parameter_sets(codec: VideoCodec, nalus: &[&[u8]]) -> Vec<Vec<u8>> {
             VideoCodec::H264 => matches!(nalu.first().map(|byte| byte & 0x1f), Some(7 | 8)),
             VideoCodec::Hevc => {
                 nalu.len() >= 2
-                    && matches!(
-                        nalu.first().map(|byte| (byte >> 1) & 0x3f),
-                        Some(32..=34)
-                    )
+                    && matches!(nalu.first().map(|byte| (byte >> 1) & 0x3f), Some(32..=34))
             }
         })
         .map(|nalu| nalu.to_vec())
@@ -678,6 +711,37 @@ fn extract_parameter_sets(codec: VideoCodec, nalus: &[&[u8]]) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconfigure_adopts_new_resolution_and_preserves_pts() {
+        ffmpeg::init().unwrap();
+        let config = EncoderConfig {
+            width: 32,
+            height: 32,
+            bitrate: 100_000,
+            fps: 30,
+            keyframe_interval: 300,
+            preferred_codec: VideoCodec::H264,
+        };
+        let mut encoder = LinuxVideoEncoder {
+            config,
+            open: open_x264(config).unwrap(),
+            next_pts: 0,
+            force_keyframe: true,
+            parameter_sets: Vec::new(),
+        };
+        encoder.encode_bgra(&vec![128; 32 * 32 * 4], 128).unwrap();
+        // When the capture resolution changes.
+        let drained = encoder.reconfigure(32, 16).unwrap();
+        assert_eq!(encoder.dimensions(), (32, 16));
+        // Drained packets belong to inputs accepted before the resize.
+        assert!(drained.iter().all(|frame| frame.pts == 0));
+        // Then the next frame at the new size encodes with the next PTS and a
+        // fresh keyframe, instead of failing the pipeline with InvalidFrame.
+        let output = encoder.encode_bgra(&vec![128; 32 * 16 * 4], 128).unwrap();
+        assert!(output.iter().any(|frame| frame.pts == 1));
+        assert!(output.iter().any(|frame| frame.is_key_frame));
+    }
 
     #[test]
     fn conversion_frames_are_reused_after_warmup() {

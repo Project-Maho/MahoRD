@@ -302,12 +302,20 @@ impl EncoderWorker {
     }
 
     fn encode(&mut self, frame: CaptureFrame) -> Result<Vec<EncodedFrame>, EncodeError> {
-        if frame.width != self.config.width
-            || frame.height != self.config.height
-            || frame.bytes_per_row < frame.width as usize * 4
+        if frame.bytes_per_row < frame.width as usize * 4
             || frame.bgra.len() < frame.bytes_per_row * frame.height as usize
         {
             return Err(EncodeError::FrameShape);
+        }
+        if frame.width != self.config.width || frame.height != self.config.height {
+            // Desktop resolution changed: rebuild the encoder instead of
+            // failing the worker. The fresh encoder forces a keyframe so the
+            // client receives parameter sets for the new size.
+            *self = EncoderWorker::new(EncoderConfig {
+                width: frame.width,
+                height: frame.height,
+                ..self.config
+            })?;
         }
         let encode_started_at = Instant::now();
         let pts = self.next_pts;
@@ -509,7 +517,13 @@ fn split_annex_b(packet: &[u8]) -> Result<Vec<&[u8]>, EncodeError> {
         let end = starts
             .get(position + 1)
             .map_or(packet.len(), |(next, _)| *next);
-        let nalu_data = &packet[start + start_len..end];
+        let mut nalu_data = &packet[start + start_len..end];
+        // Annex B start codes are frequently preceded by trailing_zero_8bits
+        // or alignment padding; those zero bytes are not part of the NAL unit
+        // and break decoder parameter-set parsing when copied into AVCC.
+        while let Some((&0, rest)) = nalu_data.split_last() {
+            nalu_data = rest;
+        }
         if !nalu_data.is_empty() {
             nalus.push(nalu_data);
         }
@@ -693,6 +707,15 @@ mod tests {
             stopped.is_ok(),
             "encoder stop waited for the output consumer: {stopped:?}"
         );
+    }
+
+    #[test]
+    fn annex_b_trailing_zero_padding_is_trimmed() {
+        // Given Annex B NALUs separated by trailing_zero_8bits padding.
+        let packet = [0, 0, 0, 1, 0x40, 1, 2, 0, 0, 0, 0, 1, 0x26, 3];
+        // When splitting, the padding must not join the preceding NAL unit.
+        let nalus = split_annex_b(&packet).unwrap();
+        assert_eq!(nalus, vec![&[0x40u8, 1, 2][..], &[0x26u8, 3][..]]);
     }
 
     #[test]

@@ -371,7 +371,11 @@ mod tests {
         let mut frozen = Command::new("sh");
         frozen.args(["-c", "sleep 300"]);
         assert!(matches!(
-            read_command_bounded_within(&mut frozen, MAX_CLIPBOARD_BYTES, Duration::from_millis(50)),
+            read_command_bounded_within(
+                &mut frozen,
+                MAX_CLIPBOARD_BYTES,
+                Duration::from_millis(50)
+            ),
             Err(ClipboardError::Timeout)
         ));
     }

@@ -326,6 +326,31 @@ impl MediaFoundationEncoder {
         self.codec
     }
 
+    /// Packed NV12 byte length this encoder accepts.
+    pub fn frame_bytes(&self) -> usize {
+        nv12_len(self.config.width, self.config.height)
+            .expect("encoder config validated at construction")
+    }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
+    /// Rebuilds the transform when the desktop resolution changes, so a
+    /// resized capture keeps the session alive instead of failing every
+    /// subsequent frame. The fresh transform forces a keyframe so the client
+    /// receives parameter sets for the new size.
+    pub fn reconfigure(&mut self, width: u32, height: u32) -> Result<(), EncodeError> {
+        if width == self.config.width && height == self.config.height {
+            return Ok(());
+        }
+        let mut config = self.config;
+        config.width = width;
+        config.height = height;
+        *self = MediaFoundationEncoder::new(config)?;
+        Ok(())
+    }
+
     /// Input is tightly packed NV12: Y plane followed by interleaved UV.
     pub fn encode_nv12(
         &mut self,
@@ -374,6 +399,7 @@ impl MediaFoundationEncoder {
             metadata: InputMetadata {
                 capture_at: captured_at,
                 encode_started_at,
+                force_keyframe: self.force_keyframe,
             },
             force_keyframe: self.force_keyframe,
         };
@@ -570,7 +596,12 @@ impl MediaFoundationEncoder {
                 .unwrap_or_default()
                 != 0
         };
-        let is_key_frame = sample_clean_point || !self.first_keyframe_emitted;
+        // Keyframe status belongs to the input that produced this sample. A
+        // backpressure drain can emit buffered inputs before the forced
+        // keyframe, so a global flag alone would let the real keyframe lose
+        // its parameter sets when the MFT never sets CleanPoint.
+        let is_key_frame =
+            sample_clean_point || metadata.force_keyframe || !self.first_keyframe_emitted;
         let bytes = sample_bytes(&sample)?;
         let mut nalus = parse_access_unit(&bytes)?;
         if is_key_frame {
@@ -812,7 +843,7 @@ fn set_codec_bool(api: &ICodecAPI, key: &GUID, value: bool) {
     }
 }
 
-fn nv12_len(width: u32, height: u32) -> Result<usize, EncodeError> {
+pub(crate) fn nv12_len(width: u32, height: u32) -> Result<usize, EncodeError> {
     let pixels = usize::try_from(width)
         .ok()
         .and_then(|width| {
@@ -995,6 +1026,7 @@ mod synchronous {
     pub(super) struct InputMetadata {
         pub capture_at: Instant,
         pub encode_started_at: Instant,
+        pub force_keyframe: bool,
     }
 
     #[derive(Default)]
@@ -1119,6 +1151,7 @@ mod synchronous {
                     encode_started_at: origin
                         + Duration::from_secs(timestamp as u64)
                         + Duration::from_millis(1),
+                    force_keyframe: true,
                 },
             }
         }
@@ -1259,6 +1292,36 @@ mod tests {
             assert!(frame.encode_completed_at >= frame.encode_started_at);
             assert!(!frame.data.is_empty());
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn reconfigure_adopts_new_resolution_without_dropping_the_session() {
+        // Given a live encoder at 128x128 and a desktop resized to 64x64.
+        let config = EncoderConfig {
+            width: 128,
+            height: 128,
+            bitrate: 500_000,
+            fps: 30,
+            keyframe_interval: 30,
+            preferred_codec: VideoCodec::H264,
+        };
+        let mut encoder = MediaFoundationEncoder::new(config).unwrap();
+        let origin = Instant::now();
+        encoder
+            .encode_nv12(&vec![128; encoder.frame_bytes()], origin)
+            .unwrap();
+        // When the encoder is reconfigured for the new resolution.
+        encoder.reconfigure(64, 64).unwrap();
+        assert_eq!(encoder.dimensions(), (64, 64));
+        // Then the next frame at the new size encodes instead of failing with
+        // InvalidFrameLength, and is a keyframe carrying parameter sets.
+        let frames = encoder
+            .encode_nv12(&vec![128; encoder.frame_bytes()], origin)
+            .unwrap();
+        frames.extend(encoder.flush().unwrap());
+        assert!(frames.iter().any(|frame| frame.is_key_frame));
+        assert!(frames.iter().all(|frame| !frame.data.is_empty()));
     }
 
     #[test]
