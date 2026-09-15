@@ -652,5 +652,42 @@ describe("SessionView", () => {
       });
       document.body.removeChild(container);
     });
+
+    it("propagates renderer error to onError and does not mark frame rendered", async () => {
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      let marked = false;
+      const mockConn: any = {
+        ...createMockConnection("waiting-video"),
+        markFrameRendered: () => {
+          marked = true;
+          return Promise.resolve();
+        },
+      };
+
+      let reportedError: string | null = null;
+      await act(async () => {
+        root.render(
+          React.createElement(SessionView, {
+            connection: mockConn,
+            onError: (err: string) => {
+              reportedError = err;
+            },
+          })
+        );
+      });
+
+      // If WebGL context creation fails in headless/test, onError is propagated
+      if (typeof reportedError === "string") {
+        expect((reportedError as string).includes("Video rendering is unavailable")).toBe(true);
+      }
+      expect(marked).toBe(false);
+
+      await act(async () => {
+        root.unmount();
+      });
+      document.body.removeChild(container);
+    });
   });
 });

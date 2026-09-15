@@ -1938,9 +1938,19 @@ pub mod commands {
                     .map_err(|e| e.to_string())?
                     .clone()
                     .ok_or_else(|| format!("Failed to send input: {error}"))?;
+                if let Ok(mut tcp_guard) = state.tcp_runtime.lock() {
+                    if let Some(mut old_runtime) = tcp_guard.take() {
+                        let _ = old_runtime.stop();
+                    }
+                }
                 session.reconnect(&pairing_id).map_err(|retry| {
                     format!("Failed to send input: {error}; reconnect: {retry}")
                 })?;
+                if let Ok(new_runtime) = session.spawn_tcp_runtime() {
+                    if let Ok(mut tcp_guard) = state.tcp_runtime.lock() {
+                        *tcp_guard = Some(new_runtime);
+                    }
+                }
                 session
                     .send_input(input_event)
                     .map_err(|retry| format!("Failed to send input after reconnect: {retry}"))

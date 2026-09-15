@@ -44,10 +44,16 @@ export function App(props: AppProps = {}) {
   const [snapshot, setSnapshot] = useState<ConnectionSnapshot>(() =>
     connection.snapshot()
   )
+  const [sessionError, setSessionError] = useState<string | null>(null)
 
   useEffect(() => {
     setSnapshot(connection.snapshot())
-    return connection.subscribe(setSnapshot)
+    return connection.subscribe((s) => {
+      setSnapshot(s)
+      if (s.phase === "idle" || s.phase === "error") {
+        setSessionError(null)
+      }
+    })
   }, [connection])
 
   const isSessionActive =
@@ -58,7 +64,11 @@ export function App(props: AppProps = {}) {
   if (isSessionActive) {
     return (
       <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-black select-none">
-        <SessionView connection={connection} snapshot={snapshot} />
+        <SessionView
+          connection={connection}
+          snapshot={snapshot}
+          onError={setSessionError}
+        />
       </div>
     )
   }
@@ -74,6 +84,14 @@ export function App(props: AppProps = {}) {
         id="main-view"
         data-ui-scope
       >
+        {sessionError && (
+          <div
+            role="alert"
+            className="mb-4 p-3 rounded bg-destructive text-destructive-foreground text-sm font-medium"
+          >
+            {sessionError}
+          </div>
+        )}
         <ComputersPage view={activeView} connection={connection} />
       </main>
     </div>

@@ -82,7 +82,16 @@ export function SessionCanvas({
   // On unmount, call dispose() exactly once.
   useEffect(() => {
     if (canvasRef.current) {
-      rendererRef.current = createRenderer(canvasRef.current);
+      try {
+        rendererRef.current = createRenderer(canvasRef.current);
+      } catch {
+        rendererRef.current = null;
+      }
+      if (!rendererRef.current) {
+        onErrorRef.current?.(
+          "Video rendering is unavailable (WebGL context could not be created)"
+        );
+      }
     }
     return () => {
       if (rendererRef.current) {

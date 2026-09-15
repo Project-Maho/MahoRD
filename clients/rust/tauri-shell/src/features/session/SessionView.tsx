@@ -102,6 +102,15 @@ export function SessionView({
     typeof performance !== "undefined" ? performance.now() : Date.now()
   );
   const [fps, setFps] = useState<number | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
+
+  const handleCanvasError = useCallback(
+    (message: string) => {
+      setRenderError(message);
+      onError?.(message);
+    },
+    [onError]
+  );
 
   const handlePollFrame = useCallback(async () => {
     if (propPollFrame) {
@@ -109,7 +118,7 @@ export function SessionView({
     }
     const buf = await pollFrameRaw();
     if (buf && buf.byteLength >= 16) {
-      if (connection) {
+      if (connection && !renderError) {
         connection.markFrameRendered(connection.token());
       }
       frameCountRef.current++;
@@ -122,7 +131,7 @@ export function SessionView({
       }
     }
     return buf;
-  }, [connection, propPollFrame]);
+  }, [connection, propPollFrame, renderError]);
 
   const isConnected = snapshot.phase === "streaming";
 
@@ -425,11 +434,22 @@ export function SessionView({
         </div>
       )}
 
+      {/* Render error banner if WebGL initialization or rendering fails */}
+      {renderError && (
+        <div
+          role="alert"
+          id="render-error-alert"
+          className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-destructive text-destructive-foreground rounded shadow-lg text-sm font-medium flex items-center gap-2"
+        >
+          <span>{renderError}</span>
+        </div>
+      )}
+
       {/* Session canvas video renderer */}
       <SessionCanvas
-        active={isActive}
+        active={isActive && !renderError}
         pollFrame={handlePollFrame}
-        onError={onError}
+        onError={handleCanvasError}
       />
     </div>
   );
