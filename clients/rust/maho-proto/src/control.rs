@@ -563,12 +563,30 @@ impl WireCodec for ControlMessage {
         let message_type = ControlMessageType::try_from(decoder.u8("control message type")?)?;
         let body = decoder.take_remaining();
         match message_type {
-            ControlMessageType::RequestKeyFrame => Ok(Self::RequestKeyFrame),
-            ControlMessageType::StartStream => Ok(Self::StartStream),
-            ControlMessageType::StopStream => Ok(Self::StopStream),
-            ControlMessageType::Disconnect => Ok(Self::Disconnect),
-            ControlMessageType::Ping => Ok(Self::Ping),
-            ControlMessageType::Pong => Ok(Self::Pong),
+            ControlMessageType::RequestKeyFrame => {
+                Decoder::new(body).finish("control message")?;
+                Ok(Self::RequestKeyFrame)
+            }
+            ControlMessageType::StartStream => {
+                Decoder::new(body).finish("control message")?;
+                Ok(Self::StartStream)
+            }
+            ControlMessageType::StopStream => {
+                Decoder::new(body).finish("control message")?;
+                Ok(Self::StopStream)
+            }
+            ControlMessageType::Disconnect => {
+                Decoder::new(body).finish("control message")?;
+                Ok(Self::Disconnect)
+            }
+            ControlMessageType::Ping => {
+                Decoder::new(body).finish("control message")?;
+                Ok(Self::Ping)
+            }
+            ControlMessageType::Pong => {
+                Decoder::new(body).finish("control message")?;
+                Ok(Self::Pong)
+            }
             ControlMessageType::BitrateAdjust => {
                 Ok(Self::BitrateAdjust(BitrateAdjust::decode(body)?))
             }
@@ -593,9 +611,7 @@ impl WireCodec for ControlMessage {
             ControlMessageType::ClipboardSyncError => {
                 Ok(Self::ClipboardSyncError(ClipboardSyncError::decode(body)?))
             }
-            ControlMessageType::InputAck => {
-                Ok(Self::InputAck(InputAckMessage::decode(body)?))
-            }
+            ControlMessageType::InputAck => Ok(Self::InputAck(InputAckMessage::decode(body)?)),
         }
     }
 }
@@ -631,6 +647,27 @@ mod tests {
     }
 
     #[test]
+    fn bodyless_control_message_rejects_trailing_bytes() {
+        // A bodyless control value followed by an extra byte must not decode;
+        // previously the suffix was silently discarded.
+        let malformed = [ControlMessageType::StartStream as u8, 0x03];
+        assert!(matches!(
+            ControlMessage::decode(&malformed),
+            Err(CodecError::TrailingBytes { .. })
+        ));
+        let ping_suffix = [ControlMessageType::Ping as u8, 0xff, 0x00];
+        assert!(matches!(
+            ControlMessage::decode(&ping_suffix),
+            Err(CodecError::TrailingBytes { .. })
+        ));
+        // Exact-length bodyless messages still decode.
+        assert_eq!(
+            ControlMessage::decode(&[ControlMessageType::StartStream as u8]).unwrap(),
+            ControlMessage::StartStream
+        );
+    }
+
+    #[test]
     fn control_message_input_ack_roundtrip() {
         let ack = InputAckMessage {
             sequence: 123,
@@ -639,7 +676,7 @@ mod tests {
         };
         let original = ControlMessage::InputAck(ack);
         let encoded = original.encode().unwrap();
-        assert!(encoded.len() > 0);
+        assert!(!encoded.is_empty());
         assert_eq!(encoded[0], ControlMessageType::InputAck as u8);
         let decoded = ControlMessage::decode(&encoded).unwrap();
         assert_eq!(decoded, original);

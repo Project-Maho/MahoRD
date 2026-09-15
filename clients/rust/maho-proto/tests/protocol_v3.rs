@@ -282,10 +282,7 @@ fn input_event_supports_agent_control_types() {
         InputEventType::try_from(19).unwrap(),
         InputEventType::PenDown
     );
-    assert_eq!(
-        InputEventType::try_from(20).unwrap(),
-        InputEventType::PenUp
-    );
+    assert_eq!(InputEventType::try_from(20).unwrap(), InputEventType::PenUp);
 
     // Pen helpers
     let pen = InputEvent::pen_down(0.5, 0.5, 0.8, 15.0, -10.0);
@@ -463,8 +460,13 @@ fn control_rejects_unknown_message_and_payload_enum_values() {
         ControlMessage::decode(&[0xff]),
         Err(CodecError::UnknownControlMessageType(0xff))
     ));
+    // Bodyless messages must consume exactly one byte.
+    assert!(matches!(
+        ControlMessage::decode(&[ControlMessageType::Ping as u8, 0xaa]),
+        Err(CodecError::TrailingBytes { .. })
+    ));
     assert_eq!(
-        ControlMessage::decode(&[ControlMessageType::Ping as u8, 0xaa]).unwrap(),
+        ControlMessage::decode(&[ControlMessageType::Ping as u8]).unwrap(),
         ControlMessage::Ping
     );
 
@@ -497,7 +499,9 @@ fn video_payloads_round_trip_and_enforce_caps() {
         width: 3840,
         height: 2160,
         is_key_frame: true,
-        total_chunks: 12,
+        // 12 chunks can carry at most 12 * MAX_VIDEO_CHUNK_BYTES; this size
+        // needs 362 chunks (362 * 1382 = 500284 >= 500000).
+        total_chunks: 362,
         total_size: 500_000,
     };
     assert_round_trip(&header);
@@ -862,5 +866,7 @@ fn capabilities_authenticated_udp_registration_round_trip() {
     let handshake = sample_handshake(caps);
     assert_round_trip(&handshake);
     let decoded = Handshake::decode(&handshake.encode().unwrap()).unwrap();
-    assert!(decoded.capabilities.contains(Capabilities::AUTHENTICATED_UDP_REGISTRATION));
+    assert!(decoded
+        .capabilities
+        .contains(Capabilities::AUTHENTICATED_UDP_REGISTRATION));
 }

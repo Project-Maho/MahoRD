@@ -79,6 +79,16 @@ impl FrameHeader {
                 max: MAX_FRAME_BYTES as usize,
             });
         }
+        // A header must be completable by its own chunks: the chunk count is
+        // already capped above, so this product fits in u32 (8192 * 1382).
+        let chunk_capacity = u32::from(self.total_chunks) * MAX_VIDEO_CHUNK_BYTES as u32;
+        if self.total_size > chunk_capacity {
+            return Err(CodecError::LengthLimit {
+                field: "frame bytes for chunk count",
+                actual: self.total_size as usize,
+                max: chunk_capacity as usize,
+            });
+        }
         Ok(())
     }
 }
@@ -127,6 +137,12 @@ impl FrameChunk {
     pub const HEADER_SIZE: usize = 6;
 
     fn validate(&self) -> Result<(), CodecError> {
+        if self.chunk_index >= MAX_CHUNKS_PER_FRAME {
+            return Err(CodecError::InvalidValue {
+                field: "frame chunk index",
+                value: u64::from(self.chunk_index),
+            });
+        }
         if self.data.len() > MAX_VIDEO_CHUNK_BYTES {
             return Err(CodecError::LengthLimit {
                 field: "video chunk data",
@@ -152,6 +168,12 @@ impl WireCodec for FrameChunk {
         let mut decoder = Decoder::new(input);
         let frame_id = decoder.u32("frame chunk ID")?;
         let chunk_index = decoder.u16("frame chunk index")?;
+        if chunk_index >= MAX_CHUNKS_PER_FRAME {
+            return Err(CodecError::InvalidValue {
+                field: "frame chunk index",
+                value: u64::from(chunk_index),
+            });
+        }
         let data = decoder.take_remaining();
         if data.len() > MAX_VIDEO_CHUNK_BYTES {
             return Err(CodecError::LengthLimit {
@@ -382,5 +404,88 @@ impl WireCodec for ColorMetadata {
         let value = Self::decode_from(&mut decoder)?;
         decoder.finish("color metadata")?;
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_chunk_decode_rejects_index_at_global_limit() {
+        // frame_id=1, chunk_index=8192: outside every legal zero-based index.
+        let malformed = [0x01, 0x00, 0x00, 0x00, 0x00, 0x20, 0xaa];
+        assert!(matches!(
+            FrameChunk::decode(&malformed),
+            Err(CodecError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn frame_chunk_encode_rejects_index_at_global_limit() {
+        let chunk = FrameChunk {
+            frame_id: 1,
+            chunk_index: MAX_CHUNKS_PER_FRAME,
+            data: vec![0xaa],
+        };
+        assert!(matches!(
+            chunk.encode(),
+            Err(CodecError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn frame_chunk_accepts_last_legal_index() {
+        let bytes = [0u8, 0, 0, 0, 0xff, 0x1f, 0xaa];
+        let chunk = FrameChunk::decode(&bytes).unwrap();
+        assert_eq!(chunk.chunk_index, MAX_CHUNKS_PER_FRAME - 1);
+        assert_eq!(chunk.data, vec![0xaa]);
+    }
+
+    #[test]
+    fn frame_header_rejects_size_beyond_chunk_capacity() {
+        // One chunk can carry at most MAX_VIDEO_CHUNK_BYTES.
+        let header = FrameHeader {
+            frame_id: 1,
+            width: 1920,
+            height: 1080,
+            is_key_frame: true,
+            total_chunks: 1,
+            total_size: MAX_VIDEO_CHUNK_BYTES as u32 + 1,
+        };
+        assert!(matches!(
+            header.encode(),
+            Err(CodecError::LengthLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn frame_header_rejects_bytes_with_no_chunks() {
+        let header = FrameHeader {
+            frame_id: 1,
+            width: 1920,
+            height: 1080,
+            is_key_frame: true,
+            total_chunks: 0,
+            total_size: 1,
+        };
+        assert!(matches!(
+            header.encode(),
+            Err(CodecError::LengthLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn frame_header_accepts_exact_chunk_capacity() {
+        let header = FrameHeader {
+            frame_id: 1,
+            width: 1920,
+            height: 1080,
+            is_key_frame: true,
+            total_chunks: 1,
+            total_size: MAX_VIDEO_CHUNK_BYTES as u32,
+        };
+        let bytes = header.encode().unwrap();
+        assert_eq!(FrameHeader::decode(&bytes).unwrap(), header);
     }
 }
