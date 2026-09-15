@@ -14,7 +14,12 @@ pub mod apple;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod mdns;
 
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "windows"
+)))]
 pub mod stub;
 
 use serde::{Deserialize, Serialize};
@@ -81,9 +86,8 @@ pub fn parse_service_metadata(
         return Err(DiscoveryError::InvalidPayload("no addresses found".into()));
     }
     let addr_tuples: Vec<(IpAddr, Option<u32>)> = addresses.iter().map(|&ip| (ip, None)).collect();
-    let endpoint = choose_preferred_endpoint(&addr_tuples).ok_or_else(|| {
-        DiscoveryError::InvalidPayload("no usable unicast address found".into())
-    })?;
+    let endpoint = choose_preferred_endpoint(&addr_tuples)
+        .ok_or_else(|| DiscoveryError::InvalidPayload("no usable unicast address found".into()))?;
     validate_resolved_service(fullname, host_target, srv_port, txt, &endpoint)
 }
 
@@ -97,10 +101,31 @@ pub fn parse_service_metadata_scoped(
     if addresses.is_empty() {
         return Err(DiscoveryError::InvalidPayload("no addresses found".into()));
     }
-    let endpoint = choose_preferred_endpoint(addresses).ok_or_else(|| {
-        DiscoveryError::InvalidPayload("no usable unicast address found".into())
-    })?;
+    let endpoint = choose_preferred_endpoint(addresses)
+        .ok_or_else(|| DiscoveryError::InvalidPayload("no usable unicast address found".into()))?;
     validate_resolved_service(fullname, host_target, srv_port, txt, &endpoint)
+}
+
+/// Pairs resolved addresses with the scope ids they may need. Backends such as `mdns-sd` report
+/// addresses without a scope id, and an IPv6 link-local address without a positive scope is
+/// rejected as unusable, so every link-local address is paired with each candidate local interface
+/// index. All other addresses are passed through unscoped.
+pub fn attach_link_local_scopes(
+    addresses: &[IpAddr],
+    link_local_interfaces: &[u32],
+) -> Vec<(IpAddr, Option<u32>)> {
+    let mut scoped = Vec::with_capacity(addresses.len());
+    for &ip in addresses {
+        let is_link_local = matches!(ip, IpAddr::V6(v6) if is_unscoped_ipv6_link_local(&v6));
+        if !is_link_local || link_local_interfaces.is_empty() {
+            scoped.push((ip, None));
+            continue;
+        }
+        for &if_index in link_local_interfaces {
+            scoped.push((ip, Some(if_index)));
+        }
+    }
+    scoped
 }
 
 pub struct LanDiscovery {
@@ -108,7 +133,12 @@ pub struct LanDiscovery {
     inner: apple::AppleDnsServiceBrowser,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     inner: mdns::MdnsSdBrowser,
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
     inner: stub::StubBrowser,
 }
 
@@ -124,7 +154,12 @@ impl LanDiscovery {
             let inner = mdns::MdnsSdBrowser::new()?;
             Ok(Self { inner })
         }
-        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
         {
             let inner = stub::StubBrowser::new()?;
             Ok(Self { inner })
@@ -141,7 +176,12 @@ pub struct ServiceAdvertiser {
     _inner: apple::AppleDnsServiceAdvertiser,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     _inner: mdns::MdnsSdAdvertiser,
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
     _inner: stub::StubAdvertiser,
 }
 
@@ -160,15 +200,85 @@ impl ServiceAdvertiser {
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
-            let _inner =
-                mdns::MdnsSdAdvertiser::start(name, tcp_port, udp_port, bind_addr)?;
+            let _inner = mdns::MdnsSdAdvertiser::start(name, tcp_port, udp_port, bind_addr)?;
             Ok(Self { _inner })
         }
-        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
         {
-            let _inner =
-                stub::StubAdvertiser::start(name, tcp_port, udp_port, bind_addr)?;
+            let _inner = stub::StubAdvertiser::start(name, tcp_port, udp_port, bind_addr)?;
             Ok(Self { _inner })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn attach_link_local_scopes_makes_link_local_only_hosts_usable() {
+        let link_local = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+
+        // Without a scope the only advertised address is rejected as unusable.
+        assert!(choose_preferred_endpoint(&[(link_local, None)]).is_none());
+
+        let scoped = attach_link_local_scopes(&[link_local], &[5, 9]);
+        assert_eq!(scoped, vec![(link_local, Some(5)), (link_local, Some(9))]);
+        let endpoint = choose_preferred_endpoint(&scoped)
+            .expect("scoped link-local address must be selectable");
+        assert_eq!(endpoint.formatted, "fe80::1%5");
+    }
+
+    #[test]
+    fn attach_link_local_scopes_leaves_other_addresses_unscoped() {
+        let v4 = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        let global_v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        let link_local = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2));
+
+        assert_eq!(
+            attach_link_local_scopes(&[v4, global_v6], &[5]),
+            vec![(v4, None), (global_v6, None)]
+        );
+        // With no usable local interface the address is passed through rather than dropped.
+        assert_eq!(
+            attach_link_local_scopes(&[link_local], &[]),
+            vec![(link_local, None)]
+        );
+    }
+
+    #[test]
+    fn parse_service_metadata_scoped_publishes_link_local_only_host() {
+        let txt = vec![
+            ("protocol".to_string(), b"3".to_vec()),
+            ("name".to_string(), b"desk".to_vec()),
+            ("os".to_string(), b"linux".to_vec()),
+            ("udp_port".to_string(), b"19731".to_vec()),
+        ];
+        let addrs = [IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 3))];
+
+        assert!(parse_service_metadata(
+            "desk._maho-rd._tcp.local.",
+            "desk.local.",
+            19730,
+            &txt,
+            &addrs
+        )
+        .is_err());
+
+        let host = parse_service_metadata_scoped(
+            "desk._maho-rd._tcp.local.",
+            "desk.local.",
+            19730,
+            &txt,
+            &attach_link_local_scopes(&addrs, &[7]),
+        )
+        .expect("scoped link-local host must resolve");
+        assert_eq!(host.ip, "fe80::3%7");
     }
 }

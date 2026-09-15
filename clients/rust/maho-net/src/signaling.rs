@@ -194,7 +194,10 @@ impl SignalingClient {
 
 /// Reads a poll response body, aborting as soon as it exceeds the budget.
 async fn read_bounded_body(mut response: Response) -> Result<Vec<u8>, SignalingError> {
-    if response.content_length().is_some_and(|length| length > MAX_POLL_BODY_BYTES as u64) {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_POLL_BODY_BYTES as u64)
+    {
         return Err(SignalingError::PollBodyTooLarge);
     }
 

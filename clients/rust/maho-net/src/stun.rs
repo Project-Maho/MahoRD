@@ -8,7 +8,10 @@ use std::{
 
 use openssl::rand::rand_bytes;
 use thiserror::Error;
-use tokio::{net::UdpSocket, time::timeout};
+use tokio::{
+    net::UdpSocket,
+    time::{timeout_at, Instant},
+};
 
 const DEFAULT_SERVER: &str = "stun.l.google.com:19302";
 const MAGIC_COOKIE: u32 = 0x2112_a442;
@@ -57,24 +60,38 @@ impl StunClient {
         }
     }
 
-    pub async fn fetch_public_address(&self) -> Result<SocketAddr, StunError> {
+    /// Performs a STUN binding on `socket` — the UDP socket the caller retains
+    /// for peer traffic — so the returned mapped address describes a port that
+    /// stays open. `socket` must be bound (any address); the STUN server is
+    /// contacted with `send_to`, never `connect`, so the socket's peer is left
+    /// untouched and other traffic on it is unaffected.
+    pub async fn fetch_public_address(&self, socket: &UdpSocket) -> Result<SocketAddr, StunError> {
         let server = resolve_ipv4(&self.server)?;
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .await
-            .map_err(StunError::Io)?;
-        socket.connect(server).await.map_err(StunError::Io)?;
 
         let mut transaction_id = [0_u8; 12];
         rand_bytes(&mut transaction_id).map_err(StunError::Random)?;
         let request = binding_request(transaction_id);
-        socket.send(&request).await.map_err(StunError::Io)?;
+        socket
+            .send_to(&request, server)
+            .await
+            .map_err(StunError::Io)?;
 
         let mut response = [0_u8; 2048];
-        let count = timeout(self.request_timeout, socket.recv(&mut response))
-            .await
-            .map_err(|_| StunError::Timeout)?
-            .map_err(StunError::Io)?;
-        parse_binding_response(&response[..count], transaction_id)
+        let deadline = Instant::now() + self.request_timeout;
+        loop {
+            let (count, source) = match timeout_at(deadline, socket.recv_from(&mut response)).await
+            {
+                Err(_) => return Err(StunError::Timeout),
+                Ok(result) => result.map_err(StunError::Io)?,
+            };
+            // Ignore datagrams that are not from the STUN server; the
+            // transaction ID check in `parse_binding_response` handles
+            // spoofed replies bearing the server's address.
+            if source != server {
+                continue;
+            }
+            return parse_binding_response(&response[..count], transaction_id);
+        }
     }
 }
 

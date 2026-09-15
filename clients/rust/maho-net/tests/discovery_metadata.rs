@@ -1,7 +1,5 @@
+use maho_net::discovery::{parse_service_metadata, DiscoveredHost, DiscoveryTracker};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use maho_net::discovery::{
-    parse_service_metadata, DiscoveredHost, DiscoveryTracker,
-};
 
 fn valid_txt() -> Vec<(String, Vec<u8>)> {
     vec![
@@ -269,7 +267,10 @@ fn parse_service_metadata_rejects_unspecified_only_addresses() {
             &txt,
             &[unspec],
         );
-        assert!(res.is_err(), "unspecified address {unspec} must be rejected");
+        assert!(
+            res.is_err(),
+            "unspecified address {unspec} must be rejected"
+        );
     }
 }
 
@@ -302,7 +303,10 @@ fn parse_service_metadata_rejects_unscoped_ipv6_link_local_only() {
         &txt,
         &link_local,
     );
-    assert!(res.is_err(), "unscoped link-local IPv6 address must be rejected");
+    assert!(
+        res.is_err(),
+        "unscoped link-local IPv6 address must be rejected"
+    );
 }
 
 #[test]
@@ -351,8 +355,14 @@ fn parse_service_metadata_rejects_out_of_range_udp_port() {
             ("udp_port".into(), bad_port.as_bytes().to_vec()),
         ];
         assert!(
-            parse_service_metadata("host._maho-rd._tcp.local.", "h.local.", 19730, &txt, &addresses)
-                .is_err(),
+            parse_service_metadata(
+                "host._maho-rd._tcp.local.",
+                "h.local.",
+                19730,
+                &txt,
+                &addresses
+            )
+            .is_err(),
             "udp_port {bad_port} must be rejected"
         );
     }

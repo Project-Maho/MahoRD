@@ -22,8 +22,15 @@ const K_DNS_SERVICE_ERR_NO_ERROR: DNSServiceErrorType = 0;
 const K_DNS_SERVICE_ERR_POLICY_DENIED: DNSServiceErrorType = -65570;
 const K_DNS_SERVICE_ERR_NAME_CONFLICT: DNSServiceErrorType = -65548;
 const K_DNS_SERVICE_FLAGS_ADD: DNSServiceFlags = 0x2;
+const K_DNS_SERVICE_INTERFACE_INDEX_ANY: u32 = 0;
 const K_DNS_SERVICE_INTERFACE_INDEX_LOCAL_ONLY: u32 = !0u32;
+/// Lowest reserved interface-index sentinel: mDNSResponder uses `-1` (LocalOnly), `-2` (Unicast),
+/// `-3` (P2P) and `-4` (BLE); none of them names a real system interface.
+const K_DNS_SERVICE_INTERFACE_INDEX_SENTINEL_MIN: u32 = !0u32 - 3;
 const K_DNS_SERVICE_MAX_DOMAIN_NAME: usize = 1009;
+/// A DNS-SD TXT attribute string is at most 255 bytes, and the advertised name entry is prefixed
+/// with `"name="`, so the name itself must fit in the remaining bytes.
+const MAX_ADVERTISED_NAME_LEN: usize = 255 - "name=".len();
 const MAX_CONCURRENT_SERVICES: usize = 64;
 /// A browsed service that never produces both a hosttarget and at least one address within this
 /// window is torn down so unresponsive advertisers cannot occupy the bounded service table.
@@ -33,6 +40,22 @@ const UNRESOLVED_SERVICE_TTL: Duration = Duration::from_secs(30);
 /// permanently "ready" and must be torn down instead of being processed again.
 fn revents_indicate_hangup(revents: libc::c_short) -> bool {
     (revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0
+}
+
+/// Resolves the IPv6 scope id to attach to an address reported by mDNSResponder. The socket's own
+/// scope wins; otherwise the callback's interface index is used, but only when it names a real
+/// interface: index `0` means "any" and the reserved sentinels (LocalOnly and friends) would format
+/// as an unconnectable zone such as `fe80::1%4294967295`.
+fn effective_ipv6_scope(sin6_scope_id: u32, interface_index: u32) -> Option<u32> {
+    if sin6_scope_id != 0 {
+        return Some(sin6_scope_id);
+    }
+    if interface_index == K_DNS_SERVICE_INTERFACE_INDEX_ANY
+        || interface_index >= K_DNS_SERVICE_INTERFACE_INDEX_SENTINEL_MIN
+    {
+        return None;
+    }
+    Some(interface_index)
 }
 
 /// True when a browsed service has not resolved to a usable hosttarget plus address within
@@ -243,7 +266,12 @@ pub fn enumerate_allowed_physical_interfaces() -> Result<Vec<u32>, DiscoveryErro
             let is_running = (flags & libc::IFF_RUNNING) != 0;
             let is_loopback = (flags & libc::IFF_LOOPBACK) != 0;
 
-            if is_up && is_running && !is_loopback && !ifa.ifa_name.is_null() && !ifa.ifa_addr.is_null() {
+            if is_up
+                && is_running
+                && !is_loopback
+                && !ifa.ifa_name.is_null()
+                && !ifa.ifa_addr.is_null()
+            {
                 let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy();
                 let is_vpn_or_virtual = name.starts_with("utun")
                     || name.starts_with("tun")
@@ -269,7 +297,9 @@ pub fn enumerate_allowed_physical_interfaces() -> Result<Vec<u32>, DiscoveryErro
     unsafe { libc::freeifaddrs(ifaddrs) };
 
     if indices.is_empty() {
-        Err(DiscoveryError::Backend("no active physical LAN interfaces found".into()))
+        Err(DiscoveryError::Backend(
+            "no active physical LAN interfaces found".into(),
+        ))
     } else {
         Ok(indices)
     }
@@ -306,13 +336,8 @@ struct BrowseContext {
 }
 
 enum BrowseOp {
-    Added {
-        key: ServiceKey,
-        fullname: String,
-    },
-    Removed {
-        key: ServiceKey,
-    },
+    Added { key: ServiceKey, fullname: String },
+    Removed { key: ServiceKey },
 }
 
 unsafe extern "C" fn browse_callback(
@@ -348,9 +373,15 @@ unsafe extern "C" fn browse_callback(
         }
 
         // SAFETY: Pointers are verified non-null and provided by the system mDNSResponder daemon callback.
-        let s_name = unsafe { CStr::from_ptr(service_name) }.to_string_lossy().into_owned();
-        let r_type = unsafe { CStr::from_ptr(regtype) }.to_string_lossy().into_owned();
-        let d_name = unsafe { CStr::from_ptr(domain) }.to_string_lossy().into_owned();
+        let s_name = unsafe { CStr::from_ptr(service_name) }
+            .to_string_lossy()
+            .into_owned();
+        let r_type = unsafe { CStr::from_ptr(regtype) }
+            .to_string_lossy()
+            .into_owned();
+        let d_name = unsafe { CStr::from_ptr(domain) }
+            .to_string_lossy()
+            .into_owned();
 
         let key = ServiceKey {
             service_name: s_name.clone(),
@@ -408,7 +439,9 @@ unsafe extern "C" fn resolve_callback(
 
         if !hosttarget.is_null() {
             // SAFETY: hosttarget is non-null and provided by the resolve callback.
-            let target = unsafe { CStr::from_ptr(hosttarget) }.to_string_lossy().into_owned();
+            let target = unsafe { CStr::from_ptr(hosttarget) }
+                .to_string_lossy()
+                .into_owned();
             ctx.hosttarget = Some(target);
         }
 
@@ -482,8 +515,10 @@ unsafe extern "C" fn addr_callback(
                 let in6_addr = address as *const libc::sockaddr_in6;
                 let ip = Ipv6Addr::from((*in6_addr).sin6_addr.s6_addr);
                 let scope = (*in6_addr).sin6_scope_id;
-                let effective_scope = if scope != 0 { scope } else { interface_index };
-                (Some(IpAddr::V6(ip)), Some(effective_scope))
+                (
+                    Some(IpAddr::V6(ip)),
+                    effective_ipv6_scope(scope, interface_index),
+                )
             } else {
                 (None, None)
             }
@@ -598,7 +633,8 @@ impl AppleDnsServiceBrowser {
                             BrowseOp::Removed { key } => {
                                 if let Some(mut service) = active_services.remove(&key) {
                                     // SAFETY: service.context is pinned on this worker thread and valid.
-                                    let removed_fullname = unsafe { &(*service.context).fullname }.clone();
+                                    let removed_fullname =
+                                        unsafe { &(*service.context).fullname }.clone();
 
                                     // SAFETY: Deallocate resolve and addr handles before freeing boxed context.
                                     if let Some(addr_ref) = service.addr_ref.take() {
@@ -610,26 +646,28 @@ impl AppleDnsServiceBrowser {
                                     // SAFETY: context was allocated via Box::into_raw and handles referencing it are deallocated.
                                     unsafe { drop(Box::from_raw(service.context)) };
 
-                                    let surviving_host = active_services.values().find_map(|other| {
-                                        // SAFETY: other.context is valid and pinned on this worker thread.
-                                        let other_ctx = unsafe { &*other.context };
-                                        if other_ctx.fullname == removed_fullname {
-                                            match decide_service_state_action(
-                                                &other_ctx.fullname,
-                                                other_ctx.hosttarget.as_deref(),
-                                                other_ctx.srv_port,
-                                                &other_ctx.txt_items,
-                                                &other_ctx.addresses,
-                                            ) {
-                                                ServiceStateAction::Publish(host) => Some(host),
-                                                ServiceStateAction::Retract => None,
+                                    let surviving_host =
+                                        active_services.values().find_map(|other| {
+                                            // SAFETY: other.context is valid and pinned on this worker thread.
+                                            let other_ctx = unsafe { &*other.context };
+                                            if other_ctx.fullname == removed_fullname {
+                                                match decide_service_state_action(
+                                                    &other_ctx.fullname,
+                                                    other_ctx.hosttarget.as_deref(),
+                                                    other_ctx.srv_port,
+                                                    &other_ctx.txt_items,
+                                                    &other_ctx.addresses,
+                                                ) {
+                                                    ServiceStateAction::Publish(host) => Some(host),
+                                                    ServiceStateAction::Retract => None,
+                                                }
+                                            } else {
+                                                None
                                             }
-                                        } else {
-                                            None
-                                        }
-                                    });
+                                        });
 
-                                    let mut tracker_guard = tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut tracker_guard =
+                                        tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
                                     if let Some(surviving) = surviving_host {
                                         tracker_guard.upsert(surviving);
                                     } else {
@@ -819,7 +857,8 @@ impl AppleDnsServiceBrowser {
                                 })
                             }
                         };
-                        let mut tracker_guard = tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut tracker_guard =
+                            tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
                         match resolved {
                             Some(host) => tracker_guard.upsert(host),
                             None => tracker_guard.remove(&fullname),
@@ -868,24 +907,24 @@ impl AppleDnsServiceBrowser {
 
                     // SAFETY: poll_fds is a valid contiguous array of pollfd structs.
                     let res = unsafe {
-                        libc::poll(
-                            poll_fds.as_mut_ptr(),
-                            poll_fds.len() as libc::nfds_t,
-                            250,
-                        )
+                        libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as libc::nfds_t, 250)
                     };
 
                     if res < 0 {
                         let err_kind = io::Error::last_os_error();
                         if err_kind.kind() != io::ErrorKind::Interrupted {
                             let mut guard = err_clone.lock().unwrap_or_else(|e| e.into_inner());
-                            *guard = Some(DiscoveryError::Backend(format!("poll error: {err_kind}")));
+                            *guard =
+                                Some(DiscoveryError::Backend(format!("poll error: {err_kind}")));
                             break 'event_loop;
                         }
                         continue;
                     }
 
-                    if poll_fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                    if poll_fds[0].revents
+                        & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
+                        != 0
+                    {
                         break 'event_loop;
                     }
 
@@ -893,10 +932,9 @@ impl AppleDnsServiceBrowser {
                         // The browse socket hung up: mDNSResponder restarted or closed the query.
                         // Reporting readiness forever would spin, so treat it as a fatal browser error.
                         let mut guard = err_clone.lock().unwrap_or_else(|e| e.into_inner());
-                        *guard = Some(DiscoveryError::Backend(
-                            "mDNS browse socket hung up".into(),
-                        ));
-                        let mut tracker_guard = tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        *guard = Some(DiscoveryError::Backend("mDNS browse socket hung up".into()));
+                        let mut tracker_guard =
+                            tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
                         for svc in active_services.values() {
                             // SAFETY: svc.context is valid on this worker thread.
                             let fname = unsafe { &(*svc.context).fullname };
@@ -913,11 +951,12 @@ impl AppleDnsServiceBrowser {
                             if proc_err == K_DNS_SERVICE_ERR_POLICY_DENIED {
                                 *guard = Some(DiscoveryError::PolicyDenied);
                             } else {
-                                *guard = Some(DiscoveryError::Backend(
-                                    format!("ProcessResult browse error: {proc_err}"),
-                                ));
+                                *guard = Some(DiscoveryError::Backend(format!(
+                                    "ProcessResult browse error: {proc_err}"
+                                )));
                             }
-                            let mut tracker_guard = tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut tracker_guard =
+                                tracker_clone.lock().unwrap_or_else(|e| e.into_inner());
                             for svc in active_services.values() {
                                 // SAFETY: svc.context is valid on this worker thread.
                                 let fname = unsafe { &(*svc.context).fullname };
@@ -1086,6 +1125,14 @@ impl AppleDnsServiceAdvertiser {
         udp_port: u16,
         bind_addr: SocketAddr,
     ) -> Result<Self, DiscoveryError> {
+        // A name longer than this cannot be carried in the "name=" TXT attribute, and silently
+        // dropping it would advertise a service no peer can validate.
+        if name.len() > MAX_ADVERTISED_NAME_LEN {
+            return Err(DiscoveryError::InvalidPayload(format!(
+                "name must be at most {MAX_ADVERTISED_NAME_LEN} bytes to fit the TXT record"
+            )));
+        }
+
         let (wake_tx, wake_rx) = UnixStream::pair()
             .map_err(|e| DiscoveryError::Backend(format!("UnixStream::pair failed: {e}")))?;
         wake_tx
@@ -1098,7 +1145,10 @@ impl AppleDnsServiceAdvertiser {
         let interfaces_to_register = if bind_addr.ip().is_loopback() {
             vec![K_DNS_SERVICE_INTERFACE_INDEX_LOCAL_ONLY]
         } else if bind_addr.ip().is_unspecified() {
-            enumerate_allowed_physical_interfaces()?
+            // One registration on "any" interface: registering the same instance name once per
+            // physical interface makes mDNSResponder treat the extra registrations as name
+            // conflicts and auto-rename them to "Host (2)", "Host (3)", ...
+            vec![K_DNS_SERVICE_INTERFACE_INDEX_ANY]
         } else {
             let idx = lookup_interface_index_for_ip(bind_addr.ip()).ok_or_else(|| {
                 DiscoveryError::Backend(format!(
@@ -1315,6 +1365,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn effective_ipv6_scope_rejects_sentinel_interface_indices() {
+        // Socket scope wins whenever it is set.
+        assert_eq!(effective_ipv6_scope(7, 0), Some(7));
+        assert_eq!(
+            effective_ipv6_scope(7, K_DNS_SERVICE_INTERFACE_INDEX_LOCAL_ONLY),
+            Some(7)
+        );
+        // A real interface index is adopted when the socket carries no scope.
+        assert_eq!(effective_ipv6_scope(0, 4), Some(4));
+        // "Any" and the reserved sentinels must not become a zone id.
+        assert_eq!(
+            effective_ipv6_scope(0, K_DNS_SERVICE_INTERFACE_INDEX_ANY),
+            None
+        );
+        assert_eq!(
+            effective_ipv6_scope(0, K_DNS_SERVICE_INTERFACE_INDEX_LOCAL_ONLY),
+            None
+        );
+        assert_eq!(
+            effective_ipv6_scope(0, K_DNS_SERVICE_INTERFACE_INDEX_SENTINEL_MIN),
+            None
+        );
+        assert_eq!(
+            effective_ipv6_scope(0, K_DNS_SERVICE_INTERFACE_INDEX_SENTINEL_MIN - 1),
+            Some(K_DNS_SERVICE_INTERFACE_INDEX_SENTINEL_MIN - 1)
+        );
+
+        // A sentinel index must never reach the formatted endpoint as "%4294967295".
+        let link_local = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+        let scope = effective_ipv6_scope(0, K_DNS_SERVICE_INTERFACE_INDEX_LOCAL_ONLY);
+        assert!(choose_and_format_address(&[(link_local, scope)]).is_none());
+    }
+
+    #[test]
+    fn advertiser_rejects_name_too_long_for_txt_attribute() {
+        assert_eq!(MAX_ADVERTISED_NAME_LEN, 250);
+        let too_long = "n".repeat(MAX_ADVERTISED_NAME_LEN + 1);
+        let bind = SocketAddr::from((Ipv4Addr::LOCALHOST, 19730));
+        let err = AppleDnsServiceAdvertiser::start(&too_long, 19730, 19731, bind)
+            .err()
+            .expect("over-long name must be rejected instead of silently dropping the TXT entry");
+        assert!(
+            matches!(err, DiscoveryError::InvalidPayload(ref m) if m.contains("250")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
     fn revents_indicate_hangup_detects_closed_and_invalid_fds() {
         assert!(revents_indicate_hangup(libc::POLLHUP));
         assert!(revents_indicate_hangup(libc::POLLERR));
@@ -1363,7 +1461,10 @@ mod tests {
     #[test]
     fn choose_and_format_address_prioritizes_ipv4_over_scoped_ipv6() {
         let addrs = vec![
-            (IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), Some(4)),
+            (
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+                Some(4),
+            ),
             (IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), None),
         ];
         let (ip, formatted) = choose_and_format_address(&addrs).unwrap();
@@ -1373,16 +1474,20 @@ mod tests {
 
     #[test]
     fn choose_and_format_address_formats_scoped_link_local_when_ipv4_absent() {
-        let addrs = vec![
-            (IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), Some(5)),
-        ];
+        let addrs = vec![(
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+            Some(5),
+        )];
         let (ip, formatted) = choose_and_format_address(&addrs).unwrap();
         assert_eq!(ip, IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)));
         assert_eq!(formatted, "fe80::1%5");
 
         let unscoped = vec![
             (IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), None),
-            (IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), Some(0)),
+            (
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+                Some(0),
+            ),
         ];
         assert!(choose_and_format_address(&unscoped).is_none());
     }

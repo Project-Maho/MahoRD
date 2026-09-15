@@ -77,10 +77,7 @@ fn test_scoped_ipv6_link_local_published() {
 #[test]
 fn test_unscoped_ipv6_link_local_retracted() {
     let txt = sample_valid_txt();
-    let addrs = vec![(
-        IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
-        None,
-    )];
+    let addrs = vec![(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), None)];
 
     let action = decide_service_state_action(
         "desk-host._maho-rd._tcp.local.",
@@ -170,12 +167,19 @@ fn test_scoped_ipv6_published_string_and_resolver_retain_scope() {
         .expect("resolver should succeed for scoped link-local numeric scope")
         .collect();
 
-    assert!(!resolved.is_empty(), "resolver must return at least one socket address");
+    assert!(
+        !resolved.is_empty(),
+        "resolver must return at least one socket address"
+    );
     match resolved[0] {
         std::net::SocketAddr::V6(v6_addr) => {
             assert_eq!(*v6_addr.ip(), Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
             assert_eq!(v6_addr.port(), 19730);
-            assert_eq!(v6_addr.scope_id(), 5, "resolver SocketAddrV6 must retain scope_id == 5");
+            assert_eq!(
+                v6_addr.scope_id(),
+                5,
+                "resolver SocketAddrV6 must retain scope_id == 5"
+            );
             assert_eq!(v6_addr.to_string(), "[fe80::1%5]:19730");
         }
         std::net::SocketAddr::V4(_) => panic!("expected IPv6 socket address"),

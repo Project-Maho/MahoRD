@@ -6,8 +6,8 @@ use aes_gcm::{
     aead::{Aead, AeadInPlace, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
-use maho_proto::{PacketHeader, WireCodec};
 use hkdf::Hkdf;
+use maho_proto::{PacketHeader, WireCodec};
 use sha2::Sha256;
 use thiserror::Error;
 
@@ -460,7 +460,9 @@ pub(crate) mod tests {
 
     #[test]
     fn media_decode_rejects_oversized_audio_before_copy() {
-        use maho_proto::{AudioFragment, AudioFragmentHeader, CodecError, MAX_AUDIO_FRAGMENT_BYTES};
+        use maho_proto::{
+            AudioFragment, AudioFragmentHeader, CodecError, MAX_AUDIO_FRAGMENT_BYTES,
+        };
 
         let mut input = vec![0; AudioFragmentHeader::SIZE + MAX_AUDIO_FRAGMENT_BYTES + 1];
         input[6..8].copy_from_slice(&1_u16.to_le_bytes());
@@ -487,7 +489,9 @@ pub(crate) mod tests {
 
     #[test]
     fn media_decode_rejects_invalid_audio_header_before_copy() {
-        use maho_proto::{AudioFragment, AudioFragmentHeader, CodecError, MAX_AUDIO_FRAGMENT_BYTES};
+        use maho_proto::{
+            AudioFragment, AudioFragmentHeader, CodecError, MAX_AUDIO_FRAGMENT_BYTES,
+        };
 
         let input = vec![0; AudioFragmentHeader::SIZE + MAX_AUDIO_FRAGMENT_BYTES + 1];
         let (result, count) = allocations(|| AudioFragment::decode(&input));

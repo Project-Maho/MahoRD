@@ -11,9 +11,7 @@ pub struct DiscoveredEndpoint {
 impl DiscoveredEndpoint {
     pub fn new(ip: IpAddr, scope_id: Option<u32>) -> Self {
         let (scope_val, formatted) = match (ip, scope_id) {
-            (IpAddr::V6(v6), Some(scope))
-                if (v6.segments()[0] & 0xffc0) == 0xfe80 && scope > 0 =>
-            {
+            (IpAddr::V6(v6), Some(scope)) if (v6.segments()[0] & 0xffc0) == 0xfe80 && scope > 0 => {
                 (Some(scope), format!("{v6}%{scope}"))
             }
             _ => (None, ip.to_string()),
@@ -100,9 +98,7 @@ pub fn choose_preferred_ip_with_scope(
     choose_preferred_endpoint(addresses)
 }
 
-pub fn choose_and_format_address(
-    addresses: &[(IpAddr, Option<u32>)],
-) -> Option<(IpAddr, String)> {
+pub fn choose_and_format_address(addresses: &[(IpAddr, Option<u32>)]) -> Option<(IpAddr, String)> {
     choose_preferred_endpoint(addresses).map(|ep| (ep.ip, ep.formatted))
 }
 

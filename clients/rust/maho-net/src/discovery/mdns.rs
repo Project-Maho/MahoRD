@@ -1,4 +1,7 @@
-use super::{parse_service_metadata, DiscoveredHost, DiscoveryError, DiscoveryTracker};
+use super::{
+    attach_link_local_scopes, parse_service_metadata_scoped, DiscoveredHost, DiscoveryError,
+    DiscoveryTracker,
+};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -27,7 +30,9 @@ impl MdnsSdBrowser {
             Ok(rx) => rx,
             Err(e) => {
                 let _ = daemon.shutdown();
-                return Err(DiscoveryError::Backend(format!("mdns-sd monitor error: {e}")));
+                return Err(DiscoveryError::Backend(format!(
+                    "mdns-sd monitor error: {e}"
+                )));
             }
         };
 
@@ -36,7 +41,9 @@ impl MdnsSdBrowser {
             Ok(rx) => rx,
             Err(e) => {
                 let _ = daemon.shutdown();
-                return Err(DiscoveryError::Backend(format!("mdns-sd browse error: {e}")));
+                return Err(DiscoveryError::Backend(format!(
+                    "mdns-sd browse error: {e}"
+                )));
             }
         };
 
@@ -76,13 +83,14 @@ impl MdnsSdBrowser {
 
                                 let addrs: Vec<IpAddr> =
                                     info.get_addresses().iter().copied().collect();
+                                let scoped_addrs = scope_resolved_addresses(&addrs);
 
-                                if let Ok(host) = parse_service_metadata(
+                                if let Ok(host) = parse_service_metadata_scoped(
                                     &fullname,
                                     &host_target,
                                     srv_port,
                                     &txt_items,
-                                    &addrs,
+                                    &scoped_addrs,
                                 ) {
                                     if let Ok(mut tr_guard) = tracker_clone.lock() {
                                         tr_guard.upsert(host);
@@ -192,11 +200,15 @@ impl MdnsSdAdvertiser {
             if bind_addr.is_ipv4() {
                 daemon
                     .enable_interface(mdns_sd::IfKind::LoopbackV4)
-                    .map_err(|e| DiscoveryError::Backend(format!("failed to enable LoopbackV4: {e}")))?;
+                    .map_err(|e| {
+                        DiscoveryError::Backend(format!("failed to enable LoopbackV4: {e}"))
+                    })?;
             } else {
                 daemon
                     .enable_interface(mdns_sd::IfKind::LoopbackV6)
-                    .map_err(|e| DiscoveryError::Backend(format!("failed to enable LoopbackV6: {e}")))?;
+                    .map_err(|e| {
+                        DiscoveryError::Backend(format!("failed to enable LoopbackV6: {e}"))
+                    })?;
             }
             bind_addr.ip().to_string()
         } else if bind_addr.ip().is_unspecified() {
@@ -229,7 +241,12 @@ impl MdnsSdAdvertiser {
             }
             daemon
                 .enable_interface(mdns_sd::IfKind::Addr(bind_addr.ip()))
-                .map_err(|e| DiscoveryError::Backend(format!("failed to enable interface for {}: {e}", bind_addr.ip())))?;
+                .map_err(|e| {
+                    DiscoveryError::Backend(format!(
+                        "failed to enable interface for {}: {e}",
+                        bind_addr.ip()
+                    ))
+                })?;
             bind_addr.ip().to_string()
         };
 
@@ -256,7 +273,9 @@ impl MdnsSdAdvertiser {
         let fullname = service_info.get_fullname().to_string();
         if let Err(e) = daemon.register(service_info) {
             let _ = daemon.shutdown();
-            return Err(DiscoveryError::Backend(format!("mdns-sd register error: {e}")));
+            return Err(DiscoveryError::Backend(format!(
+                "mdns-sd register error: {e}"
+            )));
         }
 
         Ok(Self {
@@ -270,7 +289,10 @@ impl Drop for MdnsSdAdvertiser {
     fn drop(&mut self) {
         if let Some(daemon) = self.daemon.take() {
             if let Err(e) = daemon.unregister(&self.fullname) {
-                tracing::warn!("Failed to unregister mDNS service '{}' in Drop: {e}", self.fullname);
+                tracing::warn!(
+                    "Failed to unregister mDNS service '{}' in Drop: {e}",
+                    self.fullname
+                );
             }
             match daemon.shutdown() {
                 Ok(rx) => {
@@ -282,6 +304,45 @@ impl Drop for MdnsSdAdvertiser {
             }
         }
     }
+}
+
+/// `mdns-sd` reports resolved addresses without a scope id, so an advertised IPv6 link-local
+/// address would be discarded as unusable. Pair each such address with the local interface indices
+/// that carry an IPv6 link-local address of their own; those are the only interfaces over which a
+/// link-local peer is reachable.
+fn scope_resolved_addresses(addresses: &[IpAddr]) -> Vec<(IpAddr, Option<u32>)> {
+    let has_link_local = addresses
+        .iter()
+        .any(|ip| matches!(ip, IpAddr::V6(v6) if is_unscoped_link_local_ipv6(v6)));
+    if !has_link_local {
+        return addresses.iter().map(|&ip| (ip, None)).collect();
+    }
+    attach_link_local_scopes(addresses, &link_local_ipv6_interface_indices())
+}
+
+/// Indices of non-loopback, non-excluded interfaces that have an IPv6 link-local address, sorted
+/// ascending so scope selection is deterministic.
+fn link_local_ipv6_interface_indices() -> Vec<u32> {
+    let interfaces = match if_addrs::get_if_addrs() {
+        Ok(interfaces) => interfaces,
+        Err(e) => {
+            tracing::warn!("failed to enumerate interfaces for IPv6 scope resolution: {e}");
+            return Vec::new();
+        }
+    };
+
+    let mut indices: Vec<u32> = interfaces
+        .into_iter()
+        .filter(|iface| {
+            !iface.is_loopback()
+                && !is_excluded_interface_name(&iface.name.to_ascii_lowercase())
+                && matches!(iface.ip(), IpAddr::V6(v6) if is_unscoped_link_local_ipv6(&v6))
+        })
+        .filter_map(|iface| iface.index.filter(|&idx| idx > 0))
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
 }
 
 pub fn enumerate_lan_interfaces() -> Result<Vec<(String, IpAddr)>, DiscoveryError> {
@@ -308,8 +369,19 @@ pub fn enumerate_lan_interfaces() -> Result<Vec<(String, IpAddr)>, DiscoveryErro
 
 pub fn is_excluded_interface_name(name: &str) -> bool {
     let excluded_prefixes = [
-        "tailscale", "tun", "tap", "wg", "wireguard", "docker", "veth", "br-", "cni",
-        "flannel", "dummy", "virbr", "vmnet",
+        "tailscale",
+        "tun",
+        "tap",
+        "wg",
+        "wireguard",
+        "docker",
+        "veth",
+        "br-",
+        "cni",
+        "flannel",
+        "dummy",
+        "virbr",
+        "vmnet",
     ];
     excluded_prefixes
         .iter()
@@ -353,4 +425,43 @@ fn is_docker_ipv4(v4: &std::net::Ipv4Addr) -> bool {
 
 fn is_unscoped_link_local_ipv6(v6: &std::net::Ipv6Addr) -> bool {
     (v6.segments()[0] & 0xffc0) == 0xfe80
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn scope_resolved_addresses_passes_through_non_link_local() {
+        let v4 = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        let global_v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        assert_eq!(
+            scope_resolved_addresses(&[v4, global_v6]),
+            vec![(v4, None), (global_v6, None)]
+        );
+    }
+
+    #[test]
+    fn scope_resolved_addresses_scopes_link_local_with_local_interfaces() {
+        let link_local = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+        let scoped = scope_resolved_addresses(&[link_local]);
+        assert!(!scoped.is_empty());
+        // Every entry must be the same address; a host with IPv6 link-local interfaces yields at
+        // least one positive scope, which is what makes such a peer selectable at all.
+        assert!(scoped.iter().all(|&(ip, _)| ip == link_local));
+        let expected_scopes = link_local_ipv6_interface_indices();
+        if expected_scopes.is_empty() {
+            assert_eq!(scoped, vec![(link_local, None)]);
+        } else {
+            assert_eq!(
+                scoped,
+                expected_scopes
+                    .iter()
+                    .map(|&idx| (link_local, Some(idx)))
+                    .collect::<Vec<_>>()
+            );
+            assert!(super::super::choose_preferred_endpoint(&scoped).is_some());
+        }
+    }
 }
