@@ -268,7 +268,9 @@ fn desktop_client_retains_pairing_for_worker_respawn_recovery() {
     assert_eq!(retained.as_deref(), Some("pairing-abc"));
 
     // Then: worker-loss failures are the ones a reconnect can fix.
-    assert!(maho_app::should_reconnect(&maho_app::SessionError::NotReady));
+    assert!(maho_app::should_reconnect(
+        &maho_app::SessionError::NotReady
+    ));
     assert!(!maho_app::should_reconnect(
         &maho_app::SessionError::NoAddress
     ));

@@ -5,6 +5,7 @@ import {
   selectHosts,
   createFavoritesStorage,
   createLibrary,
+  type StorageLike,
 } from './library';
 
 const key = 'mahord.favorites.v1';
@@ -67,7 +68,11 @@ test('selection matches name, IP and OS; preserves order, identity and input', (
   for (const [query, expected] of cases) {
     expect(selectHosts(hosts, { query })).toEqual(expected);
   }
-  expect(selectHosts(hosts, { availableOnly: true })).toEqual([hosts[0], hosts[2]]);
+  expect(selectHosts(hosts, { availableOnly: true })).toEqual([hosts[0], hosts[2], hosts[3]]);
+  // Numeric SQLite-style flags count as online; null/undefined and false do not.
+  expect(
+    selectHosts(hosts, { availableOnly: true, query: "other" })
+  ).toEqual([hosts[3]]);
   expect(
     selectHosts(hosts, {
       query: 'studio',
@@ -169,10 +174,20 @@ test('filter changes emit synchronously; All clears flags but not query; snapsho
   expect(events).toHaveLength(count);
 });
 
+test('null or missing storage degrades to session-only favorites instead of crashing', () => {
+  for (const absent of [undefined, null]) {
+    const adapter = createFavoritesStorage(absent as StorageLike | null | undefined);
+    expect(adapter.load()).toEqual([]);
+    // The in-memory fallback keeps the session functional: saving must not
+    // throw, and choices simply do not persist beyond the session.
+    expect(() => adapter.save([' FE80::AB ', 'fe80::ab'])).not.toThrow();
+    expect(adapter.load()).toEqual([]);
+  }
+});
+
 test('read/write storage failure is visible while session choices survive refresh', async () => {
   for (const storage of [
     memory('{}'),
-    undefined,
     {
       getItem() {
         throw new Error('denied');

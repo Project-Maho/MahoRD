@@ -1,5 +1,5 @@
 export interface RendererHandle {
-  render(buf: ArrayBuffer): void;
+  render(buf: ArrayBuffer | ParsedFrame): void;
   dispose(): void;
   readonly backend: "webgl2" | "webgl";
 }
@@ -448,11 +448,13 @@ export function createRenderer(canvas: HTMLCanvasElement): RendererHandle | null
 
   return {
     backend,
-    render(buf: ArrayBuffer): void {
+    render(frame: ArrayBuffer | ParsedFrame): void {
       if (disposed) return;
-      const frame = parseFrame(buf);
-      if (!frame) return;
-      renderNv12(frame.width, frame.height, frame.y, frame.uv, frame.uvStride);
+      // A pre-parsed frame (hot path: the caller needs the cursor anyway) is
+      // used as-is so the buffer is parsed exactly once per frame.
+      const parsed = frame instanceof ArrayBuffer ? parseFrame(frame) : frame;
+      if (!parsed) return;
+      renderNv12(parsed.width, parsed.height, parsed.y, parsed.uv, parsed.uvStride);
     },
     dispose(): void {
       if (disposed) return;

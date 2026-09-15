@@ -90,6 +90,9 @@ export function validateConnection({
   const errors: Record<string, string> = {};
   if (!host) errors.host = 'required';
   if (pin && !/^[0-9]{8}$/.test(pin)) errors.pin = 'invalid-pin';
+  // The backend requires either a PIN or a stored pairing id; reject an
+  // unpairable request locally instead of round-tripping a guaranteed failure.
+  if (!pin && !pairingId) errors.pin = 'required';
 
   function checkPort(val: unknown, fieldName: string, defaultPort: number): number | null {
     if (val === null || val === undefined || val === '') return defaultPort;

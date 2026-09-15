@@ -262,7 +262,7 @@ export function isNativeAvailable(): boolean {
 
 /**
  * The ONLY place in the codebase that touches the Tauri invoke function.
- * Resolves invoke from window.__TAURI__?.core?.invoke ?? window.__TAURI__?.tauri.
+ * Resolves invoke from window.__TAURI__?.core?.invoke ?? window.__TAURI__?.invoke ?? window.__TAURI__?.tauri.
  */
 export async function invokeCommand<T>(
   command: MahoCommand,
@@ -270,7 +270,8 @@ export async function invokeCommand<T>(
 ): Promise<T> {
   const tauri =
     typeof window !== "undefined" ? (window as any).__TAURI__ : undefined;
-  const candidate = tauri?.core?.invoke ?? tauri?.tauri;
+  const candidate =
+    tauri?.core?.invoke ?? tauri?.invoke ?? tauri?.tauri;
   const invokeFn =
     typeof candidate === "function"
       ? candidate

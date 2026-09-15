@@ -28,7 +28,6 @@ test("keyboard events on overlay UI are not forwarded to the remote host", () =>
 });
 
 test("keyboard events on the video surface are forwarded to the remote host", () => {
-  expect(shouldForwardKeyboardEvent({ target: { tagName: "BODY", id: "" } })).toBe(true);
   expect(shouldForwardKeyboardEvent({ target: { tagName: "DIV", id: "viewport" } })).toBe(true);
   expect(shouldForwardKeyboardEvent({ target: { tagName: "DIV", id: "viewport-container" } })).toBe(true);
   expect(shouldForwardKeyboardEvent({ target: { tagName: "CANVAS", id: "screen-canvas" } })).toBe(true);
@@ -218,6 +217,12 @@ test("buttonUpType returns matching wire event type", () => {
   expect(buttonUpType("left")).toBe("LeftMouseUp");
   expect(buttonUpType("middle")).toBe("MiddleMouseUp");
   expect(buttonUpType("right")).toBe("RightMouseUp");
+  // MouseEvent.button numeric codes are accepted like normalizeMouseButton.
+  expect(buttonUpType(0)).toBe("LeftMouseUp");
+  expect(buttonUpType(1)).toBe("MiddleMouseUp");
+  expect(buttonUpType(2)).toBe("RightMouseUp");
+  // Extra buttons must never map to a left click.
+  expect(buttonUpType(3)).toBe(null);
   expect(buttonUpType("other")).toBe(null);
   expect(buttonUpType(null)).toBe(null);
 });
@@ -226,7 +231,10 @@ test("isRemoteInputTarget rejects invalid targets and identifies remote surfaces
   expect(isRemoteInputTarget(null)).toBe(false);
   expect(isRemoteInputTarget(undefined)).toBe(false);
   expect(isRemoteInputTarget({})).toBe(false);
-  expect(isRemoteInputTarget({ tagName: "BODY" })).toBe(true);
+  // Focus on document.body is local UI attention, never the remote surface:
+  // keystrokes must stay in the shell instead of leaking to the host.
+  expect(isRemoteInputTarget({ tagName: "BODY" })).toBe(false);
+  expect(isRemoteInputTarget({ tagName: "BODY", id: "" })).toBe(false);
   expect(isRemoteInputTarget({ tagName: "DIV", id: "viewport" })).toBe(true);
   expect(isRemoteInputTarget({ tagName: "DIV", id: "viewport-container" })).toBe(true);
   expect(isRemoteInputTarget({ tagName: "CANVAS", id: "screen-canvas" })).toBe(true);

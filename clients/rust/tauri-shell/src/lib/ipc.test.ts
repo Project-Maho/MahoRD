@@ -157,6 +157,22 @@ describe("invokeCommand", () => {
     expect(res).toEqual({ echoed: "list_hosts", args: { test: 123 } });
   });
 
+  it("falls back to window.__TAURI__.invoke when core.invoke is absent", async () => {
+    const mockInvoke = mock(async (cmd: string, args?: Record<string, unknown>) => {
+      return { direct: cmd, args };
+    });
+    (globalThis as any).window = {
+      __TAURI__: {
+        invoke: mockInvoke,
+      },
+    };
+
+    const res = await invokeCommand<{ direct: string; args?: any }>("get_cursor_position");
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("get_cursor_position", undefined);
+    expect(res).toEqual({ direct: "get_cursor_position", args: undefined });
+  });
+
   it("falls back to window.__TAURI__.tauri", async () => {
     const mockInvoke = mock(async (cmd: string, args?: Record<string, unknown>) => {
       return { fallback: cmd, args };

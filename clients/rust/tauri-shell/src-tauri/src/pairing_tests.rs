@@ -17,7 +17,9 @@ use super::commands::{self, authenticate_client_session, list_pairings_internal}
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn make_packet(kind: maho_proto::PacketType, payload: &[u8]) -> Vec<u8> {
-    let mut bytes = maho_proto::PacketHeader::new(kind, 0, 0, 0).encode().unwrap();
+    let mut bytes = maho_proto::PacketHeader::new(kind, 0, 0, 0)
+        .encode()
+        .unwrap();
     bytes.extend_from_slice(payload);
     bytes
 }
@@ -205,7 +207,10 @@ fn test_missing_pin_and_missing_record_fails_immediately_without_bootstrap() {
 
     let result = authenticate_client_session(&session, None, &store, None);
 
-    assert!(result.is_err(), "Must fail when no PIN and no record in store");
+    assert!(
+        result.is_err(),
+        "Must fail when no PIN and no record in store"
+    );
     let err = result.unwrap_err();
     assert_eq!(
         err.code,
@@ -476,7 +481,10 @@ fn test_failed_reconnect_preserves_original_cause_and_never_falls_back_to_bootst
         "failing peer must accept and drop connection cleanly"
     );
 
-    assert!(result.is_err(), "Must fail when reconnect target is unreachable or fails transport");
+    assert!(
+        result.is_err(),
+        "Must fail when reconnect target is unreachable or fails transport"
+    );
     let err = result.unwrap_err();
 
     // Must preserve original reconnect cause
@@ -554,7 +562,10 @@ fn test_loopback_reconnect_failure_does_not_trigger_bootstrap_request() {
         }
     }
 
-    assert!(result.is_err(), "Must fail because server rejects unknown paired PSK identity");
+    assert!(
+        result.is_err(),
+        "Must fail because server rejects unknown paired PSK identity"
+    );
     let err = result.unwrap_err();
 
     // Prohibit falling back to bootstrap request or erasing the reconnect error
@@ -588,7 +599,10 @@ fn test_stored_id_reconnect_across_store_and_recreated_session_boundary() {
     let result1 = authenticate_client_session(&session1, None, &store, Some(id));
     let outcome1 = server.join(Duration::from_secs(3));
     assert_eq!(outcome1, ServerOutcome::AcceptedBootstrap);
-    assert!(result1.is_ok(), "First reconnect must succeed with stored ID");
+    assert!(
+        result1.is_ok(),
+        "First reconnect must succeed with stored ID"
+    );
     let ready1 = result1.unwrap();
     assert_eq!(ready1.pairing.id, id);
 
@@ -608,10 +622,16 @@ fn test_stored_id_reconnect_across_store_and_recreated_session_boundary() {
     let result2 = authenticate_client_session(&session2, None, &store, Some(id));
     let outcome2 = server2.join(Duration::from_secs(3));
     assert_eq!(outcome2, ServerOutcome::AcceptedBootstrap);
-    assert!(result2.is_ok(), "Second reconnect must succeed with recreated session and store");
+    assert!(
+        result2.is_ok(),
+        "Second reconnect must succeed with recreated session and store"
+    );
 
     // Verify stored record retained metadata
-    let reloaded = store.load(id).expect("load record").expect("record present");
+    let reloaded = store
+        .load(id)
+        .expect("load record")
+        .expect("record present");
     assert_eq!(reloaded.last_endpoint, Some(new_endpoint));
 }
 
@@ -637,7 +657,10 @@ fn test_wrong_stored_id_fails_before_transport_without_bootstrap() {
     // Attempt connection with unknown/wrong pairing ID
     let result = authenticate_client_session(&session, None, &store, Some("UNKNOWN-WRONG-ID"));
 
-    assert!(result.is_err(), "Must fail when pairing ID is not found in store");
+    assert!(
+        result.is_err(),
+        "Must fail when pairing ID is not found in store"
+    );
     let err = result.unwrap_err();
     assert_eq!(
         err.code,
@@ -677,7 +700,10 @@ fn test_missing_id_and_missing_pin_fails_before_transport() {
     // Both PIN and pairing ID are None
     let result = authenticate_client_session(&session, None, &store, None);
 
-    assert!(result.is_err(), "Must fail when neither PIN nor pairing ID is provided");
+    assert!(
+        result.is_err(),
+        "Must fail when neither PIN nor pairing ID is provided"
+    );
     let err = result.unwrap_err();
     assert_eq!(
         err.code,

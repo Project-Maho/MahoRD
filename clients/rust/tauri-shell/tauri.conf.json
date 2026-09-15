@@ -5,7 +5,8 @@
   "identifier": "com.projectmaho.mahord",
   "build": {
     "frontendDist": "./dist",
-    "devUrl": "http://localhost:1420"
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build"
   },
   "app": {
     "withGlobalTauri": true,

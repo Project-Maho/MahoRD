@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import { createRenderer, parseFrame } from "./renderer";
 
 function createFrameBuffer(
@@ -203,25 +204,119 @@ function hostBgraToNv12(r: number, g: number, b: number): Nv12Pixel {
   return { y, u, v };
 }
 
-function shaderNv12ToRgb(y: number, u: number, v: number): RgbPixel {
-  // Texture sampling normalizes unsigned bytes [0, 255] to [0.0, 1.0]
-  const texY = y / 255.0;
-  const texU = u / 255.0;
-  const texV = v / 255.0;
+// ---------------------------------------------------------------------------
+// Round-trip math derived from the ACTUAL GLSL in renderer.ts.
+// The fragment shader source is parsed below; any regression that mutates the
+// matrix coefficients, swaps the U/V channels or offsets, or changes the
+// shader shape makes extraction fail or the round-trip colors drift, failing
+// the whole "BT.601 full-range NV12 round-trip" suite.
+// ---------------------------------------------------------------------------
+interface ShaderMath {
+  uChannel: string;
+  vChannel: string;
+  uOffset: number;
+  vOffset: number;
+  rExpr: string;
+  gExpr: string;
+  bExpr: string;
+}
 
-  // New full-range BT.601 shader math (no 16/255 offset, no 255/219 scaling, no 255/224 scaling)
-  const shaderY = texY;
-  const shaderU = texU - 0.5;
-  const shaderV = texV - 0.5;
-
-  const rNorm = clamp(shaderY + 1.402 * shaderV, 0.0, 1.0);
-  const gNorm = clamp(shaderY - 0.344136 * shaderU - 0.714136 * shaderV, 0.0, 1.0);
-  const bNorm = clamp(shaderY + 1.772 * shaderU, 0.0, 1.0);
-
+function extractShaderMath(src: string): ShaderMath {
+  const fail = (what: string): never => {
+    throw new Error(
+      `renderer.ts fragment shader changed shape and could not be parsed (${what}); fix the shader regression or update extractShaderMath`
+    );
+  };
+  const capture = (re: RegExp, what: string): RegExpMatchArray => {
+    const m = src.match(re);
+    if (!m) return fail(what);
+    return m;
+  };
+  const exactly = (text: string, count: number, what: string): void => {
+    const found = src.split(text).length - 1;
+    if (found !== count) {
+      fail(`${what} appears ${found} time(s), expected ${count} (both shader backends must agree)`);
+    }
+  };
+  const uvLine = capture(
+    /vec2 uv = texture2D\(u_uvPlane, v_texCoord\)\.([a-z]+) - vec2\(([\d.]+), ([\d.]+)\)/,
+    "uv sampling line (WebGL1)"
+  );
+  const uAssign = capture(/float u = uv\.([a-z]+);/, "u channel assignment");
+  const vAssign = capture(/float v = uv\.([a-z]+);/, "v channel assignment");
+  const rLine = capture(/float r = ([^;]+);/, "r channel expression");
+  const gLine = capture(/float g = ([^;]+);/, "g channel expression");
+  const bLine = capture(/float b = ([^;]+);/, "b channel expression");
+  // Pin the channel topology: NV12 packs U first, V second; WebGL2's RG
+  // texture carries U in .r and V in .g, WebGL1's LUMINANCE_ALPHA carries U
+  // in .r and V in .a. Any U/V swap changes one of these exact strings.
+  exactly(
+    `vec2 uv = texture2D(u_uvPlane, v_texCoord).${uvLine[1]} - vec2(${uvLine[2]}, ${uvLine[3]});`,
+    1,
+    "WebGL1 uv swizzle"
+  );
+  exactly(
+    `vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(${uvLine[2]}, ${uvLine[3]});`,
+    1,
+    "WebGL2 uv swizzle"
+  );
+  exactly(`float u = uv.${uAssign[1]};`, 2, "u assignment");
+  exactly(`float v = uv.${vAssign[1]};`, 2, "v assignment");
+  exactly(`float r = ${rLine[1]};`, 2, "r expression");
+  exactly(`float g = ${gLine[1]};`, 2, "g expression");
+  exactly(`float b = ${bLine[1]};`, 2, "b expression");
   return {
-    r: rNorm * 255.0,
-    g: gNorm * 255.0,
-    b: bNorm * 255.0,
+    uChannel: uAssign[1],
+    vChannel: vAssign[1],
+    uOffset: Number(uvLine[2]),
+    vOffset: Number(uvLine[3]),
+    rExpr: rLine[1],
+    gExpr: gLine[1],
+    bExpr: bLine[1],
+  };
+}
+
+const rendererSource = readFileSync(new URL("./renderer.ts", import.meta.url), "utf8");
+const shaderMath = extractShaderMath(rendererSource);
+
+/** Evaluates a simple GLSL scalar expression over the y/u/v variables. */
+function evalShaderExpr(expr: string, y: number, u: number, v: number): number {
+  if (!/^[yuv0-9.()\s+\-*/]+$/.test(expr)) {
+    throw new Error(`shader expression uses unsupported syntax: "${expr}"`);
+  }
+  const fn = new Function("y", "u", "v", `"use strict"; return (${expr});`) as (
+    y: number,
+    u: number,
+    v: number
+  ) => number;
+  const out = fn(y, u, v);
+  if (typeof out !== "number" || !Number.isFinite(out)) {
+    throw new Error(`shader expression did not evaluate to a finite number: "${expr}"`);
+  }
+  return out;
+}
+
+function shaderNv12ToRgb(y: number, u: number, v: number): RgbPixel {
+  // y/u/v are the raw NV12 bytes exactly as the host packs them. The UV plane
+  // interleaves one U byte followed by one V byte: texture channel 'r' always
+  // carries U, and the shader's v assignment selects the channel carrying V
+  // ('g' for the WebGL2 RG texture, 'a' for the WebGL1 LUMINANCE_ALPHA one).
+  const sample = (channel: string, uByte: number, vByte: number): number => {
+    if (channel === "r") return uByte / 255.0;
+    if (channel === "g" || channel === "a") return vByte / 255.0;
+    throw new Error(`unexpected chroma texture channel: .${channel}`);
+  };
+  // Texture sampling normalizes unsigned bytes [0, 255] to [0.0, 1.0]
+  const yNorm = y / 255.0;
+  const uNorm = sample(shaderMath.uChannel, u, v) - shaderMath.uOffset;
+  const vNorm = sample(shaderMath.vChannel, u, v) - shaderMath.vOffset;
+
+  // The shader's own r/g/b expressions (clamped by the shader's vec4 clamp).
+  const to255 = (norm: number): number => clamp(norm, 0.0, 1.0) * 255.0;
+  return {
+    r: to255(evalShaderExpr(shaderMath.rExpr, yNorm, uNorm, vNorm)),
+    g: to255(evalShaderExpr(shaderMath.gExpr, yNorm, uNorm, vNorm)),
+    b: to255(evalShaderExpr(shaderMath.bExpr, yNorm, uNorm, vNorm)),
   };
 }
 
@@ -510,6 +605,22 @@ describe("WebGL context loss and restore", () => {
     // uploaded individually; a single tight full-plane upload would shear.
     const strideHandled = rowLengthCalls.length > 0 || uvUploads.length === Math.ceil(48 / 2);
     expect(strideHandled).toBe(true);
+
+    renderer!.dispose();
+  });
+});
+
+describe("renderer hot path", () => {
+  it("render accepts a pre-parsed frame so the buffer is parsed once per frame", () => {
+    const fake = createFakeCanvas();
+    const renderer = createRenderer(fake.canvas);
+    expect(renderer).not.toBeNull();
+
+    const frame = parseFrame(nv12Buffer(64, 48));
+    expect(frame).not.toBeNull();
+    renderer!.render(frame!);
+
+    expect(fake.calls.filter((c) => c.name === "drawArrays").length).toBe(1);
 
     renderer!.dispose();
   });

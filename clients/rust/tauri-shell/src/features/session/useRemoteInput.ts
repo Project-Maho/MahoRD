@@ -288,9 +288,7 @@ export function useRemoteInput(
     const handleMouseDown = (e: MouseEvent) => {
       if (!isConnectedRef.current) return;
       viewport?.focus?.();
-      if (canvas && canvas.id !== "video-canvas") {
-        canvas.focus?.();
-      }
+      canvas?.focus?.();
       const button = mapMouseButton(e.button);
       if (!button) return;
       if (e.button === 1) e.preventDefault?.();
@@ -387,18 +385,46 @@ export function useRemoteInput(
         width: 1280,
         height: 800,
       };
-      const width = rect.width > 0 ? rect.width : 1280;
-      const height = rect.height > 0 ? rect.height : 800;
-      const rawX = Math.max(0, Math.min(e.clientX - rect.left, width));
-      const rawY = Math.max(0, Math.min(e.clientY - rect.top, height));
+      const rectWidth = rect.width > 0 ? rect.width : 1280;
+      const rectHeight = rect.height > 0 ? rect.height : 800;
+      // Same aspect-ratio letterbox projection as sendPointerEvent: scroll
+      // coordinates must map onto the video content, not the letterbox.
+      const canvasWidth = canvas?.width || 1920;
+      const canvasHeight = canvas?.height || 1080;
+      const videoAspect =
+        canvasWidth > 0 && canvasHeight > 0
+          ? canvasWidth / canvasHeight
+          : 16 / 9;
+      const canvasAspect = rectWidth / rectHeight;
+      let displayW = rectWidth;
+      let displayH = rectHeight;
+      let offsetX = 0;
+      let offsetY = 0;
+      if (canvasAspect > videoAspect) {
+        displayH = rectHeight;
+        displayW = displayH * videoAspect;
+        offsetX = (rectWidth - displayW) / 2;
+      } else {
+        displayW = rectWidth;
+        displayH = displayW / videoAspect;
+        offsetY = (rectHeight - displayH) / 2;
+      }
+      const rawX = Math.max(0, Math.min(e.clientX - rect.left - offsetX, displayW));
+      const rawY = Math.max(0, Math.min(e.clientY - rect.top - offsetY, displayH));
+
+      let mod = 0;
+      if (e.shiftKey) mod |= 1;
+      if (e.ctrlKey) mod |= 2;
+      if (e.altKey) mod |= 4;
+      if (e.metaKey) mod |= 8;
 
       sendInput({
         event_type: "ScrollWheel",
         x: rawX,
         y: rawY,
-        view_width: width,
-        view_height: height,
-        modifiers: 0,
+        view_width: displayW,
+        view_height: displayH,
+        modifiers: mod,
         scroll_dx: e.deltaX,
         scroll_dy: e.deltaY,
       }).catch((err) => {

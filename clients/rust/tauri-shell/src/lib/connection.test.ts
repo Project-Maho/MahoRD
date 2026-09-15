@@ -81,21 +81,34 @@ test("PIN and address validation matches backend without losing leading zeros", 
       ok: true,
       args: { host, tcpPort: 19740, udpPort: 19741, pin: "00123456" },
     });
-    const spaceRes = validateConnection({ host, pin: " " });
+    // An empty/absent PIN is only valid together with a stored pairing id.
+    const spaceRes = validateConnection({ host, pin: " ", pairingId: "stored-pairing" });
     expect(spaceRes.ok ? spaceRes.args.pin : undefined).toBeNull();
-    const nullRes = validateConnection({ host, pin: null });
+    const nullRes = validateConnection({ host, pin: null, pairingId: "stored-pairing" });
     expect(nullRes.ok ? nullRes.args.pin : undefined).toBeNull();
   }
   for (const badTcp of [0, -1, 65536, 19730.5, "abc", "19730.5"]) {
     expect(
-      validateConnection({ host: "example.test", tcpPort: badTcp as unknown as number })
+      validateConnection({ host: "example.test", pin: "00123456", tcpPort: badTcp as unknown as number })
     ).toEqual({ ok: false, errors: { tcpPort: "invalid-port" } });
   }
   for (const badUdp of [0, -1, 65536, 19731.5, "abc", "19731.5"]) {
     expect(
-      validateConnection({ host: "example.test", udpPort: badUdp as unknown as number })
+      validateConnection({ host: "example.test", pin: "00123456", udpPort: badUdp as unknown as number })
     ).toEqual({ ok: false, errors: { udpPort: "invalid-port" } });
   }
+  // The backend requires a PIN or a stored pairing id; both absent is a local
+  // validation error, not a connect call that is guaranteed to fail natively.
+  expect(validateConnection({ host: "example.test" })).toEqual({
+    ok: false,
+    errors: { pin: "required" },
+  });
+  expect(validateConnection({ host: "example.test", pin: "" })).toEqual({
+    ok: false,
+    errors: { pin: "required" },
+  });
+  // An explicit pairing id satisfies the pairing requirement without a PIN.
+  expect(validateConnection({ host: "example.test", pairingId: "pair-1" }).ok).toBe(true);
 });
 
 test("connect passes custom ports through invoke", async () => {
@@ -131,7 +144,7 @@ test("invalid and unavailable connections never invoke; subscriptions and snapsh
   expect(changes).toBe(1);
   expect(f.calls.length).toBe(0);
   const absent = fixture({ nativeAvailable: false });
-  expect(await absent.connection.connect({ host: "host" })).toBe(false);
+  expect(await absent.connection.connect({ host: "host", pin: "00123456" })).toBe(false);
   await absent.connection.disconnect();
   await absent.connection.refreshStats();
   expect(absent.connection.snapshot().phase).toBe("unavailable");
@@ -166,7 +179,7 @@ for (const outcome of ["resolve", "reject"] as const) {
       },
     });
     const arrival = f.next("connect");
-    const connecting = f.connection.connect({ host: "A" });
+    const connecting = f.connection.connect({ host: "A", pin: "00123456" });
     const native = await arrival;
     const before = f.connection.token();
     const teardown = f.next("disconnect");
@@ -205,7 +218,7 @@ test("pending connect settles before input release: teardown still waits for rel
     },
   });
   const arrival = f.next("connect");
-  const connecting = f.connection.connect({ host: "host" });
+  const connecting = f.connection.connect({ host: "host", pin: "00123456" });
   const native = await arrival;
   const canceled = f.connection.cancel();
   await entered.promise;
@@ -227,7 +240,7 @@ test("synchronous connecting subscription can cancel without losing native clean
     if (state.phase === "connecting") canceled = f.connection.cancel();
     if (state.phase === "disconnecting") duplicate = f.connection.disconnect();
   });
-  const connecting = f.connection.connect({ host: "host" });
+  const connecting = f.connection.connect({ host: "host", pin: "00123456" });
   expect(f.connection.snapshot().phase).toBe("disconnecting");
   expect(canceled).toBe(duplicate);
   expect(await f.connection.connect({ host: "blocked" })).toBe(false);
@@ -250,7 +263,7 @@ test("completed input release cannot disconnect an unpublished pending connect",
     },
   });
   const arrival = f.next("connect");
-  const connecting = f.connection.connect({ host: "host" });
+  const connecting = f.connection.connect({ host: "host", pin: "00123456" });
   const native = await arrival;
   const teardown = f.next("disconnect");
   const canceled = f.connection.cancel();
@@ -271,7 +284,7 @@ test("connect rejection cleans up, retaining original error and retryable cleanu
   const f = fixture();
   const arrival = f.next("connect"),
     teardown = f.next("disconnect");
-  const connecting = f.connection.connect({ host: "host" });
+  const connecting = f.connection.connect({ host: "host", pin: "00123456" });
   (await arrival).reject(new Error("<unsafe> pairing denied"));
   (await teardown).reject(new Error("cleanup failed"));
   expect(await connecting).toBe(true);
@@ -300,7 +313,7 @@ test("a failed cleanup never wedges the client: reconnect is accepted without a 
   const f = fixture();
   const arrival = f.next("connect"),
     teardown = f.next("disconnect");
-  const connecting = f.connection.connect({ host: "host" });
+  const connecting = f.connection.connect({ host: "host", pin: "00123456" });
   (await arrival).reject(new Error("pairing denied"));
   (await teardown).reject(new Error("cleanup failed"));
   expect(await connecting).toBe(true);

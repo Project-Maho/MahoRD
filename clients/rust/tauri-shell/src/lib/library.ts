@@ -76,7 +76,7 @@ export function selectHosts<T extends Host = Host>(
   const favorites = new Set(favoriteIps.map(normalizeHostKey));
   return hosts.filter(
     host =>
-      (!availableOnly || host.online === true) &&
+      (!availableOnly || host.online === true || host.online === 1) &&
       (!favoritesOnly || favorites.has(normalizeHostKey(host.ip))) &&
       (!needle ||
         [host.name, host.ip, host.os].some(
@@ -93,13 +93,20 @@ function normalizedIps(ips: unknown): string[] {
 }
 
 export function createFavoritesStorage(storage?: StorageLike | null): FavoritesStorage {
+  // A null/absent backend degrades to session-only in-memory favorites
+  // instead of crashing on the nullable parameter.
+  const backend: StorageLike =
+    storage ?? {
+      getItem: () => null,
+      setItem: () => {},
+    };
   return {
     load(): string[] {
-      const value = storage!.getItem(FAVORITES_KEY);
+      const value = backend.getItem(FAVORITES_KEY);
       return value === null ? [] : normalizedIps(JSON.parse(value));
     },
     save(ips: string[]): void {
-      storage!.setItem(FAVORITES_KEY, JSON.stringify(normalizedIps(ips)));
+      backend.setItem(FAVORITES_KEY, JSON.stringify(normalizedIps(ips)));
     },
   };
 }

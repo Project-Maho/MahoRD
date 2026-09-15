@@ -142,13 +142,21 @@ fn non_host_mobile_platforms_are_excluded_from_host_list() {
         "desktop": {"HostName":"indo", "OS":"linux", "Online":true,
                     "TailscaleIPs":["100.91.254.71"]}
     }});
-    let hosts = hosts_from_tailscale_output(output(0, &serde_json::to_vec(&status).unwrap()), &[]).unwrap();
+    let hosts =
+        hosts_from_tailscale_output(output(0, &serde_json::to_vec(&status).unwrap()), &[]).unwrap();
     assert_eq!(hosts.len(), 1, "only desktop host platforms must be listed");
     assert_eq!(hosts[0].name, "indo");
     assert_eq!(hosts[0].ip, "100.91.254.71");
 }
 
-fn lan_host(id: &str, name: &str, ip: &str, os: &str, tcp_port: u16, udp_port: u16) -> maho_net::discovery::DiscoveredHost {
+fn lan_host(
+    id: &str,
+    name: &str,
+    ip: &str,
+    os: &str,
+    tcp_port: u16,
+    udp_port: u16,
+) -> maho_net::discovery::DiscoveredHost {
     maho_net::discovery::DiscoveredHost {
         id: id.into(),
         name: name.into(),
@@ -161,7 +169,14 @@ fn lan_host(id: &str, name: &str, ip: &str, os: &str, tcp_port: u16, udp_port: u
 
 #[test]
 fn lan_survives_missing_or_failed_tailscale() {
-    let lan = Ok(vec![lan_host("host1._maho-rd._tcp.local.", "host1", "192.168.1.50", "linux", 19730, 19731)]);
+    let lan = Ok(vec![lan_host(
+        "host1._maho-rd._tcp.local.",
+        "host1",
+        "192.168.1.50",
+        "linux",
+        19730,
+        19731,
+    )]);
     let tailscale = Err("Tailscale status execution failed: not found".to_string());
     let merged = super::commands::merge_discovery_results(lan, tailscale, &[]).unwrap();
     assert_eq!(merged.len(), 1);
@@ -174,7 +189,14 @@ fn lan_survives_missing_or_failed_tailscale() {
 
 #[test]
 fn source_dedup_prioritizes_lan_over_tailscale() {
-    let lan = Ok(vec![lan_host("desk._maho-rd._tcp.local.", "desk-lan", "100.91.254.71", "linux", 19740, 19741)]);
+    let lan = Ok(vec![lan_host(
+        "desk._maho-rd._tcp.local.",
+        "desk-lan",
+        "100.91.254.71",
+        "linux",
+        19740,
+        19741,
+    )]);
     let tailscale = Ok(vec![super::HostItem {
         id: "100.91.254.71".into(),
         name: "desk-ts".into(),
@@ -256,7 +278,9 @@ fn empty_successful_lan_with_failed_tailscale_yields_empty_success() {
 
 #[test]
 fn both_sources_failing_yields_an_error() {
-    let lan = Err(maho_net::discovery::DiscoveryError::Backend("LAN daemon unavailable".into()));
+    let lan = Err(maho_net::discovery::DiscoveryError::Backend(
+        "LAN daemon unavailable".into(),
+    ));
     let tailscale = Err("Tailscale status execution failed: not found".to_string());
     let result = super::commands::merge_discovery_results(lan, tailscale, &[]);
     assert!(result.is_err());
@@ -265,7 +289,14 @@ fn both_sources_failing_yields_an_error() {
 #[test]
 fn lan_host_with_matching_stored_name_remains_unpaired() {
     let records = [record("auth-pair-key-123", "indo")];
-    let lan = Ok(vec![lan_host("indo._maho-rd._tcp.local.", "indo", "192.168.1.150", "linux", 19730, 19731)]);
+    let lan = Ok(vec![lan_host(
+        "indo._maho-rd._tcp.local.",
+        "indo",
+        "192.168.1.150",
+        "linux",
+        19730,
+        19731,
+    )]);
     let tailscale = Ok(vec![]);
     let merged = super::commands::merge_discovery_results(lan, tailscale, &records).unwrap();
     assert_eq!(merged.len(), 1);

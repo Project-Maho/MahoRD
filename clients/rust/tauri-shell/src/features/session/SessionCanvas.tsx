@@ -134,15 +134,19 @@ export function SessionCanvas({
         if (!running || generationRef.current !== generation) return;
 
         if (buf && buf.byteLength >= 16) {
+          // Parse exactly once per frame: the cursor projection and the
+          // renderer share the same parsed result.
+          const frame = parseFrame(buf);
           if (rendererRef.current) {
-            rendererRef.current.render(buf);
+            if (frame) {
+              rendererRef.current.render(frame);
+            }
           } else {
             onErrorRef.current?.(
               "Video rendering is unavailable (WebGL context could not be created)"
             );
           }
 
-          const frame = parseFrame(buf);
           if (frame) {
             // The drawing buffer follows the actual stream size; hardcoded
             // attributes would be reapplied on every re-render and break

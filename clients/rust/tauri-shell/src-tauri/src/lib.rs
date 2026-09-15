@@ -8,6 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "macos")]
+use maho_app::ClipboardMonitor;
 use maho_app::{
     agent_input::{
         convert_agent_action_to_events, encode_nv12_screenshot, AgentAction, InputStateTracker,
@@ -17,12 +19,10 @@ use maho_app::{
     PairingStore, ReadySession, SessionConfig, SessionError, SessionEvent, SessionRuntime,
     SessionState, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT,
 };
-#[cfg(target_os = "macos")]
-use maho_app::ClipboardMonitor;
 use maho_decode::HevcDecoder;
-use maho_proto::{InputEvent, InputEventType, Modifiers};
 #[cfg(target_os = "macos")]
 use maho_proto::{ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdate};
+use maho_proto::{InputEvent, InputEventType, Modifiers};
 use maho_render::{AudioOutputDevice, AudioOutputStatus, AudioQueue, CpalAudioOutput};
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -679,6 +679,13 @@ impl AppState {
         if let Ok(mut frame) = self.latest_raw_frame.lock() {
             *frame = FrameMailbox::default();
         }
+        // Session-scoped: the previous host's cursor must not be reported while
+        // disconnected, nor packed into the next host's first frame trailer.
+        // Teardown calls this after the media worker has joined, so an in-flight
+        // cursor event cannot revive the stale value.
+        if let Ok(mut cursor) = self.latest_cursor.lock() {
+            *cursor = CursorState::default();
+        }
     }
 
     pub fn get_host_status(&self) -> Result<HostStatus, String> {
@@ -982,7 +989,11 @@ pub mod commands {
             guard.clone()
         };
 
-        if !state.discovery.tailscale_refreshing.swap(true, Ordering::SeqCst) {
+        if !state
+            .discovery
+            .tailscale_refreshing
+            .swap(true, Ordering::SeqCst)
+        {
             let discovery_clone = Arc::clone(&state.discovery);
             let records_clone = records.clone();
             tokio::spawn(async move {
@@ -1009,7 +1020,9 @@ pub mod commands {
                         updated_at: Instant::now(),
                     });
                 }
-                discovery_clone.tailscale_refreshing.store(false, Ordering::SeqCst);
+                discovery_clone
+                    .tailscale_refreshing
+                    .store(false, Ordering::SeqCst);
             });
         }
 
@@ -1186,40 +1199,52 @@ pub mod commands {
     pub fn classify_session_error(err: &maho_app::SessionError) -> IpcError {
         match err {
             maho_app::SessionError::PairingRejected(reason) => match reason {
-                maho_proto::PairingRejectReason::DeniedByHost => {
-                    IpcError::new(IpcErrorCode::PairingDenied, IpcErrorStage::Preauth, "Connection rejected by host")
-                }
-                maho_proto::PairingRejectReason::LockedOut => {
-                    IpcError::new(IpcErrorCode::PairingLockedOut, IpcErrorStage::Preauth, "Host locked out pairing due to excessive attempts")
-                }
-                maho_proto::PairingRejectReason::PairingDisabled => {
-                    IpcError::new(IpcErrorCode::PairingDisabled, IpcErrorStage::Preauth, "Host pairing window expired or pairing disabled")
-                }
+                maho_proto::PairingRejectReason::DeniedByHost => IpcError::new(
+                    IpcErrorCode::PairingDenied,
+                    IpcErrorStage::Preauth,
+                    "Connection rejected by host",
+                ),
+                maho_proto::PairingRejectReason::LockedOut => IpcError::new(
+                    IpcErrorCode::PairingLockedOut,
+                    IpcErrorStage::Preauth,
+                    "Host locked out pairing due to excessive attempts",
+                ),
+                maho_proto::PairingRejectReason::PairingDisabled => IpcError::new(
+                    IpcErrorCode::PairingDisabled,
+                    IpcErrorStage::Preauth,
+                    "Host pairing window expired or pairing disabled",
+                ),
             },
             maho_app::SessionError::PairingNotFound(id) => {
                 IpcError::pairing_required(format!("No saved pairing credential found for '{id}'"))
             }
-            maho_app::SessionError::HandshakeAckTimeout => {
-                IpcError::new(IpcErrorCode::HandshakeTimeout, IpcErrorStage::Handshake, "Host did not acknowledge handshake within deadline")
-            }
+            maho_app::SessionError::HandshakeAckTimeout => IpcError::new(
+                IpcErrorCode::HandshakeTimeout,
+                IpcErrorStage::Handshake,
+                "Host did not acknowledge handshake within deadline",
+            ),
             maho_app::SessionError::MissingAuthenticatedRegistration => {
                 IpcError::incompatible_peer("Host lacks authenticated UDP registration capability")
             }
             maho_app::SessionError::Tls(maho_net::tls_psk::TlsPskError::Io(io_err)) => {
                 classify_io_error(io_err, IpcErrorStage::TlsPsk)
             }
-            maho_app::SessionError::Tls(tls_err) => {
-                IpcError::new(IpcErrorCode::ConnectionFailed, IpcErrorStage::TlsPsk, format!("TLS connection failed: {tls_err}"))
-            }
-            maho_app::SessionError::Io(io_err) => {
-                classify_io_error(io_err, IpcErrorStage::Connect)
-            }
-            maho_app::SessionError::NoAddress => {
-                IpcError::new(IpcErrorCode::NetworkUnreachable, IpcErrorStage::Connect, "Address resolution returned no endpoints")
-            }
-            other => {
-                IpcError::new(IpcErrorCode::ConnectionFailed, IpcErrorStage::Connect, format!("Connection failed: {other}"))
-            }
+            maho_app::SessionError::Tls(tls_err) => IpcError::new(
+                IpcErrorCode::ConnectionFailed,
+                IpcErrorStage::TlsPsk,
+                format!("TLS connection failed: {tls_err}"),
+            ),
+            maho_app::SessionError::Io(io_err) => classify_io_error(io_err, IpcErrorStage::Connect),
+            maho_app::SessionError::NoAddress => IpcError::new(
+                IpcErrorCode::NetworkUnreachable,
+                IpcErrorStage::Connect,
+                "Address resolution returned no endpoints",
+            ),
+            other => IpcError::new(
+                IpcErrorCode::ConnectionFailed,
+                IpcErrorStage::Connect,
+                format!("Connection failed: {other}"),
+            ),
         }
     }
 
@@ -1227,18 +1252,26 @@ pub mod commands {
         match err.kind() {
             std::io::ErrorKind::ConnectionRefused
             | std::io::ErrorKind::HostUnreachable
-            | std::io::ErrorKind::NetworkUnreachable => {
-                IpcError::new(IpcErrorCode::NetworkUnreachable, IpcErrorStage::Connect, err.to_string())
-            }
+            | std::io::ErrorKind::NetworkUnreachable => IpcError::new(
+                IpcErrorCode::NetworkUnreachable,
+                IpcErrorStage::Connect,
+                err.to_string(),
+            ),
             std::io::ErrorKind::ConnectionReset
             | std::io::ErrorKind::UnexpectedEof
             | std::io::ErrorKind::BrokenPipe => {
                 IpcError::new(IpcErrorCode::RemoteClosed, default_stage, err.to_string())
             }
-            std::io::ErrorKind::TimedOut => {
-                IpcError::new(IpcErrorCode::HandshakeTimeout, default_stage, err.to_string())
-            }
-            _ => IpcError::new(IpcErrorCode::ConnectionFailed, default_stage, err.to_string()),
+            std::io::ErrorKind::TimedOut => IpcError::new(
+                IpcErrorCode::HandshakeTimeout,
+                default_stage,
+                err.to_string(),
+            ),
+            _ => IpcError::new(
+                IpcErrorCode::ConnectionFailed,
+                default_stage,
+                err.to_string(),
+            ),
         }
     }
 
@@ -1253,35 +1286,54 @@ pub mod commands {
     ) -> Result<ConnectResponse, IpcError> {
         let _lifecycle = state.lifecycle.lock().await;
         if let Err(cleanup_err) = disconnect_internal(&state).await {
-            return Err(IpcError::new(IpcErrorCode::CleanupFailed, IpcErrorStage::Cleanup, cleanup_err));
+            return Err(IpcError::new(
+                IpcErrorCode::CleanupFailed,
+                IpcErrorStage::Cleanup,
+                cleanup_err,
+            ));
         }
         state.clear_metrics();
 
         if let Some(ref p) = pin {
             let trimmed_pin = p.trim();
-            if !trimmed_pin.is_empty() && (trimmed_pin.len() != 8 || !trimmed_pin.chars().all(|c| c.is_ascii_digit())) {
+            if !trimmed_pin.is_empty()
+                && (trimmed_pin.len() != 8 || !trimmed_pin.chars().all(|c| c.is_ascii_digit()))
+            {
                 return Err(IpcError::invalid_pin("PIN must be exactly 8 ASCII digits"));
             }
         }
         let trimmed_pin = pin.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let trimmed_id = pairing_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let trimmed_id = pairing_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
         if trimmed_pin.is_none() && trimmed_id.is_none() {
-            return Err(IpcError::pairing_required("PIN required for initial authorization"));
+            return Err(IpcError::pairing_required(
+                "PIN required for initial authorization",
+            ));
         }
 
         if trimmed_pin.is_none() {
             if let Some(id) = trimmed_id {
                 let store = PairingStore::open_default().map_err(|e| {
-                    IpcError::connection_failed(IpcErrorStage::Client, format!("Pairing store error: {e}"))
+                    IpcError::connection_failed(
+                        IpcErrorStage::Client,
+                        format!("Pairing store error: {e}"),
+                    )
                 })?;
                 match store.load(id) {
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        return Err(IpcError::pairing_required(format!("Unknown pairing ID '{id}'; PIN required")));
+                        return Err(IpcError::pairing_required(format!(
+                            "Unknown pairing ID '{id}'; PIN required"
+                        )));
                     }
                     Err(e) => {
-                        return Err(IpcError::connection_failed(IpcErrorStage::Client, format!("Pairing store error: {e}")));
+                        return Err(IpcError::connection_failed(
+                            IpcErrorStage::Client,
+                            format!("Pairing store error: {e}"),
+                        ));
                     }
                 }
             }
@@ -1360,10 +1412,13 @@ pub mod commands {
         config.tcp_port = tcp;
         config.udp_port = udp;
 
-        let session = ClientSession::new(config.clone())
-            .map_err(|e| classify_session_error(&e))?;
+        let session = ClientSession::new(config.clone()).map_err(|e| classify_session_error(&e))?;
         // Publish cleanup ownership before any fallible connect/start work.
-        *state.session.lock().map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, e.to_string()))? = Some(session.clone());
+        *state
+            .session
+            .lock()
+            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, e.to_string()))? =
+            Some(session.clone());
 
         let session_for_connect = session.clone();
         let pin_clone = pin.clone();
@@ -1371,8 +1426,12 @@ pub mod commands {
 
         let ready_session: ReadySession =
             tokio::task::spawn_blocking(move || -> Result<ReadySession, IpcError> {
-                let store = PairingStore::open_default()
-                    .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, format!("Pairing store error: {e}")))?;
+                let store = PairingStore::open_default().map_err(|e| {
+                    IpcError::connection_failed(
+                        IpcErrorStage::Client,
+                        format!("Pairing store error: {e}"),
+                    )
+                })?;
                 authenticate_client_session(
                     &session_for_connect,
                     pin_clone.as_deref(),
@@ -1381,7 +1440,9 @@ pub mod commands {
                 )
             })
             .await
-            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, format!("Tokio join error: {e}")))??;
+            .map_err(|e| {
+                IpcError::connection_failed(IpcErrorStage::Client, format!("Tokio join error: {e}"))
+            })??;
 
         // Persist verified endpoint metadata through shared API:
         let endpoint = PairingEndpoint::new(host.clone(), tcp, udp);
@@ -1395,7 +1456,11 @@ pub mod commands {
                 ));
             }
         };
-        match store.remember_endpoint(&ready_session.pairing.id, &ready_session.pairing.key, endpoint) {
+        match store.remember_endpoint(
+            &ready_session.pairing.id,
+            &ready_session.pairing.key,
+            endpoint,
+        ) {
             Ok(persisted) => {
                 if !persisted {
                     tracing::warn!(id = %ready_session.pairing.id, "remember_endpoint returned false (key mismatch or deleted record)");
@@ -1413,7 +1478,11 @@ pub mod commands {
         let tcp_runtime = session
             .spawn_tcp_runtime()
             .map_err(|e| classify_session_error(&e))?;
-        *state.tcp_runtime.lock().map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, e.to_string()))? = Some(tcp_runtime);
+        *state
+            .tcp_runtime
+            .lock()
+            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, e.to_string()))? =
+            Some(tcp_runtime);
         state.start_session_audio().await;
 
         // Ask for an immediate keyframe so the canvas paints as soon as the
@@ -1515,7 +1584,12 @@ pub mod commands {
                     },
                 );
             })
-            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Runtime, format!("Failed to spawn media thread: {e}")))?;
+            .map_err(|e| {
+                IpcError::connection_failed(
+                    IpcErrorStage::Runtime,
+                    format!("Failed to spawn media thread: {e}"),
+                )
+            })?;
 
         if let Ok(mut media_lock) = state.media_handle.lock() {
             *media_lock = Some(media_thread);
@@ -1550,7 +1624,9 @@ pub mod commands {
         let session = session.as_ref().ok_or("Not connected")?;
         session
             .send_control(maho_proto::ControlMessage::BitrateAdjust(
-                maho_proto::BitrateAdjust { target_bitrate: target },
+                maho_proto::BitrateAdjust {
+                    target_bitrate: target,
+                },
             ))
             .map_err(|e| e.to_string())
     }
@@ -1779,9 +1855,9 @@ pub mod commands {
     }
 
     pub fn list_pairings_internal(store: &PairingStore) -> Result<Vec<PairingSummary>, IpcError> {
-        let records = store
-            .load_all()
-            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, format!("Load pairings error: {e}")))?;
+        let records = store.load_all().map_err(|e| {
+            IpcError::connection_failed(IpcErrorStage::Client, format!("Load pairings error: {e}"))
+        })?;
         Ok(records.into_iter().map(PairingSummary::from).collect())
     }
 
@@ -1790,9 +1866,9 @@ pub mod commands {
         let store = PairingStore::open_default().map_err(|e| {
             IpcError::connection_failed(IpcErrorStage::Client, format!("Pairing store error: {e}"))
         })?;
-        store
-            .delete(&id)
-            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, format!("Delete pairing error: {e}")))
+        store.delete(&id).map_err(|e| {
+            IpcError::connection_failed(IpcErrorStage::Client, format!("Delete pairing error: {e}"))
+        })
     }
 
     #[tauri::command]
@@ -1862,9 +1938,9 @@ pub mod commands {
                     .map_err(|e| e.to_string())?
                     .clone()
                     .ok_or_else(|| format!("Failed to send input: {error}"))?;
-                session
-                    .reconnect(&pairing_id)
-                    .map_err(|retry| format!("Failed to send input: {error}; reconnect: {retry}"))?;
+                session.reconnect(&pairing_id).map_err(|retry| {
+                    format!("Failed to send input: {error}; reconnect: {retry}")
+                })?;
                 session
                     .send_input(input_event)
                     .map_err(|retry| format!("Failed to send input after reconnect: {retry}"))
@@ -2470,6 +2546,12 @@ mod tests {
     async fn disconnect_join_leaves_executor_responsive_and_clears_frames() {
         let state = AppState::default();
         state.publish_frame(distinctive_frame());
+        // A previous host's cursor must not survive disconnect: seed a stale value.
+        *state.latest_cursor.lock().unwrap() = CursorState {
+            x: 0.25,
+            y: 0.75,
+            cursor_type: 2,
+        };
         let stop = state.worker_stop_flag();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -2496,6 +2578,11 @@ mod tests {
             .unwrap();
         assert!(state.media_handle.lock().unwrap().is_none());
         assert!(commands::capture_screen(&state, None).is_err());
+        assert_eq!(
+            *state.latest_cursor.lock().unwrap(),
+            CursorState::default(),
+            "stale cursor must reset to the hidden sentinel after teardown"
+        );
         let new_stop = state.worker_stop_flag();
         assert!(!new_stop.load(Ordering::SeqCst));
     }

@@ -743,6 +743,99 @@ describe("useRemoteInput", () => {
     document.body.removeChild(container);
   });
 
+  it("maps wheel coords through the letterbox and forwards keyboard modifiers", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    const viewport = createFakeDomTarget("viewport");
+    const canvas = createFakeDomTarget("video-canvas", "canvas");
+    // Pillarboxed 16:9 video content centered in a 2000x1000 canvas rect.
+    canvas.width = 1600;
+    canvas.height = 900;
+    canvas.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      width: 2000,
+      height: 1000,
+      right: 2000,
+      bottom: 1000,
+    });
+
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+        })
+      );
+    });
+
+    // offsetX = (2000 - 1000 * 16/9) / 2 = 111.111...; a clientX of 200 must
+    // map to ~88.9 in video content, NOT 200 against the full canvas rect.
+    const wheelEv = new Event("wheel") as any;
+    wheelEv.clientX = 200;
+    wheelEv.clientY = 450;
+    wheelEv.deltaX = 0;
+    wheelEv.deltaY = -120;
+    wheelEv.shiftKey = true;
+    wheelEv.ctrlKey = true;
+    wheelEv.altKey = false;
+    wheelEv.metaKey = false;
+    wheelEv.preventDefault = () => {};
+
+    viewport.dispatchEvent(wheelEv);
+
+    const wheelInputs = sentInputs.filter((i) => i.event_type === "ScrollWheel");
+    expect(wheelInputs.length).toBe(1);
+    expect(wheelInputs[0].modifiers).toBe(3); // shift=1 | ctrl=2
+    expect(wheelInputs[0].x).toBeCloseTo(200 - 111.111, 1);
+    expect(wheelInputs[0].y).toBeCloseTo(450, 1);
+    expect(wheelInputs[0].view_width).toBeCloseTo(1777.778, 1);
+    expect(wheelInputs[0].view_height).toBeCloseTo(1000, 1);
+
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+  });
+
+  it("mousedown on the viewport focuses the video canvas", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    const viewport = createFakeDomTarget("viewport");
+    const canvas = createFakeDomTarget("video-canvas", "canvas");
+
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+        })
+      );
+    });
+
+    const downEv = new Event("mousedown") as any;
+    downEv.button = 0;
+    downEv.clientX = 10;
+    downEv.clientY = 10;
+    viewport.dispatchEvent(downEv);
+
+    expect(viewport.focusCalls).toBe(1);
+    // The canvas carries tabIndex=0 and is the remote input surface: mousedown
+    // must focus it regardless of its id, never skip it.
+    expect(canvas.focusCalls).toBe(1);
+
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+  });
+
   it("handles viewport contextmenu with preventDefault", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

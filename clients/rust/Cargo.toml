@@ -24,8 +24,6 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 ffmpeg-next = { version = "8", default-features = false }
-wgpu = "26"
-winit = "0.30"
 cpal = "0.16"
 anyhow = "1"
 thiserror = "2"

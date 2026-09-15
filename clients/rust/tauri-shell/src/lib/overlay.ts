@@ -85,9 +85,12 @@ export function normalizeMouseButton(button: unknown): MouseButton | null {
  * Maps a mouse button identifier to its wire mouse-up event type.
  */
 export function buttonUpType(button: unknown): MouseUpEventType | null {
-  if (button === 'left') return 'LeftMouseUp';
-  if (button === 'middle') return 'MiddleMouseUp';
-  if (button === 'right') return 'RightMouseUp';
+  // Accept the same inputs as normalizeMouseButton, including MouseEvent.button
+  // numeric codes (0/1/2).
+  const norm = normalizeMouseButton(button);
+  if (norm === 'left') return 'LeftMouseUp';
+  if (norm === 'middle') return 'MiddleMouseUp';
+  if (norm === 'right') return 'RightMouseUp';
   return null;
 }
 
@@ -102,9 +105,9 @@ export function isRemoteInputTarget(target: unknown): boolean {
     return false;
   }
   const el = target as InputTargetLike;
-  if (el.tagName === 'BODY') {
-    return true;
-  }
+  // Focus sitting on document.body (clicks on non-input overlay chrome,
+  // dismissed dropdowns, clicks outside modals) is local UI attention, never
+  // the remote video surface: only explicit remote target IDs forward.
   return typeof el.id === 'string' && REMOTE_TARGET_IDS.has(el.id as string);
 }
 
