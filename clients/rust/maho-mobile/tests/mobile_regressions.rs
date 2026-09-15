@@ -2,9 +2,9 @@ use std::ffi::{c_void, CString};
 
 use maho_mobile::{
     maho_mobile_create, maho_mobile_destroy, maho_mobile_send_touch, AndroidAudioTrackPlayer,
-    AndroidMediaCodecConfig, AndroidMediaCodecDecoder, MahoMobileStatus, IosAudioEnginePlayer,
-    IosVideoToolboxConfig, IosVideoToolboxDecoder, PowerBudgetConfig, PowerPolicyManager,
-    ThermalState, TouchGestureHandler, TouchMode, TouchPhase, TouchPoint, ViewportState,
+    AndroidMediaCodecConfig, AndroidMediaCodecDecoder, IosAudioEnginePlayer, IosVideoToolboxConfig,
+    IosVideoToolboxDecoder, MahoMobileStatus, PowerBudgetConfig, PowerPolicyManager, ThermalState,
+    TouchGestureHandler, TouchMode, TouchPhase, TouchPoint, ViewportState,
 };
 use maho_proto::InputEventType;
 
@@ -75,36 +75,36 @@ fn android_mediacodec_missing_native_backend_must_not_report_decoded() {
         surface_attached: true,
         ..Default::default()
     };
-    let mut decoder = match AndroidMediaCodecDecoder::new(config) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
+    let mut decoder = AndroidMediaCodecDecoder::new(config)
+        .expect("MediaCodec stub construction must succeed without a native backend");
 
     // When: Nonempty NAL payload is provided.
     let dummy_nal = [0x00, 0x00, 0x00, 0x01, 0x40, 0x01];
     let res = decoder.decode_access_unit(&dummy_nal);
 
-    // Then: Missing native backend must not report decoded frame or advance counter.
-    assert_ne!(res, Ok(true));
+    // Then: The missing native backend is reported exactly and nothing is decoded.
+    assert_eq!(
+        res,
+        Err(maho_mobile::android::AndroidMediaError::BackendUnavailable)
+    );
     assert_eq!(decoder.frames_decoded(), 0);
 }
 
 #[test]
 fn android_audiotrack_missing_native_backend_must_not_report_samples_written() {
     // Given: AndroidAudioTrackPlayer initialized for stereo 48kHz.
-    let mut player = match AndroidAudioTrackPlayer::new(48_000, 2) {
-        Ok(p) => p,
-        Err(_) => return,
-    };
+    let mut player = AndroidAudioTrackPlayer::new(48_000, 2)
+        .expect("AudioTrack stub construction must succeed without a native backend");
 
     // When: Nonempty PCM buffer is written.
     let pcm = [0.1f32, -0.1f32, 0.2f32, -0.2f32];
     let res = player.write_pcm(&pcm);
 
-    // Then: Must not report written samples and counter must remain 0.
-    if let Ok(written) = res {
-        assert_eq!(written, 0);
-    }
+    // Then: The missing native backend is reported exactly and no samples are counted.
+    assert_eq!(
+        res,
+        Err(maho_mobile::android::AndroidMediaError::BackendUnavailable)
+    );
     assert_eq!(player.samples_written, 0);
 }
 
@@ -115,17 +115,18 @@ fn ios_videotoolbox_missing_native_backend_must_not_report_rendered() {
         metal_layer_attached: true,
         ..Default::default()
     };
-    let mut decoder = match IosVideoToolboxDecoder::new(config) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
+    let mut decoder = IosVideoToolboxDecoder::new(config)
+        .expect("VideoToolbox stub construction must succeed without a native backend");
 
     // When: Nonempty HEVC frame is submitted.
     let dummy_hevc = [0x00, 0x00, 0x00, 0x01, 0x26, 0x01];
     let res = decoder.render_frame(&dummy_hevc);
 
-    // Then: Missing native backend must not report rendered or advance counter.
-    assert_ne!(res, Ok(true));
+    // Then: The missing native backend is reported exactly and no frame is counted.
+    assert_eq!(
+        res,
+        Err(maho_mobile::ios::IosMediaError::BackendUnavailable)
+    );
     assert_eq!(decoder.frames_rendered(), 0);
 }
 

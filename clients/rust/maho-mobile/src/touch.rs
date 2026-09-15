@@ -70,7 +70,7 @@ impl ViewportState {
     }
 
     pub fn set_zoom(&mut self, zoom: f32, center_x: f32, center_y: f32) -> Result<(), TouchError> {
-        if !zoom.is_finite() || zoom < 0.1 || zoom > 10.0 {
+        if !zoom.is_finite() || !(0.1..=10.0).contains(&zoom) {
             return Err(TouchError::InvalidZoom(zoom));
         }
         if !center_x.is_finite() || !center_y.is_finite() {
@@ -258,7 +258,16 @@ impl TouchGestureHandler {
             return Ok(None);
         }
 
-        if !touch.x.is_finite() || !touch.y.is_finite() {
+        // Began and Moved coordinates are validated because they are emitted
+        // verbatim to the host. Ended (like Cancelled above) must always
+        // release the touch even with non-finite coordinates: a viewport that
+        // temporarily collapses (e.g. during rotation) can produce NaN, and
+        // swallowing the release would leave the host mouse button stuck down
+        // and block every future touch. Ended falls back to the last emitted
+        // host coordinates instead.
+        if matches!(touch.phase, TouchPhase::Began | TouchPhase::Moved)
+            && (!touch.x.is_finite() || !touch.y.is_finite())
+        {
             return Err(TouchError::NonFiniteCoordinates(touch.x, touch.y));
         }
 
@@ -349,6 +358,49 @@ impl TouchGestureHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_finite_ended_release_clears_primary_touch_and_emits_mouse_up() {
+        let vp = ViewportState::new(800.0, 600.0).unwrap();
+        let mut handler = TouchGestureHandler::new(vp, TouchMode::DirectTouch);
+        let down = handler
+            .process_touch(TouchPoint {
+                id: 1,
+                x: 400.0,
+                y: 300.0,
+                phase: TouchPhase::Began,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(down.event_type, InputEventType::LeftMouseDown);
+
+        // The client dispatches the release with NaN coordinates after the
+        // viewport collapsed: the release must still emit MouseUp at the last
+        // emitted host coordinates and clear the primary touch.
+        let up = handler
+            .process_touch(TouchPoint {
+                id: 1,
+                x: f32::NAN,
+                y: f32::NAN,
+                phase: TouchPhase::Ended,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(up.event_type, InputEventType::LeftMouseUp);
+        assert_eq!((up.x, up.y), (0.5, 0.5));
+
+        // A later touch must be accepted again instead of being dropped.
+        let next = handler
+            .process_touch(TouchPoint {
+                id: 2,
+                x: 400.0,
+                y: 300.0,
+                phase: TouchPhase::Began,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.event_type, InputEventType::LeftMouseDown);
+    }
 
     #[test]
     fn viewport_transform_at_unit_zoom() {

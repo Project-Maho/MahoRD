@@ -156,12 +156,16 @@ mod tests {
         let mut bar = MobileModifierBar::new();
         bar.toggle_modifier(MobileAccessoryKey::Shift);
 
-        let esc_down = bar.accessory_key_to_input_events(MobileAccessoryKey::Escape, true).unwrap();
+        let esc_down = bar
+            .accessory_key_to_input_events(MobileAccessoryKey::Escape, true)
+            .unwrap();
         assert_eq!(esc_down.event_type, InputEventType::KeyDown);
         assert_eq!(esc_down.key_code, 0x35);
         assert!(esc_down.modifiers.contains(Modifiers::SHIFT));
 
-        let esc_up = bar.accessory_key_to_input_events(MobileAccessoryKey::Escape, false).unwrap();
+        let esc_up = bar
+            .accessory_key_to_input_events(MobileAccessoryKey::Escape, false)
+            .unwrap();
         assert_eq!(esc_up.event_type, InputEventType::KeyUp);
     }
 }

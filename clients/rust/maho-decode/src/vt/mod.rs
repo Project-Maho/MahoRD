@@ -90,7 +90,10 @@ fn copy_cv_pixel_buffer_to_nv12(
         impl Drop for UnlockGuard {
             fn drop(&mut self) {
                 unsafe {
-                    ffi::CVPixelBufferUnlockBaseAddress(self.0, ffi::K_CVPIXEL_BUFFER_LOCK_READ_ONLY);
+                    ffi::CVPixelBufferUnlockBaseAddress(
+                        self.0,
+                        ffi::K_CVPIXEL_BUFFER_LOCK_READ_ONLY,
+                    );
                 }
             }
         }
@@ -187,9 +190,7 @@ impl HevcDecoder {
         HardwareAcceleration::VideoToolbox
     }
 
-    fn create_session(
-        format_desc: ffi::CMVideoFormatDescriptionRef,
-    ) -> Result<Self, DecodeError> {
+    fn create_session(format_desc: ffi::CMVideoFormatDescriptionRef) -> Result<Self, DecodeError> {
         let shared = Arc::new(SharedState::new());
         let raw_context = Arc::into_raw(shared.clone()) as *mut c_void;
 
@@ -199,7 +200,8 @@ impl HevcDecoder {
         };
 
         unsafe {
-            let pixel_format: i32 = ffi::K_CVPIXEL_FORMAT_TYPE_420_YP_CB_CR8_BI_PLANAR_VIDEO_RANGE as i32;
+            let pixel_format: i32 =
+                ffi::K_CVPIXEL_FORMAT_TYPE_420_YP_CB_CR8_BI_PLANAR_VIDEO_RANGE as i32;
             let pixel_format_num = ffi::CFNumberCreate(
                 std::ptr::null(),
                 ffi::K_CFNUMBER_SINT32_TYPE,

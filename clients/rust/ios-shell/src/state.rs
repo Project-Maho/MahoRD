@@ -12,9 +12,7 @@ use maho_app::{
     ClientSession, IpcError, IpcErrorCode, IpcErrorStage, PairingEndpoint, PairingStore,
     ReadySession, SessionConfig, SessionError, SessionEvent, SessionRuntime,
 };
-use maho_mobile::{
-    TouchGestureHandler, TouchMode, TouchPhase, TouchPoint, ViewportState,
-};
+use maho_mobile::{TouchGestureHandler, TouchMode, TouchPhase, TouchPoint, ViewportState};
 use maho_proto::{ControlMessage, InputEvent, InputEventType, Modifiers};
 use maho_render::{AudioOutputEvent, AudioQueue, CpalAudioOutput};
 use serde::{Deserialize, Serialize};
@@ -177,7 +175,10 @@ impl AppState {
             active_connect: Arc::new(Mutex::new(None)),
             discovery: Arc::new(Mutex::new(None)),
             cancel_pending: Arc::new(AtomicBool::new(false)),
-            teardown_coord: Arc::new((Mutex::new(TeardownCoordInner::default()), std::sync::Condvar::new())),
+            teardown_coord: Arc::new((
+                Mutex::new(TeardownCoordInner::default()),
+                std::sync::Condvar::new(),
+            )),
         }
     }
 
@@ -196,10 +197,18 @@ impl AppState {
     }
 
     pub fn inject_audio_event_for_test(&self, event: AudioOutputEvent) -> Result<(), String> {
-        let inner = self.inner.lock().map_err(|_| "State mutex is poisoned".to_string())?;
-        let sender_guard = inner.audio_events_sender.lock().map_err(|_| "Audio events sender mutex is poisoned".to_string())?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| "State mutex is poisoned".to_string())?;
+        let sender_guard = inner
+            .audio_events_sender
+            .lock()
+            .map_err(|_| "Audio events sender mutex is poisoned".to_string())?;
         if let Some(ref sender) = *sender_guard {
-            sender.send(event).map_err(|e| format!("Failed to send audio event: {e}"))
+            sender
+                .send(event)
+                .map_err(|e| format!("Failed to send audio event: {e}"))
         } else {
             Err("No active audio event sender".to_string())
         }
@@ -238,11 +247,15 @@ impl AppState {
         terminal_reason: Option<String>,
     ) -> Result<(), String> {
         let (lock, cvar) = &*self.teardown_coord;
-        let mut coord = lock.lock().map_err(|e| format!("Teardown lock poisoned: {e}"))?;
+        let mut coord = lock
+            .lock()
+            .map_err(|e| format!("Teardown lock poisoned: {e}"))?;
 
         // 1. If another thread is currently tearing down THIS generation, wait for it to finish!
         while coord.in_flight_generation == Some(generation) {
-            coord = cvar.wait(coord).map_err(|e| format!("Teardown condvar poisoned: {e}"))?;
+            coord = cvar
+                .wait(coord)
+                .map_err(|e| format!("Teardown condvar poisoned: {e}"))?;
         }
 
         // 2. If this generation was already reaped:
@@ -252,7 +265,10 @@ impl AppState {
                 return Err(e.clone());
             }
             if target_state == ConnectionState::Idle {
-                let mut inner = self.inner.lock().map_err(|e| format!("State mutex poisoned: {e}"))?;
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|e| format!("State mutex poisoned: {e}"))?;
                 if inner.generation == generation {
                     inner.state = ConnectionState::Idle;
                     inner.session = None;
@@ -267,13 +283,16 @@ impl AppState {
         coord.in_flight_generation = Some(generation);
         drop(coord);
 
-        let (reap_result, applied) = match self.execute_teardown(generation, target_state, terminal_reason) {
-            Ok(applied) => (Ok(()), applied),
-            Err(e) => (Err(e), true),
-        };
+        let (reap_result, applied) =
+            match self.execute_teardown(generation, target_state, terminal_reason) {
+                Ok(applied) => (Ok(()), applied),
+                Err(e) => (Err(e), true),
+            };
 
         // Record completion and wake up all waiting threads:
-        let mut coord = lock.lock().map_err(|e| format!("Teardown lock poisoned: {e}"))?;
+        let mut coord = lock
+            .lock()
+            .map_err(|e| format!("Teardown lock poisoned: {e}"))?;
         coord.in_flight_generation = None;
         // Only claim the completion slot when this teardown actually applied to the current
         // generation: a late worker from a stale generation must never overwrite the record of a
@@ -313,13 +332,18 @@ impl AppState {
 
             // If already fully torn down to Idle, nothing to do.
             // Do not let late errors restore terminal state after idle!
-            if inner.state == ConnectionState::Idle && inner.session.is_none() && inner.worker_handles.is_empty() {
+            if inner.state == ConnectionState::Idle
+                && inner.session.is_none()
+                && inner.worker_handles.is_empty()
+            {
                 return Ok(true);
             }
 
             // Preserve primary terminal reason: if already Disconnected (e.g. from TCP remote close),
             // secondary worker shutdowns (e.g. media receiver unblocking) must not overwrite it.
-            if inner.state == ConnectionState::Disconnected && target_state == ConnectionState::Error {
+            if inner.state == ConnectionState::Disconnected
+                && target_state == ConnectionState::Error
+            {
                 return Ok(true);
             }
 
@@ -354,6 +378,12 @@ impl AppState {
             }
 
             let _ = inner.audio_queue.clear();
+            // Drop the terminated session's audio event sender so Idle/Error
+            // states report no sender instead of writing into an orphaned
+            // channel, and an exiting audio thread can observe disconnection.
+            if let Ok(mut sender_guard) = inner.audio_events_sender.lock() {
+                *sender_guard = None;
+            }
             if let Ok(mut frame_guard) = inner.latest_frame.lock() {
                 *frame_guard = None;
             }
@@ -413,7 +443,9 @@ impl AppState {
         Ok(true)
     }
 
-    pub async fn list_discovered_hosts(&self) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
+    pub async fn list_discovered_hosts(
+        &self,
+    ) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
         let state_clone = self.clone();
         tokio::task::spawn_blocking(move || state_clone.discovery_snapshot_blocking())
             .await
@@ -439,7 +471,9 @@ impl AppState {
         Ok(())
     }
 
-    pub fn discovery_snapshot_blocking(&self) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
+    pub fn discovery_snapshot_blocking(
+        &self,
+    ) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
         let mut disc_guard = self
             .discovery
             .lock()
@@ -511,7 +545,9 @@ impl AppState {
         }
         let frame = inner.latest_frame.lock().ok().and_then(|g| g.clone());
         if frame.is_some() {
-            inner.last_polled_sequence.store(latest_seq, Ordering::Relaxed);
+            inner
+                .last_polled_sequence
+                .store(latest_seq, Ordering::Relaxed);
         }
         Ok(frame)
     }
@@ -700,9 +736,16 @@ impl AppState {
         }
         let _lifecycle_guard = self.lifecycle_lock.lock().await;
         let state_clone = self.clone();
-        tokio::task::spawn_blocking(move || state_clone.connect_blocking(host, tcp_port, udp_port, pin, pairing_id))
-            .await
-            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Runtime, format!("Connect task panicked: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            state_clone.connect_blocking(host, tcp_port, udp_port, pin, pairing_id)
+        })
+        .await
+        .map_err(|e| {
+            IpcError::connection_failed(
+                IpcErrorStage::Runtime,
+                format!("Connect task panicked: {e}"),
+            )
+        })?
     }
 
     fn connect_blocking(
@@ -736,10 +779,9 @@ impl AppState {
         let connect_session_holder = Arc::new(Mutex::new(None));
 
         let current_generation = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned"))?;
+            let mut inner = self.inner.lock().map_err(|_| {
+                IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned")
+            })?;
             inner.generation += 1;
             inner.state = ConnectionState::Connecting;
             inner.host = Some(host.clone());
@@ -784,7 +826,8 @@ impl AppState {
             generation: current_generation,
         };
 
-        let is_cancelled = || cancel_flag.load(Ordering::SeqCst) || self.cancel_pending.load(Ordering::SeqCst);
+        let is_cancelled =
+            || cancel_flag.load(Ordering::SeqCst) || self.cancel_pending.load(Ordering::SeqCst);
 
         if is_cancelled() {
             return Err(IpcError::new(
@@ -795,7 +838,10 @@ impl AppState {
         }
 
         let trimmed_pin = pin.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let trimmed_id = pairing_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let trimmed_id = pairing_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
         if trimmed_pin.is_none() && trimmed_id.is_none() {
             let err = IpcError::pairing_required("PIN required for initial authorization");
@@ -804,10 +850,9 @@ impl AppState {
         }
 
         let custom_store = {
-            let inner = self
-                .inner
-                .lock()
-                .map_err(|_| IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned"))?;
+            let inner = self.inner.lock().map_err(|_| {
+                IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned")
+            })?;
             inner.pairing_store.clone()
         };
 
@@ -816,7 +861,10 @@ impl AppState {
             let store = match custom_store.as_ref() {
                 Some(s) => s.clone(),
                 None => PairingStore::open_default().map_err(|e| {
-                    let err = IpcError::connection_failed(IpcErrorStage::Client, format!("Failed to open pairing store: {e}"));
+                    let err = IpcError::connection_failed(
+                        IpcErrorStage::Client,
+                        format!("Failed to open pairing store: {e}"),
+                    );
                     self.set_error(current_generation, err.message.clone());
                     err
                 })?,
@@ -824,12 +872,17 @@ impl AppState {
             match store.load(id) {
                 Ok(Some(record)) => Some(record),
                 Ok(None) => {
-                    let err = IpcError::pairing_required(format!("Unknown pairing ID '{id}'; PIN required"));
+                    let err = IpcError::pairing_required(format!(
+                        "Unknown pairing ID '{id}'; PIN required"
+                    ));
                     self.set_error(current_generation, err.message.clone());
                     return Err(err);
                 }
                 Err(e) => {
-                    let err = IpcError::connection_failed(IpcErrorStage::Client, format!("Keychain error: {e}"));
+                    let err = IpcError::connection_failed(
+                        IpcErrorStage::Client,
+                        format!("Keychain error: {e}"),
+                    );
                     self.set_error(current_generation, err.message.clone());
                     return Err(err);
                 }
@@ -841,7 +894,10 @@ impl AppState {
         let mut config = match build_session_config(&host, tcp_port, udp_port, "MahoRD iOS") {
             Ok(c) => c,
             Err(e) => {
-                let err = IpcError::connection_failed(IpcErrorStage::Client, format!("Configuration error: {e}"));
+                let err = IpcError::connection_failed(
+                    IpcErrorStage::Client,
+                    format!("Configuration error: {e}"),
+                );
                 self.set_error(current_generation, err.message.clone());
                 return Err(err);
             }
@@ -941,25 +997,28 @@ impl AppState {
         }
 
         // Persist verified endpoint metadata through shared API:
-        let endpoint = PairingEndpoint::new(
-            config.host.clone(),
-            config.tcp_port,
-            config.udp_port,
-        );
+        let endpoint = PairingEndpoint::new(config.host.clone(), config.tcp_port, config.udp_port);
         let store = match custom_store.as_ref() {
             Some(s) => s.clone(),
             None => match PairingStore::open_default() {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = session.disconnect();
-                    let err = IpcError::connection_failed(IpcErrorStage::Client, format!("Failed to open pairing store: {e}"));
+                    let err = IpcError::connection_failed(
+                        IpcErrorStage::Client,
+                        format!("Failed to open pairing store: {e}"),
+                    );
                     self.set_error(current_generation, err.message.clone());
                     self.disconnect_blocking().ok();
                     return Err(err);
                 }
             },
         };
-        match store.remember_endpoint(&ready_session.pairing.id, &ready_session.pairing.key, endpoint) {
+        match store.remember_endpoint(
+            &ready_session.pairing.id,
+            &ready_session.pairing.key,
+            endpoint,
+        ) {
             Ok(persisted) => {
                 if !persisted {
                     tracing::warn!(id = %ready_session.pairing.id, "remember_endpoint returned false (key mismatch or deleted record)");
@@ -967,7 +1026,10 @@ impl AppState {
             }
             Err(e) => {
                 let _ = session.disconnect();
-                let err = IpcError::connection_failed(IpcErrorStage::Client, format!("Failed to persist endpoint metadata: {e}"));
+                let err = IpcError::connection_failed(
+                    IpcErrorStage::Client,
+                    format!("Failed to persist endpoint metadata: {e}"),
+                );
                 self.set_error(current_generation, err.message.clone());
                 self.disconnect_blocking().ok();
                 return Err(err);
@@ -977,10 +1039,9 @@ impl AppState {
         let (audio_init_tx, audio_init_rx) = mpsc::sync_channel::<Result<(), String>>(1);
         let (audio_events_tx, audio_events_rx) = mpsc::sync_channel::<AudioOutputEvent>(128);
         let audio_queue = {
-            let inner = self
-                .inner
-                .lock()
-                .map_err(|_| IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned"))?;
+            let inner = self.inner.lock().map_err(|_| {
+                IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned")
+            })?;
             inner.audio_queue.clone()
         };
 
@@ -1005,10 +1066,9 @@ impl AppState {
         }
 
         let (stop_flag, worker_completions) = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned"))?;
+            let mut inner = self.inner.lock().map_err(|_| {
+                IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned")
+            })?;
             if inner.generation != current_generation || is_cancelled() {
                 drop(tcp_runtime);
                 let _ = session.disconnect();
@@ -1086,15 +1146,18 @@ impl AppState {
                 let err_msg = format!("Failed to spawn supervisor worker: {e}");
                 // The TCP runtime and session are already stored in `inner`; tear them down so the
                 // failed connect does not leak the runtime or leave the session stuck in Ready.
-                let _ = self.handle_terminal_shutdown(current_generation, ConnectionState::Error, Some(err_msg.clone()));
+                let _ = self.handle_terminal_shutdown(
+                    current_generation,
+                    ConnectionState::Error,
+                    Some(err_msg.clone()),
+                );
                 IpcError::connection_failed(IpcErrorStage::Runtime, err_msg)
             })?;
 
         {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned"))?;
+            let mut inner = self.inner.lock().map_err(|_| {
+                IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned")
+            })?;
             inner.worker_handles.push(supervisor_worker);
             if let Ok(mut sender_guard) = inner.audio_events_sender.lock() {
                 *sender_guard = Some(audio_events_tx.clone());
@@ -1166,7 +1229,9 @@ impl AppState {
                         }) => {
                             if let Ok(inner) = state_audio.inner.lock() {
                                 if inner.generation == current_generation {
-                                    inner.audio_samples_played.store(total_consumed_samples, Ordering::Relaxed);
+                                    inner
+                                        .audio_samples_played
+                                        .store(total_consumed_samples, Ordering::Relaxed);
                                 }
                             }
                         }
@@ -1195,15 +1260,21 @@ impl AppState {
                 );
             })
             .map_err(|e| {
-                let _ = self.handle_terminal_shutdown(current_generation, ConnectionState::Error, Some(format!("Failed to spawn audio worker: {e}")));
-                IpcError::connection_failed(IpcErrorStage::Runtime, format!("Failed to spawn audio worker: {e}"))
+                let _ = self.handle_terminal_shutdown(
+                    current_generation,
+                    ConnectionState::Error,
+                    Some(format!("Failed to spawn audio worker: {e}")),
+                );
+                IpcError::connection_failed(
+                    IpcErrorStage::Runtime,
+                    format!("Failed to spawn audio worker: {e}"),
+                )
             })?;
 
         {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned"))?;
+            let mut inner = self.inner.lock().map_err(|_| {
+                IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned")
+            })?;
             inner.worker_handles.push(audio_worker);
         }
 
@@ -1212,12 +1283,20 @@ impl AppState {
                 tracing::info!("iOS CPAL audio output started");
             }
             Ok(Err(e)) => {
-                let _ = self.handle_terminal_shutdown(current_generation, ConnectionState::Error, Some(e.clone()));
+                let _ = self.handle_terminal_shutdown(
+                    current_generation,
+                    ConnectionState::Error,
+                    Some(e.clone()),
+                );
                 return Err(IpcError::connection_failed(IpcErrorStage::Runtime, e));
             }
             Err(e) => {
                 let err_msg = format!("Audio initialization timed out: {e}");
-                let _ = self.handle_terminal_shutdown(current_generation, ConnectionState::Error, Some(err_msg.clone()));
+                let _ = self.handle_terminal_shutdown(
+                    current_generation,
+                    ConnectionState::Error,
+                    Some(err_msg.clone()),
+                );
                 return Err(IpcError::connection_failed(IpcErrorStage::Runtime, err_msg));
             }
         }
@@ -1384,18 +1463,16 @@ impl AppState {
             })?;
 
         {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned"))?;
+            let mut inner = self.inner.lock().map_err(|_| {
+                IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned")
+            })?;
             inner.worker_handles.push(media_worker);
         }
 
         let (current_state, current_last_err, server_w, server_h) = {
-            let inner = self
-                .inner
-                .lock()
-                .map_err(|_| IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned"))?;
+            let inner = self.inner.lock().map_err(|_| {
+                IpcError::connection_failed(IpcErrorStage::Client, "State mutex is poisoned")
+            })?;
             (
                 inner.state,
                 inner.last_error.lock().ok().and_then(|g| g.clone()),
@@ -1405,7 +1482,8 @@ impl AppState {
         };
 
         if current_state != ConnectionState::Ready {
-            let msg = current_last_err.unwrap_or_else(|| "Connection terminated during startup".to_string());
+            let msg = current_last_err
+                .unwrap_or_else(|| "Connection terminated during startup".to_string());
             return Err(IpcError::connection_failed(IpcErrorStage::Runtime, msg));
         }
 
@@ -1435,7 +1513,10 @@ impl AppState {
         }
         let was_first = !inner.first_frame_presented.swap(true, Ordering::SeqCst);
         if was_first {
-            tracing::info!(sequence, "First presented frame verified against decoded sequence");
+            tracing::info!(
+                sequence,
+                "First presented frame verified against decoded sequence"
+            );
         } else {
             tracing::debug!(sequence, "Frame presented report confirmed");
         }
@@ -1491,43 +1572,57 @@ pub fn build_session_config(
 pub fn classify_session_error(err: &SessionError) -> IpcError {
     match err {
         SessionError::PairingRejected(reason) => match reason {
-            maho_proto::PairingRejectReason::DeniedByHost => {
-                IpcError::new(IpcErrorCode::PairingDenied, IpcErrorStage::Preauth, "Connection rejected by host")
-            }
-            maho_proto::PairingRejectReason::LockedOut => {
-                IpcError::new(IpcErrorCode::PairingLockedOut, IpcErrorStage::Preauth, "Host locked out pairing due to excessive attempts")
-            }
-            maho_proto::PairingRejectReason::PairingDisabled => {
-                IpcError::new(IpcErrorCode::PairingDisabled, IpcErrorStage::Preauth, "Host pairing window expired or pairing disabled")
-            }
+            maho_proto::PairingRejectReason::DeniedByHost => IpcError::new(
+                IpcErrorCode::PairingDenied,
+                IpcErrorStage::Preauth,
+                "Connection rejected by host",
+            ),
+            maho_proto::PairingRejectReason::LockedOut => IpcError::new(
+                IpcErrorCode::PairingLockedOut,
+                IpcErrorStage::Preauth,
+                "Host locked out pairing due to excessive attempts",
+            ),
+            maho_proto::PairingRejectReason::PairingDisabled => IpcError::new(
+                IpcErrorCode::PairingDisabled,
+                IpcErrorStage::Preauth,
+                "Host pairing window expired or pairing disabled",
+            ),
         },
-        SessionError::Cancelled => {
-            IpcError::new(IpcErrorCode::Cancelled, IpcErrorStage::Connect, "Connection cancelled")
-        }
+        SessionError::Cancelled => IpcError::new(
+            IpcErrorCode::Cancelled,
+            IpcErrorStage::Connect,
+            "Connection cancelled",
+        ),
         SessionError::PairingNotFound(_) => {
             IpcError::pairing_required("No saved pairing credential found")
         }
-        SessionError::HandshakeAckTimeout => {
-            IpcError::new(IpcErrorCode::HandshakeTimeout, IpcErrorStage::Handshake, "Host did not acknowledge handshake within deadline")
-        }
+        SessionError::HandshakeAckTimeout => IpcError::new(
+            IpcErrorCode::HandshakeTimeout,
+            IpcErrorStage::Handshake,
+            "Host did not acknowledge handshake within deadline",
+        ),
         SessionError::MissingAuthenticatedRegistration => {
             IpcError::incompatible_peer("Host lacks authenticated UDP registration capability")
         }
         SessionError::Tls(maho_net::tls_psk::TlsPskError::Io(io_err)) => {
             classify_io_error(io_err, IpcErrorStage::TlsPsk)
         }
-        SessionError::Tls(tls_err) => {
-            IpcError::new(IpcErrorCode::ConnectionFailed, IpcErrorStage::TlsPsk, format!("TLS connection failed: {tls_err}"))
-        }
-        SessionError::Io(io_err) => {
-            classify_io_error(io_err, IpcErrorStage::Connect)
-        }
-        SessionError::NoAddress => {
-            IpcError::new(IpcErrorCode::NetworkUnreachable, IpcErrorStage::Connect, "Address resolution returned no endpoints")
-        }
-        other => {
-            IpcError::new(IpcErrorCode::ConnectionFailed, IpcErrorStage::Connect, format!("Connection failed: {other}"))
-        }
+        SessionError::Tls(tls_err) => IpcError::new(
+            IpcErrorCode::ConnectionFailed,
+            IpcErrorStage::TlsPsk,
+            format!("TLS connection failed: {tls_err}"),
+        ),
+        SessionError::Io(io_err) => classify_io_error(io_err, IpcErrorStage::Connect),
+        SessionError::NoAddress => IpcError::new(
+            IpcErrorCode::NetworkUnreachable,
+            IpcErrorStage::Connect,
+            "Address resolution returned no endpoints",
+        ),
+        other => IpcError::new(
+            IpcErrorCode::ConnectionFailed,
+            IpcErrorStage::Connect,
+            format!("Connection failed: {other}"),
+        ),
     }
 }
 
@@ -1547,13 +1642,14 @@ fn classify_io_error(err: &std::io::Error, default_stage: IpcErrorStage) -> IpcE
     match err.kind() {
         std::io::ErrorKind::ConnectionRefused
         | std::io::ErrorKind::HostUnreachable
-        | std::io::ErrorKind::NetworkUnreachable => {
-            IpcError::new(IpcErrorCode::NetworkUnreachable, IpcErrorStage::Connect, err_str)
-        }
+        | std::io::ErrorKind::NetworkUnreachable => IpcError::new(
+            IpcErrorCode::NetworkUnreachable,
+            IpcErrorStage::Connect,
+            err_str,
+        ),
         std::io::ErrorKind::TimedOut => {
             IpcError::new(IpcErrorCode::HandshakeTimeout, default_stage, err_str)
         }
         _ => IpcError::new(IpcErrorCode::ConnectionFailed, default_stage, err_str),
     }
 }
-

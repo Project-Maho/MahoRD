@@ -105,7 +105,10 @@ impl LoopbackServer {
             let _ = close_rx.recv();
 
             // Remote clean closure of TCP stream:
-            let _ = stream.ssl_stream().get_ref().shutdown(std::net::Shutdown::Both);
+            let _ = stream
+                .ssl_stream()
+                .get_ref()
+                .shutdown(std::net::Shutdown::Both);
             drop(stream);
             drop(listener);
         });
@@ -187,14 +190,22 @@ async fn test_ios_tcp_disconnect_updates_session_state() {
         }
     }
 
-    assert!(got_supervisor, "Supervisor worker must emit completion signal upon TCP remote close");
-    assert!(got_media, "Media worker must exit and emit completion signal when TCP closes, even with UDP silent");
-    assert!(got_audio, "Audio worker must exit and emit completion signal when TCP closes");
+    assert!(
+        got_supervisor,
+        "Supervisor worker must emit completion signal upon TCP remote close"
+    );
+    assert!(
+        got_media,
+        "Media worker must exit and emit completion signal when TCP closes, even with UDP silent"
+    );
+    assert!(
+        got_audio,
+        "Audio worker must exit and emit completion signal when TCP closes"
+    );
 
     let post_stats = app_state.stats().expect("stats must succeed");
     assert_eq!(
-        post_stats.state,
-        "disconnected",
+        post_stats.state, "disconnected",
         "State must transition to disconnected; last_error={:?}",
         post_stats.last_error
     );
@@ -204,7 +215,10 @@ async fn test_ios_tcp_disconnect_updates_session_state() {
         "Terminal reason must be preserved as remote-closed"
     );
 
-    app_state.disconnect_async().await.expect("clean disconnect");
+    app_state
+        .disconnect_async()
+        .await
+        .expect("clean disconnect");
 }
 
 #[tokio::test]
@@ -228,7 +242,10 @@ async fn test_stale_terminal_event_ignored_when_generation_advances() {
 
     // Generation 2 must be unaffected:
     let stats = app_state.stats().expect("stats");
-    assert_eq!(stats.state, "ready", "Stale terminal event must not modify newer generation state");
+    assert_eq!(
+        stats.state, "ready",
+        "Stale terminal event must not modify newer generation state"
+    );
     assert!(
         stats.last_error.is_none(),
         "Stale terminal event must not overwrite newer generation error"
@@ -254,7 +271,11 @@ impl Drop for PendingConnectServer {
 }
 
 impl PendingConnectServer {
-    fn spawn_holding_handshake(pairing_id: &str, key: &[u8], pending_tx: tokio::sync::oneshot::Sender<()>) -> Self {
+    fn spawn_holding_handshake(
+        pairing_id: &str,
+        key: &[u8],
+        pending_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> Self {
         let key_vec = key.to_vec();
         let psk = PskIdentity::pairing(pairing_id, &key_vec).expect("valid psk identity");
         let tls_server = TlsPskServer::new([psk]).expect("tls server create");
@@ -280,7 +301,10 @@ impl PendingConnectServer {
 
             // Hold connection and wait for cancellation or server drop (event-driven, no sleep):
             let _ = close_rx.recv();
-            let _ = stream.ssl_stream().get_ref().shutdown(std::net::Shutdown::Both);
+            let _ = stream
+                .ssl_stream()
+                .get_ref()
+                .shutdown(std::net::Shutdown::Both);
         });
 
         Self {
@@ -352,7 +376,10 @@ async fn test_canceled_connect_cannot_install_resources() {
     assert!(disconnect_res.is_ok(), "Disconnect must succeed");
 
     let stats = app_state.stats().expect("stats");
-    assert_eq!(stats.state, "idle", "State must remain idle after cancelled connect");
+    assert_eq!(
+        stats.state, "idle",
+        "State must remain idle after cancelled connect"
+    );
 }
 
 #[tokio::test]
@@ -382,7 +409,10 @@ async fn test_cancel_before_native_registration_race() {
         )
         .await;
 
-    assert!(res.is_err(), "Connect must fail when cancelled before registration");
+    assert!(
+        res.is_err(),
+        "Connect must fail when cancelled before registration"
+    );
     let err = res.unwrap_err();
     assert_eq!(
         err.code,
@@ -439,7 +469,10 @@ async fn test_worker_completion_signals_emitted_on_disconnect() {
         }
     }
 
-    assert!(got_supervisor, "Supervisor must emit completion on disconnect");
+    assert!(
+        got_supervisor,
+        "Supervisor must emit completion on disconnect"
+    );
     assert!(got_media, "Media worker must emit completion on disconnect");
     assert!(got_audio, "Audio worker must emit completion on disconnect");
 
@@ -476,7 +509,9 @@ async fn test_audio_error_triggers_generation_aware_session_shutdown() {
 
     // Inject genuine AudioOutputEvent::Error via the production event seam:
     app_state
-        .inject_audio_event_for_test(AudioOutputEvent::Error("Simulated CPAL device error".to_string()))
+        .inject_audio_event_for_test(AudioOutputEvent::Error(
+            "Simulated CPAL device error".to_string(),
+        ))
         .expect("Audio event injection must succeed");
 
     // Supervisor, media, and audio workers must stop:
@@ -539,7 +574,10 @@ async fn test_early_tcp_close_aborts_session_and_cleans_resources() {
             .expect("write ack");
 
         // Immediately close the TCP stream abruptly:
-        let _ = stream.ssl_stream().get_ref().shutdown(std::net::Shutdown::Both);
+        let _ = stream
+            .ssl_stream()
+            .get_ref()
+            .shutdown(std::net::Shutdown::Both);
         drop(stream);
         drop(listener);
     });
@@ -572,7 +610,10 @@ async fn test_early_tcp_close_aborts_session_and_cleans_resources() {
                 }
             }
         }
-        assert!(got_supervisor, "Supervisor worker must complete upon remote TCP close");
+        assert!(
+            got_supervisor,
+            "Supervisor worker must complete upon remote TCP close"
+        );
         let s = app_state.stats().unwrap();
         assert_eq!(s.state, "disconnected");
         assert_eq!(s.last_error.as_deref(), Some("remote-closed"));
@@ -649,7 +690,8 @@ async fn test_duplicate_termination_is_idempotent_and_threadsafe() {
     assert!(matches!(stats.state.as_str(), "idle" | "disconnected"));
 
     // Ensure late errors after Idle do NOT revert back to Error or Disconnected:
-    let _ = app_state.handle_terminal_shutdown(1, ConnectionState::Error, Some("late-error".into()));
+    let _ =
+        app_state.handle_terminal_shutdown(1, ConnectionState::Error, Some("late-error".into()));
     let final_stats = app_state.stats().expect("stats");
     assert_ne!(
         final_stats.state, "error",

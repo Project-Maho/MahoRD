@@ -1,6 +1,6 @@
+use maho_app::{PairingRecord, PairingStoreError};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use maho_app::{PairingRecord, PairingStoreError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -35,24 +35,36 @@ impl MockSecureStorage {
 
 impl SecureStorageBackend for MockSecureStorage {
     fn store_secret(&self, key: &str, secret: &[u8]) -> Result<(), SecureStorageError> {
-        let mut vault = self.vault.lock().map_err(|e| SecureStorageError::PlatformError(e.to_string()))?;
+        let mut vault = self
+            .vault
+            .lock()
+            .map_err(|e| SecureStorageError::PlatformError(e.to_string()))?;
         vault.insert(key.to_string(), secret.to_vec());
         Ok(())
     }
 
     fn retrieve_secret(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
-        let vault = self.vault.lock().map_err(|e| SecureStorageError::PlatformError(e.to_string()))?;
+        let vault = self
+            .vault
+            .lock()
+            .map_err(|e| SecureStorageError::PlatformError(e.to_string()))?;
         Ok(vault.get(key).cloned())
     }
 
     fn delete_secret(&self, key: &str) -> Result<(), SecureStorageError> {
-        let mut vault = self.vault.lock().map_err(|e| SecureStorageError::PlatformError(e.to_string()))?;
+        let mut vault = self
+            .vault
+            .lock()
+            .map_err(|e| SecureStorageError::PlatformError(e.to_string()))?;
         vault.remove(key);
         Ok(())
     }
 
     fn list_keys(&self) -> Result<Vec<String>, SecureStorageError> {
-        let vault = self.vault.lock().map_err(|e| SecureStorageError::PlatformError(e.to_string()))?;
+        let vault = self
+            .vault
+            .lock()
+            .map_err(|e| SecureStorageError::PlatformError(e.to_string()))?;
         Ok(vault.keys().cloned().collect())
     }
 }
@@ -107,7 +119,10 @@ impl MobilePairingStore {
         Ok(records)
     }
 
-    pub fn find_by_host(&self, host_name: &str) -> Result<Option<PairingRecord>, SecureStorageError> {
+    pub fn find_by_host(
+        &self,
+        host_name: &str,
+    ) -> Result<Option<PairingRecord>, SecureStorageError> {
         Ok(self
             .load_all()?
             .into_iter()
@@ -116,7 +131,9 @@ impl MobilePairingStore {
 
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     pub fn default_keychain() -> Self {
-        Self::new(Box::new(IosKeychainStorage::new("com.projectmaho.mahord.pairing")))
+        Self::new(Box::new(IosKeychainStorage::new(
+            "com.projectmaho.mahord.pairing",
+        )))
     }
 
     #[cfg(not(any(target_os = "ios", target_os = "macos")))]
@@ -158,7 +175,10 @@ mod security_ffi {
 
         pub fn SecItemAdd(attributes: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
         pub fn SecItemCopyMatching(query: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
-        pub fn SecItemUpdate(query: CFDictionaryRef, attributesToUpdate: CFDictionaryRef) -> OSStatus;
+        pub fn SecItemUpdate(
+            query: CFDictionaryRef,
+            attributesToUpdate: CFDictionaryRef,
+        ) -> OSStatus;
         pub fn SecItemDelete(query: CFDictionaryRef) -> OSStatus;
     }
 
@@ -236,11 +256,7 @@ fn make_cf_string(s: &str) -> Option<CfWrapper<std::os::raw::c_void>> {
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 fn make_cf_data(bytes: &[u8]) -> Option<CfWrapper<std::os::raw::c_void>> {
     unsafe {
-        let cf = security_ffi::CFDataCreate(
-            std::ptr::null(),
-            bytes.as_ptr(),
-            bytes.len() as isize,
-        );
+        let cf = security_ffi::CFDataCreate(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize);
         if cf.is_null() {
             None
         } else {
@@ -328,45 +344,84 @@ impl IosKeychainStorage {
 impl SecureStorageBackend for IosKeychainStorage {
     fn store_secret(&self, key: &str, secret: &[u8]) -> Result<(), SecureStorageError> {
         unsafe {
-            let service_cf = make_cf_string(&self.service)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFString for service".into()))?;
-            let account_cf = make_cf_string(key)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFString for account".into()))?;
-            let data_cf = make_cf_data(secret)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFData for secret".into()))?;
+            let service_cf = make_cf_string(&self.service).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFString for service".into())
+            })?;
+            let account_cf = make_cf_string(key).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFString for account".into())
+            })?;
+            let data_cf = make_cf_data(secret).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFData for secret".into())
+            })?;
 
             let pairs = [
-                (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-                (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-                (security_ffi::kSecAttrAccount as security_ffi::CFTypeRef, account_cf.0),
-                (security_ffi::kSecValueData as security_ffi::CFTypeRef, data_cf.0),
-                (security_ffi::kSecAttrAccessible as security_ffi::CFTypeRef, security_ffi::kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly),
+                (
+                    security_ffi::kSecClass as security_ffi::CFTypeRef,
+                    security_ffi::kSecClassGenericPassword,
+                ),
+                (
+                    security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                    service_cf.0,
+                ),
+                (
+                    security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                    account_cf.0,
+                ),
+                (
+                    security_ffi::kSecValueData as security_ffi::CFTypeRef,
+                    data_cf.0,
+                ),
+                (
+                    security_ffi::kSecAttrAccessible as security_ffi::CFTypeRef,
+                    security_ffi::kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                ),
             ];
-            let dict = make_cf_dictionary(&pairs)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFDictionary".into()))?;
+            let dict = make_cf_dictionary(&pairs).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFDictionary".into())
+            })?;
 
             let status = security_ffi::SecItemAdd(dict.0, std::ptr::null_mut());
             if status == security_ffi::ERR_SEC_DUPLICATE_ITEM {
                 let query_pairs = [
-                    (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-                    (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-                    (security_ffi::kSecAttrAccount as security_ffi::CFTypeRef, account_cf.0),
+                    (
+                        security_ffi::kSecClass as security_ffi::CFTypeRef,
+                        security_ffi::kSecClassGenericPassword,
+                    ),
+                    (
+                        security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                        service_cf.0,
+                    ),
+                    (
+                        security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                        account_cf.0,
+                    ),
                 ];
-                let query_dict = make_cf_dictionary(&query_pairs)
-                    .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate query CFDictionary".into()))?;
-                let update_pairs = [
-                    (security_ffi::kSecValueData as security_ffi::CFTypeRef, data_cf.0),
-                ];
-                let update_dict = make_cf_dictionary(&update_pairs)
-                    .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate update CFDictionary".into()))?;
+                let query_dict = make_cf_dictionary(&query_pairs).ok_or_else(|| {
+                    SecureStorageError::PlatformError(
+                        "Failed to allocate query CFDictionary".into(),
+                    )
+                })?;
+                let update_pairs = [(
+                    security_ffi::kSecValueData as security_ffi::CFTypeRef,
+                    data_cf.0,
+                )];
+                let update_dict = make_cf_dictionary(&update_pairs).ok_or_else(|| {
+                    SecureStorageError::PlatformError(
+                        "Failed to allocate update CFDictionary".into(),
+                    )
+                })?;
 
                 let update_status = security_ffi::SecItemUpdate(query_dict.0, update_dict.0);
                 if update_status != security_ffi::ERR_SEC_SUCCESS {
-                    return Err(SecureStorageError::PlatformError(format!("SecItemUpdate failed: OSStatus {update_status}")));
+                    return Err(SecureStorageError::PlatformError(format!(
+                        "SecItemUpdate failed: OSStatus {update_status}"
+                    )));
                 }
                 Ok(())
             } else if status != security_ffi::ERR_SEC_SUCCESS {
-                Err(SecureStorageError::PlatformError(format!("SecItemAdd failed: OSStatus {status}")))
+                Err(SecureStorageError::PlatformError(format!(
+                    "SecItemAdd failed: OSStatus {status}"
+                )))
             } else {
                 Ok(())
             }
@@ -375,20 +430,38 @@ impl SecureStorageBackend for IosKeychainStorage {
 
     fn retrieve_secret(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
         unsafe {
-            let service_cf = make_cf_string(&self.service)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFString for service".into()))?;
-            let account_cf = make_cf_string(key)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFString for account".into()))?;
+            let service_cf = make_cf_string(&self.service).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFString for service".into())
+            })?;
+            let account_cf = make_cf_string(key).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFString for account".into())
+            })?;
 
             let query_pairs = [
-                (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-                (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-                (security_ffi::kSecAttrAccount as security_ffi::CFTypeRef, account_cf.0),
-                (security_ffi::kSecReturnData as security_ffi::CFTypeRef, security_ffi::kCFBooleanTrue),
-                (security_ffi::kSecMatchLimit as security_ffi::CFTypeRef, security_ffi::kSecMatchLimitOne),
+                (
+                    security_ffi::kSecClass as security_ffi::CFTypeRef,
+                    security_ffi::kSecClassGenericPassword,
+                ),
+                (
+                    security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                    service_cf.0,
+                ),
+                (
+                    security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                    account_cf.0,
+                ),
+                (
+                    security_ffi::kSecReturnData as security_ffi::CFTypeRef,
+                    security_ffi::kCFBooleanTrue,
+                ),
+                (
+                    security_ffi::kSecMatchLimit as security_ffi::CFTypeRef,
+                    security_ffi::kSecMatchLimitOne,
+                ),
             ];
-            let query = make_cf_dictionary(&query_pairs)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFDictionary".into()))?;
+            let query = make_cf_dictionary(&query_pairs).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFDictionary".into())
+            })?;
 
             let mut result: security_ffi::CFTypeRef = std::ptr::null();
             let status = security_ffi::SecItemCopyMatching(query.0, &mut result);
@@ -396,7 +469,9 @@ impl SecureStorageBackend for IosKeychainStorage {
                 return Ok(None);
             }
             if status != security_ffi::ERR_SEC_SUCCESS {
-                return Err(SecureStorageError::PlatformError(format!("SecItemCopyMatching failed: OSStatus {status}")));
+                return Err(SecureStorageError::PlatformError(format!(
+                    "SecItemCopyMatching failed: OSStatus {status}"
+                )));
             }
             if result.is_null() {
                 return Ok(None);
@@ -409,41 +484,71 @@ impl SecureStorageBackend for IosKeychainStorage {
 
     fn delete_secret(&self, key: &str) -> Result<(), SecureStorageError> {
         unsafe {
-            let service_cf = make_cf_string(&self.service)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFString for service".into()))?;
-            let account_cf = make_cf_string(key)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFString for account".into()))?;
+            let service_cf = make_cf_string(&self.service).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFString for service".into())
+            })?;
+            let account_cf = make_cf_string(key).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFString for account".into())
+            })?;
 
             let query_pairs = [
-                (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-                (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-                (security_ffi::kSecAttrAccount as security_ffi::CFTypeRef, account_cf.0),
+                (
+                    security_ffi::kSecClass as security_ffi::CFTypeRef,
+                    security_ffi::kSecClassGenericPassword,
+                ),
+                (
+                    security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                    service_cf.0,
+                ),
+                (
+                    security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                    account_cf.0,
+                ),
             ];
-            let query = make_cf_dictionary(&query_pairs)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFDictionary".into()))?;
+            let query = make_cf_dictionary(&query_pairs).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFDictionary".into())
+            })?;
 
             let status = security_ffi::SecItemDelete(query.0);
-            if status == security_ffi::ERR_SEC_SUCCESS || status == security_ffi::ERR_SEC_ITEM_NOT_FOUND {
+            if status == security_ffi::ERR_SEC_SUCCESS
+                || status == security_ffi::ERR_SEC_ITEM_NOT_FOUND
+            {
                 Ok(())
             } else {
-                Err(SecureStorageError::PlatformError(format!("SecItemDelete failed: OSStatus {status}")))
+                Err(SecureStorageError::PlatformError(format!(
+                    "SecItemDelete failed: OSStatus {status}"
+                )))
             }
         }
     }
 
     fn list_keys(&self) -> Result<Vec<String>, SecureStorageError> {
         unsafe {
-            let service_cf = make_cf_string(&self.service)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFString for service".into()))?;
+            let service_cf = make_cf_string(&self.service).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFString for service".into())
+            })?;
 
             let query_pairs = [
-                (security_ffi::kSecClass as security_ffi::CFTypeRef, security_ffi::kSecClassGenericPassword),
-                (security_ffi::kSecAttrService as security_ffi::CFTypeRef, service_cf.0),
-                (security_ffi::kSecReturnAttributes as security_ffi::CFTypeRef, security_ffi::kCFBooleanTrue),
-                (security_ffi::kSecMatchLimit as security_ffi::CFTypeRef, security_ffi::kSecMatchLimitAll),
+                (
+                    security_ffi::kSecClass as security_ffi::CFTypeRef,
+                    security_ffi::kSecClassGenericPassword,
+                ),
+                (
+                    security_ffi::kSecAttrService as security_ffi::CFTypeRef,
+                    service_cf.0,
+                ),
+                (
+                    security_ffi::kSecReturnAttributes as security_ffi::CFTypeRef,
+                    security_ffi::kCFBooleanTrue,
+                ),
+                (
+                    security_ffi::kSecMatchLimit as security_ffi::CFTypeRef,
+                    security_ffi::kSecMatchLimitAll,
+                ),
             ];
-            let query = make_cf_dictionary(&query_pairs)
-                .ok_or_else(|| SecureStorageError::PlatformError("Failed to allocate CFDictionary".into()))?;
+            let query = make_cf_dictionary(&query_pairs).ok_or_else(|| {
+                SecureStorageError::PlatformError("Failed to allocate CFDictionary".into())
+            })?;
 
             let mut result: security_ffi::CFTypeRef = std::ptr::null();
             let status = security_ffi::SecItemCopyMatching(query.0, &mut result);
@@ -451,7 +556,9 @@ impl SecureStorageBackend for IosKeychainStorage {
                 return Ok(Vec::new());
             }
             if status != security_ffi::ERR_SEC_SUCCESS {
-                return Err(SecureStorageError::PlatformError(format!("SecItemCopyMatching list failed: OSStatus {status}")));
+                return Err(SecureStorageError::PlatformError(format!(
+                    "SecItemCopyMatching list failed: OSStatus {status}"
+                )));
             }
             if result.is_null() {
                 return Ok(Vec::new());
@@ -462,7 +569,10 @@ impl SecureStorageBackend for IosKeychainStorage {
             for i in 0..count {
                 let dict = security_ffi::CFArrayGetValueAtIndex(wrapper.0, i);
                 if !dict.is_null() {
-                    let account_val = security_ffi::CFDictionaryGetValue(dict, security_ffi::kSecAttrAccount as security_ffi::CFTypeRef);
+                    let account_val = security_ffi::CFDictionaryGetValue(
+                        dict,
+                        security_ffi::kSecAttrAccount as security_ffi::CFTypeRef,
+                    );
                     if !account_val.is_null() {
                         if let Some(key_str) = cf_string_to_string(account_val) {
                             keys.push(key_str);
@@ -521,9 +631,18 @@ mod tests {
         };
         store.save_record(&record).unwrap();
 
-        assert_eq!(store.find_by_host("Workstation").unwrap(), Some(record.clone()));
-        assert_eq!(store.find_by_host("workstation").unwrap(), Some(record.clone()));
-        assert_eq!(store.find_by_host("host-uuid-1234").unwrap(), Some(record.clone()));
+        assert_eq!(
+            store.find_by_host("Workstation").unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(
+            store.find_by_host("workstation").unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(
+            store.find_by_host("host-uuid-1234").unwrap(),
+            Some(record.clone())
+        );
         assert_eq!(store.find_by_host("Laptop").unwrap(), None);
     }
 }

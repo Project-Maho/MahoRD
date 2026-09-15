@@ -30,6 +30,7 @@ struct QueueState {
     samples: VecDeque<f32>,
     volume: f32,
     muted: bool,
+    underrun_samples: u64,
 }
 
 impl Default for AudioQueue {
@@ -39,6 +40,7 @@ impl Default for AudioQueue {
                 samples: VecDeque::with_capacity(AUDIO_QUEUE_CAPACITY),
                 volume: 1.0,
                 muted: false,
+                underrun_samples: 0,
             })),
         }
     }
@@ -62,19 +64,33 @@ impl AudioQueue {
     }
 
     pub fn push_samples(&self, samples: impl IntoIterator<Item = f32>) -> Result<(), AudioError> {
-        // Stage at most 100 ms, outside the callback lock. Even samples that would
-        // be dropped on overflow must be validated before committing anything.
+        // Stage at most 100 ms, outside the callback lock. Every input sample
+        // is validated (invalid input never changes the queue), but once
+        // staging is full each new sample overwrites the oldest slot in place
+        // instead of shifting the deque; a single rotation afterwards restores
+        // newest-wins order.
         let mut pending = VecDeque::with_capacity(AUDIO_QUEUE_CAPACITY);
+        let mut ring = 0usize;
+        let mut overflowed = false;
         let mut input = samples.into_iter();
         while let Some(left) = input.next() {
             let right = input.next().ok_or(AudioError::MisalignedSamples)?;
             if !left.is_finite() || !right.is_finite() {
                 return Err(AudioError::NonFinitePcm);
             }
-            if pending.len() == AUDIO_QUEUE_CAPACITY {
-                pending.drain(..AUDIO_CHANNELS as usize);
+            if pending.len() < AUDIO_QUEUE_CAPACITY {
+                pending.push_back(left);
+                pending.push_back(right);
+            } else {
+                pending[ring] = left;
+                ring = (ring + 1) % AUDIO_QUEUE_CAPACITY;
+                pending[ring] = right;
+                ring = (ring + 1) % AUDIO_QUEUE_CAPACITY;
+                overflowed = true;
             }
-            pending.extend([left, right]);
+        }
+        if overflowed {
+            pending.rotate_left(ring);
         }
         self.append_validated(pending.into_iter())
     }
@@ -90,6 +106,15 @@ impl AudioQueue {
         state.samples.drain(..overflow);
         state.samples.extend(samples.skip(skip));
         Ok(())
+    }
+
+    /// Cumulative output slots rendered without queued PCM (underruns).
+    pub fn underrun_samples(&self) -> Result<u64, AudioError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| AudioError::Poisoned)?
+            .underrun_samples)
     }
 
     pub fn queued_samples(&self) -> Result<usize, AudioError> {
@@ -127,7 +152,9 @@ impl AudioQueue {
     }
 
     /// Fill complete stereo frames, zero-filling underrun. Mute still consumes PCM.
-    /// Returns samples consumed. An odd-sized output is rejected without mutation.
+    /// Returns samples consumed; underrun slots are counted in
+    /// [`AudioQueue::underrun_samples`]. An odd-sized output is rejected
+    /// without mutation.
     pub fn drain_into(&self, output: &mut [f32]) -> Result<usize, AudioError> {
         if output.len() % AUDIO_CHANNELS as usize != 0 {
             return Err(AudioError::MisalignedSamples);
@@ -140,6 +167,7 @@ impl AudioQueue {
                 *destination = sample * gain;
                 consumed += 1;
             } else {
+                state.underrun_samples += 1;
                 *destination = 0.0;
             }
         }
@@ -219,6 +247,7 @@ pub enum AudioOutputEvent {
 pub struct AudioOutputStatus {
     pub callback_count: u64,
     pub consumed_samples: u64,
+    pub underrun_samples: u64,
     pub error_count: u64,
     pub last_error: Option<String>,
 }
@@ -268,6 +297,9 @@ impl CallbackState {
                 .expect("private callback status lock poisoned");
             status.callback_count += 1;
             status.consumed_samples += consumed as u64;
+            if let Ok(underrun_samples) = queue.underrun_samples() {
+                status.underrun_samples = underrun_samples;
+            }
             status.consumed_samples
         };
         self.notify(AudioOutputEvent::Callback {
@@ -437,22 +469,26 @@ pub fn activate_ios_audio_session() -> Result<(), AudioError> {
             std::mem::transmute(objc_msgSend as *const ());
         let session = msg_send_cls(cls, sel_shared);
         if session.is_null() {
-            return Err(AudioError::Device("AVAudioSession sharedInstance is null".into()));
+            return Err(AudioError::Device(
+                "AVAudioSession sharedInstance is null".into(),
+            ));
         }
 
         let nsstring_cls = objc_getClass(b"NSString\0".as_ptr() as *const c_char);
         let sel_string_with_utf8 =
             sel_registerName(b"stringWithUTF8String:\0".as_ptr() as *const c_char);
-        let msg_send_str: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> *mut c_void =
-            std::mem::transmute(objc_msgSend as *const ());
+        let msg_send_str: unsafe extern "C" fn(
+            *mut c_void,
+            *mut c_void,
+            *const c_char,
+        ) -> *mut c_void = std::mem::transmute(objc_msgSend as *const ());
         let category = msg_send_str(
             nsstring_cls,
             sel_string_with_utf8,
             b"AVAudioSessionCategoryPlayback\0".as_ptr() as *const c_char,
         );
 
-        let sel_set_category =
-            sel_registerName(b"setCategory:error:\0".as_ptr() as *const c_char);
+        let sel_set_category = sel_registerName(b"setCategory:error:\0".as_ptr() as *const c_char);
         let mut err: *mut c_void = std::ptr::null_mut();
         let msg_send_set_cat: unsafe extern "C" fn(
             *mut c_void,
@@ -462,7 +498,9 @@ pub fn activate_ios_audio_session() -> Result<(), AudioError> {
         ) -> bool = std::mem::transmute(objc_msgSend as *const ());
         let cat_ok = msg_send_set_cat(session, sel_set_category, category, &mut err);
         if !cat_ok {
-            return Err(AudioError::Device("Failed to set AVAudioSessionCategoryPlayback".into()));
+            return Err(AudioError::Device(
+                "Failed to set AVAudioSessionCategoryPlayback".into(),
+            ));
         }
 
         let sel_set_active = sel_registerName(b"setActive:error:\0".as_ptr() as *const c_char);
@@ -474,7 +512,9 @@ pub fn activate_ios_audio_session() -> Result<(), AudioError> {
         ) -> bool = std::mem::transmute(objc_msgSend as *const ());
         let active_ok = msg_send_set_active(session, sel_set_active, true, &mut err);
         if !active_ok {
-            return Err(AudioError::Device("Failed to activate AVAudioSession".into()));
+            return Err(AudioError::Device(
+                "Failed to activate AVAudioSession".into(),
+            ));
         }
     }
     Ok(())
@@ -619,5 +659,25 @@ mod tests {
             assert_eq!(queue.queued_samples().unwrap(), 0);
         }
         assert_eq!(total_consumed, sample_count);
+    }
+
+    #[test]
+    fn underrun_slots_are_counted_in_queue_state_and_status() {
+        let queue = AudioQueue::default();
+        queue.push_samples([0.125, -0.25]).unwrap();
+        let mut output = [0.0; 6];
+        assert_eq!(queue.drain_into(&mut output).unwrap(), 2);
+        assert_eq!(queue.underrun_samples().unwrap(), 4);
+
+        let (sender, receiver) = sync_channel(1);
+        let callbacks = CallbackState {
+            status: Mutex::default(),
+            events: Some(sender),
+        };
+        callbacks.render(&queue, &mut output); // All six slots underrun again.
+        let status = callbacks.status.lock().unwrap().clone();
+        assert_eq!(status.consumed_samples, 0);
+        assert_eq!(status.underrun_samples, 10);
+        drop(receiver);
     }
 }

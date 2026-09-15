@@ -529,13 +529,19 @@ pub use vt::HevcDecoder;
 
 #[cfg(all(
     not(feature = "ffmpeg"),
-    not(all(feature = "ios-videotoolbox", any(target_os = "ios", target_os = "macos")))
+    not(all(
+        feature = "ios-videotoolbox",
+        any(target_os = "ios", target_os = "macos")
+    ))
 ))]
 pub struct HevcDecoder;
 
 #[cfg(all(
     not(feature = "ffmpeg"),
-    not(all(feature = "ios-videotoolbox", any(target_os = "ios", target_os = "macos")))
+    not(all(
+        feature = "ios-videotoolbox",
+        any(target_os = "ios", target_os = "macos")
+    ))
 ))]
 impl HevcDecoder {
     pub fn new(_extradata: &[u8]) -> Result<Self, DecodeError> {

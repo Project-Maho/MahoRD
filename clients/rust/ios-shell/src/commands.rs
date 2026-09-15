@@ -15,7 +15,9 @@ pub struct TouchEventPayload {
 }
 
 #[tauri::command]
-pub async fn list_hosts(state: State<'_, AppState>) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
+pub async fn list_hosts(
+    state: State<'_, AppState>,
+) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
     state.list_discovered_hosts().await
 }
 
@@ -56,20 +58,29 @@ pub async fn connect(
 ) -> Result<SessionStats, IpcError> {
     if let Some(ref p) = pin {
         let trimmed_pin = p.trim();
-        if !trimmed_pin.is_empty() && (trimmed_pin.len() != 8 || !trimmed_pin.chars().all(|c| c.is_ascii_digit())) {
+        if !trimmed_pin.is_empty()
+            && (trimmed_pin.len() != 8 || !trimmed_pin.chars().all(|c| c.is_ascii_digit()))
+        {
             return Err(IpcError::invalid_pin("PIN must be exactly 8 ASCII digits"));
         }
     }
     let trimmed_pin = pin.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let trimmed_id = pairing_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let trimmed_id = pairing_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     if trimmed_pin.is_none() && trimmed_id.is_none() {
-        return Err(IpcError::pairing_required("PIN required for initial authorization"));
+        return Err(IpcError::pairing_required(
+            "PIN required for initial authorization",
+        ));
     }
 
     let _ = build_session_config(&host, tcp_port, udp_port, "MahoRD iOS")
         .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, e))?;
-    state.connect_async(host, tcp_port, udp_port, pin, pairing_id).await
+    state
+        .connect_async(host, tcp_port, udp_port, pin, pairing_id)
+        .await
 }
 
 #[tauri::command]

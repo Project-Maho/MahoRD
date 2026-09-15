@@ -109,7 +109,8 @@ impl MobileLifecycleManager {
     }
 
     pub fn background_duration(&self) -> Duration {
-        if self.state == AppLifecycleState::Background || self.state == AppLifecycleState::Suspended {
+        if self.state == AppLifecycleState::Background || self.state == AppLifecycleState::Suspended
+        {
             self.last_state_change.elapsed()
         } else {
             Duration::ZERO

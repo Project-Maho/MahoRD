@@ -26,7 +26,8 @@ pub fn repack_nv12_frame(frame: &Nv12Frame, sequence: u64) -> Vec<u8> {
             let dst_start = row * width;
             if src_start < frame.y_plane.len() {
                 let to_copy = src_end - src_start;
-                y_dest[dst_start..dst_start + to_copy].copy_from_slice(&frame.y_plane[src_start..src_end]);
+                y_dest[dst_start..dst_start + to_copy]
+                    .copy_from_slice(&frame.y_plane[src_start..src_end]);
             }
         }
     }
@@ -42,7 +43,8 @@ pub fn repack_nv12_frame(frame: &Nv12Frame, sequence: u64) -> Vec<u8> {
             let dst_start = row * width;
             if src_start < frame.uv_plane.len() {
                 let to_copy = src_end - src_start;
-                uv_dest[dst_start..dst_start + to_copy].copy_from_slice(&frame.uv_plane[src_start..src_end]);
+                uv_dest[dst_start..dst_start + to_copy]
+                    .copy_from_slice(&frame.uv_plane[src_start..src_end]);
             }
         }
     }

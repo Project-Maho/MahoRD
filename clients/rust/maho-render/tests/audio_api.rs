@@ -82,8 +82,13 @@ fn native_public_api_retains_cpal_types_and_entry_points() {
     let _: fn(&CpalAudioOutput) -> &cpal::Stream = CpalAudioOutput::stream;
     let _: fn(&CpalAudioOutput) -> Result<AudioOutputStatus, AudioError> = CpalAudioOutput::status;
     let _: fn(&CpalAudioOutput) -> Result<(), AudioError> = CpalAudioOutput::clear;
-    assert!(matches!(
-        AudioError::UnsupportedSampleFormat(cpal::SampleFormat::I16),
+    // Exercise the real error value carried across the public API: the variant
+    // must retain its cpal payload and render the sample format through Display.
+    let error = AudioError::UnsupportedSampleFormat(cpal::SampleFormat::I16);
+    assert!(format!("{error}").contains("I16"));
+    let error = AudioError::UnsupportedSampleFormat(cpal::SampleFormat::F32);
+    assert!(!matches!(
+        error,
         AudioError::UnsupportedSampleFormat(cpal::SampleFormat::I16)
     ));
 }

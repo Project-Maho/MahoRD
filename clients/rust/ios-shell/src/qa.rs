@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use maho_app::{PairingRecord, PairingStore};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
