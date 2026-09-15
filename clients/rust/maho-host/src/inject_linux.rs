@@ -17,7 +17,7 @@
 //! `sudo usermod -aG uinput $USER`, load `uinput`, reload udev rules, and log
 //! out/in. The process must never run setuid or as root merely for injection.
 
-use std::io;
+use std::{collections::HashSet, io};
 
 use evdev::{
     uinput::VirtualDevice, AbsInfo, AbsoluteAxisCode, AbsoluteAxisEvent, AttributeSet, EventType,
@@ -331,6 +331,7 @@ pub struct LinuxInputInjector {
     keyboard: VirtualDevice,
     geometry: OutputGeometry,
     modifiers: Modifiers,
+    held_keys: HashSet<KeyCode>,
 }
 
 impl LinuxInputInjector {
@@ -402,6 +403,7 @@ impl LinuxInputInjector {
             keyboard,
             geometry,
             modifiers: Modifiers::empty(),
+            held_keys: HashSet::new(),
         })
     }
 
@@ -492,16 +494,21 @@ impl LinuxInputInjector {
                 ];
                 let _ = self.pointer.emit(&pointer_events);
                 let mut kb_events = Vec::new();
-                for &modifier in &[
-                    Modifiers::SHIFT,
-                    Modifiers::CONTROL,
-                    Modifiers::OPTION,
-                    Modifiers::COMMAND,
-                    Modifiers::CAPS_LOCK,
+                for key in self.held_keys.drain() {
+                    kb_events.push(InputEvent::new(EventType::KEY.0, key.code(), 0));
+                }
+                for key in [
+                    KeyCode::KEY_LEFTSHIFT,
+                    KeyCode::KEY_RIGHTSHIFT,
+                    KeyCode::KEY_LEFTCTRL,
+                    KeyCode::KEY_RIGHTCTRL,
+                    KeyCode::KEY_LEFTALT,
+                    KeyCode::KEY_RIGHTALT,
+                    KeyCode::KEY_LEFTMETA,
+                    KeyCode::KEY_RIGHTMETA,
+                    KeyCode::KEY_CAPSLOCK,
                 ] {
-                    if let Some(key) = modifier_key(modifier) {
-                        kb_events.push(InputEvent::new(EventType::KEY.0, key.code(), 0));
-                    }
+                    kb_events.push(InputEvent::new(EventType::KEY.0, key.code(), 0));
                 }
                 self.modifiers = Modifiers::empty();
                 if !kb_events.is_empty() {
@@ -573,6 +580,11 @@ impl LinuxInputInjector {
                         i32::from(is_down),
                     ));
                     self.keyboard.emit(&events)?;
+                    if is_down {
+                        self.held_keys.insert(key);
+                    } else {
+                        self.held_keys.remove(&key);
+                    }
                 }
                 Ok(())
             }
@@ -637,10 +649,16 @@ fn scroll_units(delta: f32) -> i32 {
 
 impl Drop for LinuxInputInjector {
     fn drop(&mut self) {
-        let releases = modifier_events(self.modifiers, Modifiers::empty());
-        if !releases.is_empty() {
-            let _ = self.keyboard.emit(&releases);
-        }
+        let reset = WireInputEvent {
+            event_type: InputEventType::Reset,
+            x: 0.0,
+            y: 0.0,
+            key_code: 0,
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+        let _ = self.inject(&reset);
     }
 }
 
