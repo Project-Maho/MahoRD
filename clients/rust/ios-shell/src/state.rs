@@ -251,11 +251,11 @@ impl AppState {
             .lock()
             .map_err(|e| format!("Teardown lock poisoned: {e}"))?;
 
-        // 1. If another thread is currently tearing down THIS generation, wait for it to finish!
-        while coord.in_flight_generation == Some(generation) {
-            coord = cvar
-                .wait(coord)
-                .map_err(|e| format!("Teardown condvar poisoned: {e}"))?;
+        // 1. If another thread is currently tearing down THIS generation, do NOT block:
+        // teardown is already in flight. Blocking on a condvar while the teardown owner is
+        // joining worker threads would cause a circular deadlock.
+        if coord.in_flight_generation == Some(generation) {
+            return Ok(());
         }
 
         // 2. If this generation was already reaped:
@@ -658,8 +658,9 @@ impl AppState {
     }
 
     pub fn handle_key(&self, key_code: u16, down: bool, modifiers_bits: u16) -> Result<(), String> {
-        if key_code == 0 {
-            return Err("Invalid key code 0".to_string());
+        // macOS virtual key codes range from 0 to 127; 0 is 'A' (kVK_ANSI_A).
+        if key_code > 127 {
+            return Err(format!("Invalid key code {key_code}"));
         }
         const VALID_MODIFIERS_MASK: u16 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4);
         if modifiers_bits & !VALID_MODIFIERS_MASK != 0 {

@@ -169,7 +169,11 @@ fn touch_cancellation_emits_release() {
 fn key_validation_rejects_invalid_inputs() {
     let state = AppState::new();
 
-    assert!(state.handle_key(0, true, 0).is_err());
+    // Keycode 0 is the valid macOS virtual keycode for 'A' (kVK_ANSI_A)
+    assert!(state.handle_key(0, true, 0).is_ok());
+    // Keycode > 127 is invalid
+    assert!(state.handle_key(128, true, 0).is_err());
+    // Invalid modifier bits
     assert!(state.handle_key(53, true, 0x8000).is_err());
 
     let valid_res = state.handle_key(53, true, Modifiers::SHIFT.bits());
@@ -546,4 +550,16 @@ fn test_inject_audio_event_seam_and_error_handling() {
         maho_render::AudioOutputEvent::Error(msg) => assert_eq!(msg, "real-audio-failure"),
         _ => panic!("Expected Error event"),
     }
+}
+
+#[test]
+fn key_code_zero_accepted_as_valid_key() {
+    let app_state = AppState::new();
+    // Keycode 0 is the macOS virtual key for 'A'; must be accepted, not rejected as invalid
+    let res = app_state.handle_key(0, true, 0);
+    assert!(res.is_ok());
+
+    // Out of range keycode > 127 is rejected
+    let res_invalid = app_state.handle_key(128, true, 0);
+    assert_eq!(res_invalid, Err("Invalid key code 128".to_string()));
 }
