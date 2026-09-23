@@ -56,7 +56,9 @@ pub async fn start_client_bridge(
     let tcp_listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|error| error.to_string())?;
-    let local_tcp = tcp_listener.local_addr().map_err(|error| error.to_string())?;
+    let local_tcp = tcp_listener
+        .local_addr()
+        .map_err(|error| error.to_string())?;
     let udp = UdpSocket::bind("127.0.0.1:0")
         .await
         .map_err(|error| error.to_string())?;
@@ -159,9 +161,7 @@ pub async fn start_client_bridge(
 }
 
 async fn wait_connected(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<TcpStream>,
-    >,
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {

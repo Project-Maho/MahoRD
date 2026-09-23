@@ -12,8 +12,8 @@ pub mod latency;
 pub mod mcp_server;
 mod media;
 mod pairing;
-pub mod relay;
 mod receiver_stats;
+pub mod relay;
 mod session;
 
 pub use abr::*;

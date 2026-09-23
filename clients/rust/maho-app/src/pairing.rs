@@ -53,7 +53,11 @@ pub struct PairingRecord {
     pub endpoint_aliases: Vec<PairingEndpoint>,
     #[serde(default, rename = "relayUrl", skip_serializing_if = "Option::is_none")]
     pub relay_url: Option<String>,
-    #[serde(default, rename = "relayHostId", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "relayHostId",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub relay_host_id: Option<String>,
 }
 
@@ -1621,7 +1625,10 @@ mod tests {
         record.relay_url = Some("wss://relay.example".to_owned());
         record.relay_host_id = Some("host-1".to_owned());
         let json = serde_json::to_string(&record).expect("serialize");
-        assert!(json.contains("\"relayUrl\":\"wss://relay.example\"") || json.contains("\"relayUrl\": \"wss://relay.example\""));
+        assert!(
+            json.contains("\"relayUrl\":\"wss://relay.example\"")
+                || json.contains("\"relayUrl\": \"wss://relay.example\"")
+        );
         let parsed: PairingRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.relay_url.as_deref(), Some("wss://relay.example"));
         assert_eq!(parsed.relay_host_id.as_deref(), Some("host-1"));

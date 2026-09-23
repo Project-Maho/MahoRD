@@ -16,8 +16,8 @@ use axum::{
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use maho_proto::{
-    decode_relay_frame, relay_host_id_ok, relay_token_matches, RelayControl, RELAY_FRAME_HEADER_LEN,
-    RELAY_MAX_PAYLOAD_LEN, RELAY_MAX_SESSIONS_PER_HOST,
+    decode_relay_frame, relay_host_id_ok, relay_token_matches, RelayControl,
+    RELAY_FRAME_HEADER_LEN, RELAY_MAX_PAYLOAD_LEN, RELAY_MAX_SESSIONS_PER_HOST,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -163,9 +163,8 @@ async fn connect_route(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     let limit = state.inner.config.max_payload_len + RELAY_FRAME_HEADER_LEN + 64;
-    ws.max_message_size(limit).on_upgrade(move |socket| {
-        client_socket(socket, state, host_id, peer.ip())
-    })
+    ws.max_message_size(limit)
+        .on_upgrade(move |socket| client_socket(socket, state, host_id, peer.ip()))
 }
 
 fn text_message(control: &RelayControl) -> Result<Message, serde_json::Error> {
@@ -266,7 +265,12 @@ async fn host_socket(mut socket: WebSocket, state: AppState) {
     let _ = writer.await;
 }
 
-fn handle_host_text(state: &AppState, host_id: &str, text: &str, tx: &mpsc::UnboundedSender<Message>) {
+fn handle_host_text(
+    state: &AppState,
+    host_id: &str,
+    text: &str,
+    tx: &mpsc::UnboundedSender<Message>,
+) {
     let Ok(control) = serde_json::from_str::<RelayControl>(text) else {
         return;
     };
@@ -280,7 +284,11 @@ fn handle_host_text(state: &AppState, host_id: &str, text: &str, tx: &mpsc::Unbo
                 if session.host_id != host_id {
                     return;
                 }
-                session.accept_tx.lock().ok().and_then(|mut guard| guard.take())
+                session
+                    .accept_tx
+                    .lock()
+                    .ok()
+                    .and_then(|mut guard| guard.take())
             };
             if let Some(sender) = sender {
                 let _ = sender.send(());
@@ -367,8 +375,7 @@ async fn client_socket(mut socket: WebSocket, state: AppState, host_id: String, 
             .await;
         return;
     };
-    if claimed != host_id
-        || !relay_token_matches(&state.inner.config.auth_secret, &host_id, &token)
+    if claimed != host_id || !relay_token_matches(&state.inner.config.auth_secret, &host_id, &token)
     {
         let _ = socket
             .send(error_message("unauthorized", "invalid token"))
@@ -535,7 +542,10 @@ mod tests {
 
     use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
     use futures_util::{SinkExt, StreamExt};
-    use maho_proto::{encode_relay_frame, relay_token, RelayControl, RELAY_CHANNEL_TCP, RELAY_CHANNEL_UDP, RELAY_MAX_PAYLOAD_LEN};
+    use maho_proto::{
+        encode_relay_frame, relay_token, RelayControl, RELAY_CHANNEL_TCP, RELAY_CHANNEL_UDP,
+        RELAY_MAX_PAYLOAD_LEN,
+    };
     use tokio::net::TcpListener;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use uuid::Uuid;
@@ -557,7 +567,11 @@ mod tests {
         addr
     }
 
-    async fn connect(addr: SocketAddr, path: &str) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    async fn connect(
+        addr: SocketAddr,
+        path: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         let (stream, _) = connect_async(format!("ws://{addr}{path}"))
             .await
             .expect("connect");
@@ -637,11 +651,15 @@ mod tests {
         let tcp = b"tcp-from-client";
         let udp = b"udp-from-client";
         client
-            .send(WsMessage::Binary(frame(session, RELAY_CHANNEL_TCP, tcp).into()))
+            .send(WsMessage::Binary(
+                frame(session, RELAY_CHANNEL_TCP, tcp).into(),
+            ))
             .await
             .unwrap();
         client
-            .send(WsMessage::Binary(frame(session, RELAY_CHANNEL_UDP, udp).into()))
+            .send(WsMessage::Binary(
+                frame(session, RELAY_CHANNEL_UDP, udp).into(),
+            ))
             .await
             .unwrap();
         let got_tcp = next_binary(&mut host).await;
@@ -651,12 +669,16 @@ mod tests {
 
         let back_tcp = b"tcp-from-host";
         let back_udp = b"udp-from-host";
-        host.send(WsMessage::Binary(frame(session, RELAY_CHANNEL_TCP, back_tcp).into()))
-            .await
-            .unwrap();
-        host.send(WsMessage::Binary(frame(session, RELAY_CHANNEL_UDP, back_udp).into()))
-            .await
-            .unwrap();
+        host.send(WsMessage::Binary(
+            frame(session, RELAY_CHANNEL_TCP, back_tcp).into(),
+        ))
+        .await
+        .unwrap();
+        host.send(WsMessage::Binary(
+            frame(session, RELAY_CHANNEL_UDP, back_udp).into(),
+        ))
+        .await
+        .unwrap();
         let got_back_tcp = next_binary(&mut client).await;
         let got_back_udp = next_binary(&mut client).await;
         assert_eq!(decode_relay_frame(&got_back_tcp).unwrap().payload, back_tcp);
@@ -745,7 +767,8 @@ mod tests {
             ))
             .await
             .unwrap();
-            let connected: RelayControl = serde_json::from_str(&next_text(&mut client).await).unwrap();
+            let connected: RelayControl =
+                serde_json::from_str(&next_text(&mut client).await).unwrap();
             assert!(matches!(connected, RelayControl::Connected));
             clients.push(client);
         }
