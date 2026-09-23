@@ -4,6 +4,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -56,6 +57,8 @@ pub const DEFAULT_TCP_PORT: u16 = 19_730;
 pub const DEFAULT_UDP_PORT: u16 = 19_731;
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+pub const SESSION_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(300);
 /// The shared codec remains available through both legacy host paths.
 ///
@@ -89,6 +92,73 @@ const SWIFT_REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
 pub static SERVER_ACCEPTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub static SERVER_TLS_SUCCESSES: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
+pub static SERVER_LOOP_ITERATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Pure session activity watch used by the watchdog thread to detect stalled
+/// sessions. It does not hold sockets or streams, making it trivially unit-testable.
+pub(crate) struct SessionWatch {
+    origin: Instant,
+    progress_ms: AtomicU64,
+    timeout: Duration,
+    aborted: AtomicBool,
+}
+
+impl SessionWatch {
+    pub(crate) fn new(timeout: Duration) -> Self {
+        let origin = Instant::now();
+        Self {
+            origin,
+            progress_ms: AtomicU64::new(0),
+            timeout,
+            aborted: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn tick(&self, now: Instant) {
+        let elapsed_ms = now.saturating_duration_since(self.origin).as_millis() as u64;
+        self.progress_ms.store(elapsed_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn idle(&self, now: Instant) -> Duration {
+        let now_ms = now.saturating_duration_since(self.origin).as_millis() as u64;
+        let last_ms = self.progress_ms.load(Ordering::Relaxed);
+        Duration::from_millis(now_ms.saturating_sub(last_ms))
+    }
+
+    pub(crate) fn is_aborted(&self) -> bool {
+        self.aborted.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn abort(&self) {
+        self.aborted.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+/// Pure decision predicate for the session stall watchdog.
+pub(crate) fn watchdog_should_abort(finished: bool, idle: Duration, timeout: Duration) -> bool {
+    !finished && idle >= timeout
+}
+
+struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct FinishedGuard(Arc<AtomicBool>);
+
+impl Drop for FinishedGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
 #[path = "host_trace.rs"]
 pub(crate) mod host_trace;
 
@@ -382,8 +452,14 @@ impl HostConfig {
         pairing_store: PairingStore,
         output_name: Option<String>,
     ) -> Result<Self, SessionError> {
+        // A pinned output the compositor no longer advertises must not stop the daemon
+        // from starting. The dimension probe follows the same fallback the per-session
+        // media path uses, while the configured pin is preserved so the pinned output is
+        // preferred again as soon as it returns.
+        let probe_output =
+            reprobe_output_if_missing(output_name.as_deref(), probe_hyprland_monitors().as_ref());
         let config = LinuxCaptureConfig {
-            output_name: output_name.clone(),
+            output_name: probe_output,
             ..LinuxCaptureConfig::default()
         };
         let capture = LinuxCapture::connect(config)
@@ -573,6 +649,109 @@ pub fn resolve_output_target(
     }
     let monitors = monitors?;
     select_focused_output(monitors)
+}
+
+/// Returns true if the output name represents a virtual/headless output.
+///
+/// Compositors like Hyprland create virtual outputs named `HEADLESS-N` (e.g.,
+/// `HEADLESS-1`). If a physical monitor drops transiently, we must avoid
+/// falling back to a virtual output that displays a blank virtual screen when a
+/// real non-virtual monitor is available.
+#[cfg(any(target_os = "linux", test))]
+pub fn output_is_virtual(name: &str) -> bool {
+    name.starts_with("HEADLESS")
+}
+
+/// Fallback output selector when a pinned output is missing.
+///
+/// Priority:
+/// 1. Focused monitor, if not virtual;
+/// 2. Otherwise the first non-virtual monitor;
+/// 3. Otherwise the focused monitor;
+/// 4. Otherwise the first monitor;
+/// 5. Otherwise None.
+#[cfg(any(target_os = "linux", test))]
+fn select_fallback_output(monitors: &serde_json::Value) -> Option<String> {
+    let array = monitors.as_array()?;
+
+    // 1. Focused monitor, if not virtual
+    let focused = array
+        .iter()
+        .find(|m| m.get("focused").and_then(serde_json::Value::as_bool) == Some(true))
+        .and_then(|m| m.get("name"))
+        .and_then(serde_json::Value::as_str);
+
+    if let Some(name) = focused {
+        if !output_is_virtual(name) {
+            return Some(name.to_owned());
+        }
+    }
+
+    // 2. First non-virtual monitor
+    if let Some(name) = array
+        .iter()
+        .filter_map(|m| m.get("name").and_then(serde_json::Value::as_str))
+        .find(|name| !output_is_virtual(name))
+    {
+        return Some(name.to_owned());
+    }
+
+    // 3. Focused monitor (even if virtual)
+    if let Some(name) = focused {
+        return Some(name.to_owned());
+    }
+
+    // 4. First monitor (even if virtual)
+    if let Some(name) = array
+        .iter()
+        .find_map(|m| m.get("name").and_then(serde_json::Value::as_str))
+    {
+        return Some(name.to_owned());
+    }
+
+    // 5. None
+    None
+}
+
+/// Re-probes the effective output name when a pinned output is missing.
+///
+/// A pinned output that the compositor temporarily stops advertising (monitor
+/// unplugged or renamed) must not kill every later session until a manual
+/// restart.
+#[cfg(any(target_os = "linux", test))]
+pub fn reprobe_output_if_missing(
+    pinned: Option<&str>,
+    monitors: Option<&serde_json::Value>,
+) -> Option<String> {
+    let monitors = match monitors {
+        Some(m) => m,
+        None => return pinned.map(str::to_owned),
+    };
+    if let Some(name) = pinned {
+        let array = monitors.as_array();
+        let present = array.is_some_and(|list| {
+            list.iter()
+                .any(|m| m.get("name").and_then(serde_json::Value::as_str) == Some(name))
+        });
+        if present {
+            return Some(name.to_owned());
+        }
+        let fallback = select_fallback_output(monitors);
+        tracing::warn!(
+            pinned = name,
+            fallback = fallback.as_deref(),
+            "pinned output {name} not found in compositor monitors; falling back to {fallback:?}"
+        );
+        fallback
+    } else {
+        select_focused_output(monitors)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reprobe_output_name(pinned: Option<&str>) -> Option<String> {
+    let monitors = probe_hyprland_monitors();
+    reprobe_output_if_missing(pinned, monitors.as_ref())
 }
 
 #[cfg(target_os = "linux")]
@@ -1959,7 +2138,8 @@ impl MediaSource for LinuxMediaSource {
         {
             let sender = sender.clone();
             let fps = self.fps.max(1);
-            let output_name = self.output_name.clone();
+            let effective = reprobe_output_name(self.output_name.as_deref());
+            let output_name = effective;
             workers.spawn("maho-linux-capture", true, move |handoff| {
                 let interval = Duration::from_micros(1_000_000 / u64::from(fps));
                 let capture_config = LinuxCaptureConfig {
@@ -2173,6 +2353,7 @@ pub struct HostServer {
     pairing_deadline: Option<Instant>,
     bootstrap_identity: Option<PskIdentity>,
     preauth_timeout: Duration,
+    pub session_stall_timeout: Duration,
     _advertisement: Option<maho_net::discovery::ServiceAdvertiser>,
     #[cfg(all(test, target_os = "linux"))]
     prepared_admission_input: Mutex<Option<LinuxInputInjector>>,
@@ -2359,6 +2540,7 @@ impl HostServer {
             pairing_deadline,
             bootstrap_identity,
             preauth_timeout: Duration::from_secs(10),
+            session_stall_timeout: SESSION_STALL_TIMEOUT,
             _advertisement,
             #[cfg(all(test, target_os = "linux"))]
             prepared_admission_input: Mutex::new(None),
@@ -2388,58 +2570,55 @@ impl HostServer {
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), SessionError> {
         self.tcp_listener.set_nonblocking(true)?;
-        // The accept loop serves each connection inline, so a connection that
-        // stalls parks every later client; these markers make that visible.
+        // The accept loop dispatches each connection to a dedicated thread so that
+        // a stalled session or TLS handshake never parks the accept thread.
         let bound = self
             .tcp_listener
             .local_addr()
             .map(|addr| addr.to_string())
             .unwrap_or_else(|_| "?".to_owned());
         crate::host_log(&format!("server: listening on {bound}"));
-        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-            match self.tcp_listener.accept() {
+        let this = Arc::new(self);
+        let active_connections = Arc::new(AtomicUsize::new(0));
+
+        while !stop.load(Ordering::Relaxed) {
+            SERVER_LOOP_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+            match this.tcp_listener.accept() {
                 Ok((tcp, peer)) => {
-                    let accept_started = std::time::Instant::now();
-                    let _ = tcp.set_nonblocking(false);
-                    let admission_deadline = std::time::Instant::now() + self.preauth_timeout;
-                    tcp.set_nodelay(true)?;
-                    SERVER_ACCEPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    crate::host_log(&format!("server: accepted {peer}"));
-                    let tls_server = maho_net::tls_psk::TlsPskServer::new(self.current_psks()?)?;
-                    match tls_server.accept_stream_until(tcp, admission_deadline) {
-                        Ok(stream) => {
-                            SERVER_TLS_SUCCESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            crate::host_log(&format!(
-                                "server: TLS established {peer} in {:?}",
-                                accept_started.elapsed()
-                            ));
-                            if let Err(error) = self.handle_connection(
-                                stream,
+                    let admission_deadline = Instant::now() + this.preauth_timeout;
+                    if active_connections
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                            if count < MAX_CONCURRENT_CONNECTIONS {
+                                Some(count + 1)
+                            } else {
+                                None
+                            }
+                        })
+                        .is_err()
+                    {
+                        warn!(
+                            %peer,
+                            max = MAX_CONCURRENT_CONNECTIONS,
+                            "server: max concurrent connections reached; dropping connection"
+                        );
+                        continue;
+                    }
+                    let permit = ConnectionPermit(Arc::clone(&active_connections));
+                    let server = Arc::clone(&this);
+                    let stop_flag = Arc::clone(&stop);
+                    let spawn_res = thread::Builder::new()
+                        .name("maho-host-session".into())
+                        .spawn(move || {
+                            let _permit = permit;
+                            let _ = server.serve_connection(
+                                tcp,
                                 peer,
                                 admission_deadline,
-                                Some(stop.as_ref()),
-                            ) {
-                                crate::host_log(&format!(
-                                    "server: connection ended {peer} after {:?}: {error}",
-                                    accept_started.elapsed()
-                                ));
-                                tracing::warn!(%error, "connection ended with an error");
-                            }
-                        }
-                        Err(error) => {
-                            crate::host_log(&format!(
-                                "server: TLS failed {peer} after {:?}: {error}",
-                                accept_started.elapsed()
-                            ));
-                            let locked = self
-                                .lockout
-                                .lock()
-                                .expect("lockout poisoned")
-                                .record_failure(std::time::Instant::now());
-                            if locked {
-                                tracing::warn!("bootstrap TLS path locked after repeated failures");
-                            }
-                        }
+                                Some(stop_flag.as_ref()),
+                            );
+                        });
+                    if let Err(error) = spawn_res {
+                        warn!(%peer, %error, "server: failed to spawn session thread");
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2447,6 +2626,85 @@ impl HostServer {
                     continue;
                 }
                 Err(e) => return Err(SessionError::Io(e)),
+            }
+        }
+        Ok(())
+    }
+
+    fn serve_connection(
+        &self,
+        tcp: TcpStream,
+        peer: SocketAddr,
+        admission_deadline: Instant,
+        stop: Option<&AtomicBool>,
+    ) -> Result<(), SessionError> {
+        let accept_started = Instant::now();
+        let _ = tcp.set_nonblocking(false);
+        tcp.set_nodelay(true)?;
+        SERVER_ACCEPTS.fetch_add(1, Ordering::Relaxed);
+        crate::host_log(&format!("server: accepted {peer}"));
+        let tls_server = maho_net::tls_psk::TlsPskServer::new(self.current_psks()?)?;
+        match tls_server.accept_stream_until(tcp, admission_deadline) {
+            Ok(stream) => {
+                SERVER_TLS_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                crate::host_log(&format!(
+                    "server: TLS established {peer} in {:?}",
+                    accept_started.elapsed()
+                ));
+                let finished = Arc::new(AtomicBool::new(false));
+                let _finished_guard = FinishedGuard(Arc::clone(&finished));
+                let watch = Arc::new(SessionWatch::new(self.session_stall_timeout));
+                let watchdog_finished = Arc::clone(&finished);
+                let watchdog_watch = Arc::clone(&watch);
+                let cloned_tcp = stream.ssl_stream().get_ref().try_clone()?;
+                let timeout = watch.timeout();
+                let poll = (timeout / 4).clamp(Duration::from_millis(50), Duration::from_secs(1));
+                let watchdog_spawn = thread::Builder::new()
+                    .name("maho-host-watchdog".into())
+                    .spawn(move || loop {
+                        thread::sleep(poll);
+                        let is_fin = watchdog_finished.load(Ordering::Relaxed);
+                        let idle = watchdog_watch.idle(Instant::now());
+                        if watchdog_should_abort(is_fin, idle, watchdog_watch.timeout()) {
+                            warn!(
+                                %peer,
+                                ?idle,
+                                "session watchdog aborted a stalled session"
+                            );
+                            let _ = cloned_tcp.shutdown(std::net::Shutdown::Both);
+                            watchdog_watch.abort();
+                            break;
+                        }
+                        if is_fin {
+                            break;
+                        }
+                    });
+                if let Err(error) = watchdog_spawn {
+                    warn!(%peer, %error, "server: failed to spawn watchdog thread");
+                }
+                if let Err(error) =
+                    self.handle_connection(stream, peer, admission_deadline, stop, &watch)
+                {
+                    crate::host_log(&format!(
+                        "server: connection ended {peer} after {:?}: {error}",
+                        accept_started.elapsed()
+                    ));
+                    tracing::warn!(%error, "connection ended with an error");
+                }
+            }
+            Err(error) => {
+                crate::host_log(&format!(
+                    "server: TLS failed {peer} after {:?}: {error}",
+                    accept_started.elapsed()
+                ));
+                let locked = self
+                    .lockout
+                    .lock()
+                    .expect("lockout poisoned")
+                    .record_failure(Instant::now());
+                if locked {
+                    tracing::warn!("bootstrap TLS path locked after repeated failures");
+                }
             }
         }
         Ok(())
@@ -2465,7 +2723,10 @@ impl HostServer {
         tcp.set_nodelay(true)?;
         let tls_server = TlsPskServer::new(self.current_psks()?)?;
         match tls_server.accept_stream_until(tcp, admission_deadline) {
-            Ok(stream) => self.handle_connection(stream, peer, admission_deadline, None),
+            Ok(stream) => {
+                let watch = SessionWatch::new(self.session_stall_timeout);
+                self.handle_connection(stream, peer, admission_deadline, None, &watch)
+            }
             Err(error) => {
                 let locked = self
                     .lockout
@@ -2525,6 +2786,7 @@ impl HostServer {
         tcp_peer: SocketAddr,
         admission_deadline: Instant,
         stop: Option<&std::sync::atomic::AtomicBool>,
+        watch: &SessionWatch,
     ) -> Result<(), SessionError> {
         stream
             .ssl_stream_mut()
@@ -2559,13 +2821,13 @@ impl HostServer {
         };
         #[cfg(all(target_os = "linux", not(test)))]
         let mut input = {
-            let geometry = probe_linux_input_geometry(self.config.output_name.as_deref())
-                .unwrap_or_else(|| {
-                    crate::inject_linux::OutputGeometry::single_output(
-                        self.config.display.pixel_width,
-                        self.config.display.pixel_height,
-                    )
-                });
+            let effective = reprobe_output_name(self.config.output_name.as_deref());
+            let geometry = probe_linux_input_geometry(effective.as_deref()).unwrap_or_else(|| {
+                crate::inject_linux::OutputGeometry::single_output(
+                    self.config.display.pixel_width,
+                    self.config.display.pixel_height,
+                )
+            });
             LinuxInputInjector::new(geometry).map_err(SessionError::Io)?
         };
         #[cfg(all(target_os = "linux", test))]
@@ -2594,6 +2856,11 @@ impl HostServer {
         let result = (|| -> Result<(), SessionError> {
             // If authenticated and media_receiver is set, we run UDP sending in a dedicated thread to avoid TCP blocking it.
             loop {
+                watch.tick(Instant::now());
+                if watch.is_aborted() {
+                    warn!(peer = %tcp_peer, "session watchdog aborted a stalled session");
+                    break;
+                }
                 if stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed)) {
                     info!(peer = %tcp_peer, "host stop requested; closing connection");
                     break;
@@ -2615,7 +2882,13 @@ impl HostServer {
                         .set_write_timeout(Some(remaining))?;
                 }
                 if state == SessionState::Authenticated {
-                    self.discover_udp_peer(tcp_peer, &mut udp_peer, c2h_cipher.as_mut())?;
+                    // A registered session must stop draining the shared UDP socket:
+                    // an established session that keeps reading would eat the
+                    // registration datagrams of any client that connects while it is
+                    // still alive, leaving the newcomer without media.
+                    if udp_peer.is_none() {
+                        self.discover_udp_peer(tcp_peer, &mut udp_peer, c2h_cipher.as_mut())?;
+                    }
                     if sender_thread.is_none() {
                         if let (Some(_), Some(peer)) = (&media_receiver, udp_peer) {
                             let receiver = media_receiver.take().unwrap();
@@ -3924,7 +4197,10 @@ mod tests {
             let result = tls
                 .accept_stream_until(socket, deadline)
                 .map_err(SessionError::Tls)
-                .and_then(|stream| server.handle_connection(stream, peer, deadline, None));
+                .and_then(|stream| {
+                    let watch = SessionWatch::new(server.session_stall_timeout);
+                    server.handle_connection(stream, peer, deadline, None, &watch)
+                });
             done_tx.send((result, Instant::now())).unwrap();
         });
         let mut tcp = client.connect(addr).unwrap();
@@ -4291,6 +4567,7 @@ mod tests {
                 peer,
                 Instant::now() + server.preauth_timeout,
                 None,
+                &SessionWatch::new(server.session_stall_timeout),
             );
             done_tx.send(result).unwrap();
         });
@@ -5942,5 +6219,325 @@ mod tests {
             0,
             "media capture must NOT start when client lacks capability"
         );
+    }
+
+    #[test]
+    fn test_watchdog_should_abort_truth_table() {
+        let timeout = Duration::from_secs(30);
+
+        // When finished is true, never abort regardless of idle duration
+        assert!(!watchdog_should_abort(true, timeout, timeout));
+        assert!(!watchdog_should_abort(
+            true,
+            timeout + Duration::from_secs(10),
+            timeout
+        ));
+        assert!(!watchdog_should_abort(true, Duration::ZERO, timeout));
+
+        // When not finished:
+        // idle >= timeout triggers abort
+        assert!(watchdog_should_abort(
+            false,
+            timeout + Duration::from_millis(1),
+            timeout
+        ));
+        assert!(watchdog_should_abort(false, timeout, timeout));
+
+        // idle < timeout does not trigger abort
+        assert!(!watchdog_should_abort(
+            false,
+            timeout - Duration::from_millis(1),
+            timeout
+        ));
+        assert!(!watchdog_should_abort(false, Duration::ZERO, timeout));
+    }
+
+    #[test]
+    fn test_session_watch_lifecycle() {
+        let timeout = Duration::from_secs(10);
+        let watch = SessionWatch::new(timeout);
+
+        // Fresh watch is not aborted and has timeout set
+        assert!(!watch.is_aborted());
+        assert_eq!(watch.timeout(), timeout);
+        assert!(watch.idle(Instant::now()) < Duration::from_millis(50));
+
+        // Simulate time advancing without a tick: idle grows
+        let origin = Instant::now();
+        let t1 = origin + Duration::from_secs(5);
+        assert!(watch.idle(t1) >= Duration::from_secs(5));
+
+        // tick pushes idle back down
+        watch.tick(t1);
+        assert!(watch.idle(t1) < Duration::from_millis(50));
+
+        // abort flips is_aborted
+        watch.abort();
+        assert!(watch.is_aborted());
+    }
+
+    #[test]
+    fn test_reprobe_output_if_missing() {
+        let monitors_with_headless_focused: serde_json::Value = serde_json::json!([
+            {"name": "HEADLESS-1", "focused": true},
+            {"name": "DP-1", "focused": false}
+        ]);
+        let monitors_only_headless: serde_json::Value = serde_json::json!([
+            {"name": "HEADLESS-1", "focused": true}
+        ]);
+        let monitors_healthy: serde_json::Value = serde_json::json!([
+            {"name": "DP-1", "focused": false},
+            {"name": "HDMI-A-2", "focused": true}
+        ]);
+
+        // 1. Pinned "HDMI-A-2" missing from a list where HEADLESS-1 is focused plus DP-1
+        // -> returns DP-1, NOT HEADLESS-1
+        assert_eq!(
+            reprobe_output_if_missing(Some("HDMI-A-2"), Some(&monitors_with_headless_focused)),
+            Some("DP-1".to_string())
+        );
+
+        // 2. Pinned missing, only HEADLESS-1 present -> returns HEADLESS-1
+        assert_eq!(
+            reprobe_output_if_missing(Some("HDMI-A-2"), Some(&monitors_only_headless)),
+            Some("HEADLESS-1".to_string())
+        );
+
+        // 3. Pinned present -> unchanged
+        assert_eq!(
+            reprobe_output_if_missing(Some("HDMI-A-2"), Some(&monitors_healthy)),
+            Some("HDMI-A-2".to_string())
+        );
+
+        // 4. monitors = None -> pinned unchanged
+        assert_eq!(
+            reprobe_output_if_missing(Some("HDMI-A-2"), None),
+            Some("HDMI-A-2".to_string())
+        );
+
+        // 5. No pinned name falls back to focused monitor
+        assert_eq!(
+            reprobe_output_if_missing(None, Some(&monitors_healthy)),
+            Some("HDMI-A-2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_isolation_stalled_connection_does_not_block_subsequent_connection() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [0x5a; 32];
+        store
+            .save(PairingRecord {
+                id: "client-b".into(),
+                name: "fixture-b".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, _) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let mut server = HostServer::bind_synthetic(config, 100).unwrap();
+        server.preauth_timeout = Duration::from_secs(30);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let tcp_addr = server.tcp_addr().unwrap();
+        let udp_addr = server.udp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_with_stop(stop_clone));
+
+        // Connection A: connect raw TCP stream and send nothing (parks A in preauth read for up to 30s)
+        let sock_a = TcpStream::connect(tcp_addr).unwrap();
+
+        // Connection B: connect, complete TLS, handshake, and register UDP within a few seconds
+        let client_b = TlsPskClient::new(PskIdentity::pairing("client-b", &key).unwrap()).unwrap();
+        let mut tcp_b = client_b.connect(tcp_addr).unwrap();
+        tcp_b
+            .ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+
+        let salt = [0x44; 16];
+        let handshake = Handshake {
+            name: "client-b".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+            pairing_id: "client-b".into(),
+            session_salt: salt,
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        tcp_b.write_frame(&packet).unwrap();
+        let ack = tcp_b.read_frame().unwrap();
+        assert_eq!(
+            decode_tcp_packet(&ack).0.packet_type,
+            PacketType::HandshakeAck
+        );
+
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut c2h = DatagramCipher::derive(&key, &salt, Direction::ClientToHost).unwrap();
+        let reg = c2h
+            .seal_datagram(&PacketHeader::new(PacketType::Ping, 0, 0, 0), &[])
+            .unwrap();
+        udp.send_to(&reg, udp_addr).unwrap();
+
+        let mut receive = DatagramCipher::derive(&key, &salt, Direction::HostToClient).unwrap();
+        let mut buffer = [0_u8; 2048];
+        // The synthetic source interleaves video frames with its pings, so the
+        // proof is any datagram that authenticates with this session's key.
+        let media_deadline = Instant::now() + Duration::from_secs(3);
+        let mut received = false;
+        while Instant::now() < media_deadline {
+            let Ok((length, _)) = udp.recv_from(&mut buffer) else {
+                break;
+            };
+            if receive.open_datagram(&buffer[..length]).is_ok() {
+                received = true;
+                break;
+            }
+        }
+        assert!(
+            received,
+            "a second client must receive host media while a stalled peer holds its own session"
+        );
+
+        // Teardown
+        let _ = send_tcp_control(&mut tcp_b, ControlMessage::Disconnect);
+        drop(tcp_b);
+        drop(sock_a);
+        stop.store(true, Ordering::Relaxed);
+        let _ = server_thread.join();
+    }
+
+    #[test]
+    fn test_watchdog_aborts_stalled_session() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [0x7b; 32];
+        store
+            .save(PairingRecord {
+                id: "stalled-client".into(),
+                name: "fixture-stall".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, _) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let mut server = HostServer::bind_synthetic(config, 100).unwrap();
+        prepare_admission_input(&mut server);
+        let tcp_addr = server.tcp_addr().unwrap();
+
+        // The client's TLS handshake only completes once the server side accepts,
+        // so both sides must run concurrently: the server drives accept and the
+        // session on its own thread, never on the thread that owns the client.
+        let (session_tx, session_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let (server_tcp, peer) = server.tcp_listener.accept().unwrap();
+            server_tcp.set_nodelay(true).unwrap();
+            let tls_server = TlsPskServer::new(server.current_psks().unwrap()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let stream = tls_server
+                .accept_stream_until(server_tcp, deadline)
+                .unwrap();
+            let watch = Arc::new(SessionWatch::new(Duration::from_secs(30)));
+            let handler_watch = Arc::clone(&watch);
+            let (result_tx, result_rx) = mpsc::channel();
+            let handler = thread::spawn(move || {
+                let result = server.handle_connection(stream, peer, deadline, None, &handler_watch);
+                let _ = result_tx.send(result);
+            });
+            session_tx.send((watch, result_rx, handler)).unwrap();
+        });
+
+        let client =
+            TlsPskClient::new(PskIdentity::pairing("stalled-client", &key).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        tcp.ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (watch, handler_result, handler_thread) =
+            session_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+
+        // Authenticate the session
+        let salt = [0x99; 16];
+        let handshake = Handshake {
+            name: "stalled-client".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+            pairing_id: "stalled-client".into(),
+            session_salt: salt,
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        tcp.write_frame(&packet).unwrap();
+        let ack = tcp.read_frame().unwrap();
+        assert_eq!(
+            decode_tcp_packet(&ack).0.packet_type,
+            PacketType::HandshakeAck
+        );
+
+        // Session is live. Now call watch.abort()
+        watch.abort();
+
+        // Assert handler returns Ok within bounded time
+        let handler_res = handler_result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("session handler must return once the watch is aborted");
+        assert!(handler_res.is_ok());
+        let _ = handler_thread.join();
+
+        // And client observes socket closure within bounded poll
+        tcp.ssl_stream_mut()
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let _ = server_thread.join();
+        let poll_deadline = Instant::now() + Duration::from_secs(3);
+        let mut closed = false;
+        let mut buf = [0_u8; 128];
+        use std::io::Read;
+        while Instant::now() < poll_deadline {
+            match tcp.ssl_stream_mut().read(&mut buf) {
+                Ok(0) => {
+                    closed = true;
+                    break;
+                }
+                Err(ref e)
+                    if e.kind() == io::ErrorKind::ConnectionReset
+                        || e.kind() == io::ErrorKind::BrokenPipe
+                        || e.kind() == io::ErrorKind::UnexpectedEof =>
+                {
+                    closed = true;
+                    break;
+                }
+                Err(ref e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => {
+                    closed = true;
+                    break;
+                }
+                Ok(_) => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+        assert!(closed, "client must observe socket closure after abort");
     }
 }

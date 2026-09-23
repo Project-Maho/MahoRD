@@ -263,9 +263,51 @@ fn main() -> Result<()> {
             }
         });
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::thread::Builder::new()
+            .name("maho-host-serve-watchdog".into())
+            .spawn(move || {
+                let limit = std::time::Duration::from_secs(30);
+                let mut last_iterations = maho_host::server_loop_iterations();
+                let mut last_progress = std::time::Instant::now();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let current = maho_host::server_loop_iterations();
+                    let now = std::time::Instant::now();
+                    if current > last_iterations {
+                        last_iterations = current;
+                        last_progress = now;
+                    } else if serve_loop_should_exit(
+                        last_iterations,
+                        current,
+                        last_progress,
+                        now,
+                        limit,
+                    ) {
+                        maho_host::host_log(
+                            "accept loop is stalled; process is exiting so the supervisor can restart it",
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            })
+            .ok();
+    }
     println!("Pairing approval requests will appear in this terminal.");
     server.serve()?;
     Ok(())
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
+fn serve_loop_should_exit(
+    last_iterations: u64,
+    current: u64,
+    last_progress: std::time::Instant,
+    now: std::time::Instant,
+    limit: std::time::Duration,
+) -> bool {
+    current == last_iterations && now.saturating_duration_since(last_progress) > limit
 }
 
 fn validate_pin(pin: String) -> Result<String> {
@@ -405,5 +447,38 @@ mod tests {
         assert!(cli.uninstall_service);
         assert!(cli.service_run);
         assert!(cli.session_worker);
+    }
+
+    #[test]
+    fn test_serve_loop_should_exit_truth_table() {
+        let now = std::time::Instant::now();
+        let limit = std::time::Duration::from_secs(30);
+
+        // Advancing iterations: never exit
+        assert!(!serve_loop_should_exit(
+            10,
+            11,
+            now - std::time::Duration::from_secs(40),
+            now,
+            limit
+        ));
+
+        // Stalled iterations within limit: do not exit
+        assert!(!serve_loop_should_exit(
+            10,
+            10,
+            now - std::time::Duration::from_secs(20),
+            now,
+            limit
+        ));
+
+        // Stalled iterations exceeding limit: exit
+        assert!(serve_loop_should_exit(
+            10,
+            10,
+            now - std::time::Duration::from_secs(35),
+            now,
+            limit
+        ));
     }
 }

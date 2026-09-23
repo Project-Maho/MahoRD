@@ -60,6 +60,11 @@ pub fn worker_stream_counters() -> (u32, u32) {
         session::SERVER_TLS_SUCCESSES.load(Ordering::Relaxed),
     )
 }
+
+/// Returns the process-lifetime accept loop iteration count from the host server.
+pub fn server_loop_iterations() -> u64 {
+    session::SERVER_LOOP_ITERATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
 #[cfg(target_os = "windows")]
 pub use clipboard_windows::WindowsClipboard;
 #[cfg(target_os = "macos")]
@@ -98,7 +103,9 @@ pub fn windows_default_blocking(
     }
 }
 #[cfg(target_os = "linux")]
-pub use session::{focused_output_name, probe_hyprland_monitors, resolve_output_target};
+pub use session::{
+    focused_output_name, probe_hyprland_monitors, reprobe_output_if_missing, resolve_output_target,
+};
 pub use session::{
     random_pin, select_focused_output, ConsentPrompt, DisplayInfo, HostConfig, HostServer,
     PairingRecord, PairingStore, SessionState, TimestampStats, VideoFrame,
