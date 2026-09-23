@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use maho_proto::{
@@ -11,6 +11,21 @@ use tokio::{
     sync::mpsc,
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+/// Reads the relay auth secret from RELAY_AUTH_SECRET or ~/.maho-relay-secret.
+pub fn load_auth_secret() -> Option<String> {
+    if let Ok(secret) = std::env::var("RELAY_AUTH_SECRET") {
+        if !secret.is_empty() {
+            return Some(secret);
+        }
+    }
+    let path = std::env::var("HOME").ok()?;
+    let file = PathBuf::from(path).join(".maho-relay-secret");
+    std::fs::read_to_string(file)
+        .ok()
+        .map(|content| content.trim().to_owned())
+        .filter(|secret| !secret.is_empty())
+}
 
 #[derive(Debug)]
 pub struct ClientRelayBridge {

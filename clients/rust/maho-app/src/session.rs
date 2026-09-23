@@ -406,11 +406,7 @@ impl ClientSession {
 
     fn open_relay_fallback(&self, pairing: &PairingRecord) -> Option<(String, u16, u16)> {
         let url = pairing.relay_url.clone()?;
-        let secret = std::env::var("RELAY_AUTH_SECRET").ok()?;
-        if secret.is_empty() {
-            tracing::warn!(relay = %url, "relay fallback skipped: RELAY_AUTH_SECRET not set");
-            return None;
-        }
+        let secret = crate::relay::load_auth_secret()?;
         let host_id = pairing.relay_host_id.clone().unwrap_or_else(|| {
             pairing
                 .name
