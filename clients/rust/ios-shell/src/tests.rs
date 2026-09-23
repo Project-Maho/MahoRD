@@ -327,6 +327,8 @@ fn pairing_lookup_by_host_address_never_infers_pairing_from_advertised_hostname(
         added_at_unix_ms: 1000,
         last_endpoint: None,
         endpoint_aliases: Vec::new(),
+        relay_url: None,
+        relay_host_id: None,
     };
     store.save(paired_record).unwrap();
 

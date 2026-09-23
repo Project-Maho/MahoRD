@@ -44,6 +44,8 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             added_at_unix_ms: 1700000000000,
             last_endpoint: None,
             endpoint_aliases: Vec::new(),
+            relay_url: None,
+            relay_host_id: None,
         };
         client_store.save(client_record.clone()).unwrap();
 

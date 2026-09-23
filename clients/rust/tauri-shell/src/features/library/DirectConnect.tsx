@@ -13,8 +13,10 @@ import { Label } from "@/components/ui/label"
 export interface Props {
   ip: string;
   pin: string;
+  relayUrl?: string;
   onIpChange: (v: string) => void;
   onPinChange: (v: string) => void;
+  onRelayUrlChange?: (v: string) => void;
   onConnect: () => void;
   busy?: boolean;
   error?: string | null;
@@ -25,8 +27,10 @@ export type DirectConnectProps = Props;
 export function DirectConnect({
   ip,
   pin,
+  relayUrl = "",
   onIpChange,
   onPinChange,
+  onRelayUrlChange,
   onConnect,
   busy = false,
   error = null,
@@ -74,6 +78,21 @@ export function DirectConnect({
               autoComplete="off"
               spellCheck={false}
               aria-describedby="direct-help"
+              className="font-mono text-foreground"
+            />
+          </div>
+
+          <div className="col-span-full space-y-1.5 min-w-0">
+            <Label htmlFor="direct-relay">Relay URL</Label>
+            <Input
+              id="direct-relay"
+              type="text"
+              value={relayUrl}
+              onChange={(e) => onRelayUrlChange?.(e.target.value)}
+              disabled={busy}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="wss://relay.example"
               className="font-mono text-foreground"
             />
           </div>

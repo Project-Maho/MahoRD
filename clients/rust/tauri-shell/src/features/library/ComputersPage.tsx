@@ -98,6 +98,14 @@ export function ComputersPage({
   const [refreshing, setRefreshing] = useState(false)
 
   const [directIp, setDirectIp] = useState("")
+  const [relayUrl, setRelayUrl] = useState(() => {
+    if (typeof window === "undefined" || !window.localStorage) return ""
+    return window.localStorage.getItem("maho-relay-url") ?? ""
+  })
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.localStorage) return
+    window.localStorage.setItem("maho-relay-url", relayUrl)
+  }, [relayUrl])
   const [directPin, setDirectPin] = useState("")
   const [directError, setDirectError] = useState<string | null>(null)
   const [selectedPairingId, setSelectedPairingId] = useState<string | null>(null)
@@ -490,6 +498,8 @@ export function ComputersPage({
         <DirectConnect
           ip={directIp}
           pin={directPin}
+          relayUrl={relayUrl}
+          onRelayUrlChange={setRelayUrl}
           onIpChange={(v) => {
             setDirectIp(v)
             setDirectError(null)

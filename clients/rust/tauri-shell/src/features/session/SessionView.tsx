@@ -243,6 +243,13 @@ export function SessionView({
           <div className="overlay-stats flex items-center gap-3 text-xs text-[var(--muted-foreground)] tabular-nums shrink-0">
             <span id="session-stat-fps">{fpsText}</span>
             <span id="session-stat-lat">{latText}</span>
+            {typeof window !== "undefined" &&
+            window.localStorage &&
+            window.localStorage.getItem("maho-relay-url") ? (
+              <span id="session-via-relay" className="via-relay-badge">
+                via relay
+              </span>
+            ) : null}
           </div>
 
           <button

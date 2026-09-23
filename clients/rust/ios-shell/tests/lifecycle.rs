@@ -46,6 +46,8 @@ impl IsolatedStore {
             added_at_unix_ms: 1725900000000,
             last_endpoint: None,
             endpoint_aliases: Vec::new(),
+            relay_url: None,
+            relay_host_id: None,
         };
         store.save(record).expect("save pairing record");
     }

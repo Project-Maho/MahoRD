@@ -20,6 +20,9 @@ macos-host = []
 [dependencies]
 maho-proto = { path = "../maho-proto" }
 maho-net = { path = "../maho-net" }
+tokio.workspace = true
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -42,7 +45,8 @@ ffmpeg-next = { workspace = true, default-features = false, features = ["format"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-screen-capture-kit = { version = "0.3", features = ["block2", "dispatch2", "objc2-core-media"] }
-objc2-core-media = { version = "0.3", features = ["CMBlockBuffer", "CMSampleBuffer", "objc2-core-video"] }
+objc2-core-media = { version = "0.3", features = ["CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "objc2-core-audio-types", "objc2-core-video"] }
+objc2-core-audio-types = "0.3"
 objc2-core-video = { version = "0.3", features = ["CVPixelBuffer"] }
 objc2-core-foundation = "0.3"
 block2 = "0.6"
@@ -89,3 +93,5 @@ windows = { version = "0.62.2", features = [
 [dev-dependencies]
 tempfile = "3"
 maho-app = { path = "../maho-app" }
+maho-relay = { path = "../maho-relay" }
+axum = { version = "0.8", features = ["ws"] }

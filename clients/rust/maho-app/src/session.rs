@@ -238,6 +238,8 @@ pub struct ClientSession {
     last_input_ack: Arc<Mutex<Option<(u32, bool, u8)>>>,
     udp_registered: Arc<AtomicBool>,
     registration_attempts: Arc<AtomicU32>,
+    relay_endpoint: Arc<Mutex<Option<(String, u16, u16)>>>,
+    relay_stop: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
     trace: ReceiverTrace,
     #[cfg(test)]
     tcp_wait: Arc<Mutex<Option<mpsc::Sender<()>>>>,
@@ -265,6 +267,8 @@ impl ClientSession {
             last_input_ack: Arc::new(Mutex::new(None)),
             udp_registered: Arc::new(AtomicBool::new(false)),
             registration_attempts: Arc::new(AtomicU32::new(0)),
+            relay_endpoint: Arc::new(Mutex::new(None)),
+            relay_stop: Arc::new(Mutex::new(None)),
             trace: std::env::var_os("MAHO_RECEIVER_TRACE_PATH")
                 .map(|path| ReceiverTrace::at_path(path.into()))
                 .unwrap_or_default(),
@@ -333,6 +337,8 @@ impl ClientSession {
                     added_at_unix_ms: current_unix_ms(),
                     last_endpoint: None,
                     endpoint_aliases: Vec::new(),
+                    relay_url: None,
+                    relay_host_id: None,
                 };
                 self.store.save(record.clone())?;
                 record
@@ -366,8 +372,110 @@ impl ClientSession {
         pairing: PairingRecord,
     ) -> Result<ReadySession, SessionError> {
         let psk = PskIdentity::pairing(&pairing.id, &pairing.key)?;
-        self.connect_with_psk(psk, SessionState::AwaitingHandshakeAck)?;
-        self.begin_handshake(pairing)
+        *self
+            .relay_endpoint
+            .lock()
+            .map_err(|_| SessionError::Poisoned)? = None;
+        match self.connect_with_psk(psk.clone(), SessionState::AwaitingHandshakeAck) {
+            Ok(()) => self.begin_handshake(pairing),
+            Err(direct_error) => {
+                if let Some(endpoint) = self.open_relay_fallback(&pairing) {
+                    *self
+                        .relay_endpoint
+                        .lock()
+                        .map_err(|_| SessionError::Poisoned)? = Some(endpoint);
+                    self.connect_with_psk(psk, SessionState::AwaitingHandshakeAck)?;
+                    self.begin_handshake(pairing)
+                } else {
+                    Err(direct_error)
+                }
+            }
+        }
+    }
+
+    fn stop_relay_bridge(&self) {
+        if let Ok(mut guard) = self.relay_stop.lock() {
+            if let Some(stop) = guard.take() {
+                let _ = stop.send(());
+            }
+        }
+        if let Ok(mut endpoint) = self.relay_endpoint.lock() {
+            *endpoint = None;
+        }
+    }
+
+    fn open_relay_fallback(&self, pairing: &PairingRecord) -> Option<(String, u16, u16)> {
+        let url = pairing.relay_url.clone()?;
+        let secret = std::env::var("RELAY_AUTH_SECRET").ok()?;
+        if secret.is_empty() {
+            tracing::warn!(relay = %url, "relay fallback skipped: RELAY_AUTH_SECRET not set");
+            return None;
+        }
+        let host_id = pairing.relay_host_id.clone().unwrap_or_else(|| {
+            pairing
+                .name
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+                .take(128)
+                .collect()
+        });
+        if host_id.is_empty() {
+            return None;
+        }
+        self.stop_relay_bridge();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        *self.relay_stop.lock().ok()? = Some(stop_tx);
+        let url_for_thread = url;
+        let secret_for_thread = secret.into_bytes();
+        let host_for_thread = host_id;
+        if std::thread::Builder::new()
+            .name("maho-client-relay".to_owned())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                runtime.block_on(async move {
+                    match crate::relay::start_client_bridge(
+                        &url_for_thread,
+                        &host_for_thread,
+                        &secret_for_thread,
+                    )
+                    .await
+                    {
+                        Ok(bridge) => {
+                            tracing::info!(
+                                local_tcp = %bridge.local_tcp,
+                                local_udp = %bridge.local_udp,
+                                host_id = %host_for_thread,
+                                "relay fallback bridge established"
+                            );
+                            let _ = ready_tx.send(Ok((
+                                bridge.local_tcp.ip().to_string(),
+                                bridge.local_tcp.port(),
+                                bridge.local_udp.port(),
+                            )));
+                            let _ = tokio::task::spawn_blocking(move || stop_rx.recv()).await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "relay fallback bridge failed");
+                            let _ = ready_tx.send(Err(error));
+                        }
+                    }
+                });
+            })
+            .is_err()
+        {
+            return None;
+        }
+        ready_rx.recv().ok().and_then(Result::ok)
     }
 
     pub fn set_udp_read_timeout(&self, timeout: Option<Duration>) -> Result<(), SessionError> {
@@ -768,6 +876,7 @@ impl ClientSession {
     }
 
     pub fn disconnect(&self) -> Result<(), SessionError> {
+        self.stop_relay_bridge();
         self.interrupt();
         let trace_result = self
             .receiver_snapshot()
@@ -867,7 +976,17 @@ impl ClientSession {
             state.frames.clear();
             state.receiver = crate::receiver_stats::ReceiverStats::default();
         }
-        let address = resolve_one((&*self.config.host, self.config.tcp_port))?;
+        let address = {
+            let override_endpoint = self
+                .relay_endpoint
+                .lock()
+                .map_err(|_| SessionError::Poisoned)?;
+            if let Some((host, tcp_port, _)) = override_endpoint.as_ref() {
+                resolve_one((host.as_str(), *tcp_port))?
+            } else {
+                resolve_one((&*self.config.host, self.config.tcp_port))?
+            }
+        };
         if self.cancelled.load(Ordering::SeqCst) {
             return Err(SessionError::Cancelled);
         }
@@ -976,7 +1095,17 @@ impl ClientSession {
         let key = pairing.key_array()?;
         let mut udp_send = DatagramCipher::derive(&key, &salt, Direction::ClientToHost)?;
         let udp_receive = DatagramCipher::derive(&key, &salt, Direction::HostToClient)?;
-        let udp_address = resolve_one((&*self.config.host, self.config.udp_port))?;
+        let udp_address = {
+            let override_endpoint = self
+                .relay_endpoint
+                .lock()
+                .map_err(|_| SessionError::Poisoned)?;
+            if let Some((host, _, udp_port)) = override_endpoint.as_ref() {
+                resolve_one((host.as_str(), *udp_port))?
+            } else {
+                resolve_one((&*self.config.host, self.config.udp_port))?
+            }
+        };
         let udp = UdpSocket::bind(if udp_address.is_ipv6() {
             "[::]:0"
         } else {
@@ -1614,6 +1743,8 @@ mod cancellation_tests {
             added_at_unix_ms: 0,
             last_endpoint: None,
             endpoint_aliases: Vec::new(),
+            relay_url: None,
+            relay_host_id: None,
         };
         let ready = session.connect_with_pairing(record).unwrap();
         assert_eq!(ready.server.name, "mock-host");
@@ -1946,6 +2077,8 @@ mod receiver_clock_tests {
                 added_at_unix_ms: 0,
                 last_endpoint: None,
                 endpoint_aliases: Vec::new(),
+                relay_url: None,
+                relay_host_id: None,
             })
             .unwrap();
         session
@@ -2055,6 +2188,8 @@ mod receiver_clock_tests {
                 added_at_unix_ms: 0,
                 last_endpoint: None,
                 endpoint_aliases: Vec::new(),
+                relay_url: None,
+                relay_host_id: None,
             })
             .unwrap();
         let salt = ready_rx.recv().unwrap();

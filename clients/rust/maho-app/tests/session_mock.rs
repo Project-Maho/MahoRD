@@ -247,6 +247,8 @@ fn connect_with_pairing_direct_round_trip() {
         added_at_unix_ms: 0,
         last_endpoint: None,
         endpoint_aliases: Vec::new(),
+        relay_url: None,
+        relay_host_id: None,
     };
     let ready = session.connect_with_pairing(record).unwrap();
     assert_eq!(ready.server.name, "mock-host");
@@ -344,6 +346,8 @@ fn stalled_consumer_retains_latest_clipboard_and_terminal_error() {
             added_at_unix_ms: 0,
             last_endpoint: None,
             endpoint_aliases: Vec::new(),
+            relay_url: None,
+            relay_host_id: None,
         })
         .unwrap();
     let mut runtime = session.spawn_tcp_runtime().unwrap();
@@ -437,6 +441,8 @@ fn mock_server_abr_bitrate_adjust_round_trip() {
             added_at_unix_ms: 0,
             last_endpoint: None,
             endpoint_aliases: Vec::new(),
+            relay_url: None,
+            relay_host_id: None,
         })
         .unwrap();
 
@@ -521,6 +527,8 @@ fn mock_server_stream_config_negotiation_round_trip() {
             added_at_unix_ms: 0,
             last_endpoint: None,
             endpoint_aliases: Vec::new(),
+            relay_url: None,
+            relay_host_id: None,
         })
         .unwrap();
 
@@ -606,6 +614,8 @@ fn udp_client_rejects_host_missing_authenticated_registration_capability() {
         added_at_unix_ms: 0,
         last_endpoint: None,
         endpoint_aliases: Vec::new(),
+        relay_url: None,
+        relay_host_id: None,
     };
     let result = session.connect_with_pairing(record);
     assert!(
@@ -720,6 +730,8 @@ fn udp_client_sends_authenticated_registration_and_preserves_nonce() {
         added_at_unix_ms: 0,
         last_endpoint: None,
         endpoint_aliases: Vec::new(),
+        relay_url: None,
+        relay_host_id: None,
     };
     let ready = session.connect_with_pairing(record).unwrap();
     assert_eq!(ready.server.name, "mock-host");

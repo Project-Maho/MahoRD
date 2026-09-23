@@ -13,6 +13,7 @@ mod input;
 mod media;
 mod packet;
 mod pairing;
+mod relay;
 
 pub use control::*;
 pub use error::CodecError;
@@ -22,6 +23,7 @@ pub use input::*;
 pub use media::*;
 pub use packet::*;
 pub use pairing::*;
+pub use relay::*;
 
 /// A value with a complete version 3 wire encoding.
 pub trait WireCodec: Sized {

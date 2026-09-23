@@ -64,6 +64,14 @@ struct Cli {
     /// Mark this process as a service-spawned session worker.
     #[arg(long)]
     session_worker: bool,
+
+    /// Relay base URL (`ws://`, `wss://`, `http://`, or `https://`). Also read from MAHO_RELAY_URL.
+    #[arg(long, value_name = "URL")]
+    relay: Option<String>,
+
+    /// Stable relay host id. Defaults to a sanitized hostname. Also read from MAHO_RELAY_HOST_ID.
+    #[arg(long, value_name = "ID")]
+    relay_host_id: Option<String>,
 }
 
 pub fn select_pin<F>(
@@ -240,6 +248,34 @@ fn main() -> Result<()> {
     println!("MahoRD bootstrap PIN: {pin}");
     println!("TCP listening on {}", server.tcp_addr()?);
     println!("UDP listening on {}", server.udp_addr()?);
+    if let Some(url) = cli
+        .relay
+        .clone()
+        .or_else(|| std::env::var("MAHO_RELAY_URL").ok())
+    {
+        let secret = std::env::var("RELAY_AUTH_SECRET").unwrap_or_default();
+        if secret.is_empty() {
+            bail!("--relay requires RELAY_AUTH_SECRET");
+        }
+        let host_id = cli.relay_host_id.clone().or_else(|| {
+            std::env::var("MAHO_RELAY_HOST_ID")
+                .ok()
+                .filter(|value| !value.is_empty())
+        });
+        let host_id = host_id.unwrap_or_else(|| {
+            maho_host::relay::sanitize_host_id(
+                &hostname::get().unwrap_or_default().to_string_lossy(),
+            )
+        });
+        maho_host::relay::spawn_host_relay(maho_host::relay::HostRelayConfig {
+            url,
+            host_id,
+            secret: secret.into_bytes(),
+            local_tcp: server.tcp_addr()?,
+            local_udp: server.udp_addr()?,
+        });
+        println!("Relay registration enabled");
+    }
     if cli.session_worker {
         maho_host::host_log("worker: serving");
         // Recycle watchdog: a worker spawned during desktop churn can accept

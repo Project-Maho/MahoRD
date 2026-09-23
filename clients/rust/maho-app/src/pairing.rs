@@ -51,6 +51,10 @@ pub struct PairingRecord {
     pub last_endpoint: Option<PairingEndpoint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoint_aliases: Vec<PairingEndpoint>,
+    #[serde(default, rename = "relayUrl", skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+    #[serde(default, rename = "relayHostId", skip_serializing_if = "Option::is_none")]
+    pub relay_host_id: Option<String>,
 }
 
 impl fmt::Debug for PairingRecord {
@@ -63,6 +67,8 @@ impl fmt::Debug for PairingRecord {
             .field("added_at_unix_ms", &self.added_at_unix_ms)
             .field("last_endpoint", &self.last_endpoint)
             .field("endpoint_aliases", &self.endpoint_aliases)
+            .field("relay_url", &self.relay_url)
+            .field("relay_host_id", &self.relay_host_id)
             .finish()
     }
 }
@@ -235,6 +241,8 @@ impl PairingRecord {
             added_at_unix_ms,
             last_endpoint: None,
             endpoint_aliases: Vec::new(),
+            relay_url: None,
+            relay_host_id: None,
         }
     }
 
@@ -1603,6 +1611,20 @@ mod tests {
         assert_eq!(r.added_at_unix_ms, 978_307_200_000);
         assert_eq!(r.last_endpoint, None);
         assert!(r.endpoint_aliases.is_empty());
+        assert!(r.relay_url.is_none());
+        assert!(r.relay_host_id.is_none());
+    }
+
+    #[test]
+    fn pairing_round_trip_keeps_relay_url() {
+        let mut record = PairingRecord::new("id-1", "host", vec![2_u8; 32], 1);
+        record.relay_url = Some("wss://relay.example".to_owned());
+        record.relay_host_id = Some("host-1".to_owned());
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(json.contains("\"relayUrl\":\"wss://relay.example\"") || json.contains("\"relayUrl\": \"wss://relay.example\""));
+        let parsed: PairingRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.relay_url.as_deref(), Some("wss://relay.example"));
+        assert_eq!(parsed.relay_host_id.as_deref(), Some("host-1"));
     }
 
     #[test]
@@ -1756,6 +1778,8 @@ mod tests {
             added_at_unix_ms: 1720000000000,
             last_endpoint: Some(PairingEndpoint::new("[fe80::1%en0]", 19730, 19731)),
             endpoint_aliases: vec![],
+            relay_url: None,
+            relay_host_id: None,
         };
 
         // When: converted to PairingSummary and serialized to JSON

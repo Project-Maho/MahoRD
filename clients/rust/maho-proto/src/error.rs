@@ -56,4 +56,6 @@ pub enum CodecError {
     },
     #[error("TCP frame length {0} is invalid")]
     InvalidFrameLength(u32),
+    #[error("unknown relay channel {0}")]
+    UnknownRelayChannel(u8),
 }

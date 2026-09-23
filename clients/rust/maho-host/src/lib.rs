@@ -24,6 +24,7 @@ pub mod inject_linux;
 pub mod inject_macos;
 #[cfg(target_os = "windows")]
 pub mod inject_windows;
+pub mod relay;
 #[cfg(target_os = "windows")]
 pub mod service_windows;
 pub mod session;

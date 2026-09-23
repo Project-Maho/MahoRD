@@ -12,6 +12,7 @@ pub mod latency;
 pub mod mcp_server;
 mod media;
 mod pairing;
+pub mod relay;
 mod receiver_stats;
 mod session;
 

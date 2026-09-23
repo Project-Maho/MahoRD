@@ -516,6 +516,8 @@ fn pairing_store_round_trip_and_deletion() {
         added_at_unix_ms: 1000,
         last_endpoint: None,
         endpoint_aliases: Vec::new(),
+        relay_url: None,
+        relay_host_id: None,
     };
     let record2 = maho_app::PairingRecord {
         id: "id-2".into(),
@@ -524,6 +526,8 @@ fn pairing_store_round_trip_and_deletion() {
         added_at_unix_ms: 2000,
         last_endpoint: None,
         endpoint_aliases: Vec::new(),
+        relay_url: None,
+        relay_host_id: None,
     };
     store.save(record1.clone()).unwrap();
     store.save(record2.clone()).unwrap();

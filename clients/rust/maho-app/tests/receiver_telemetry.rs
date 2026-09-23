@@ -86,6 +86,8 @@ impl Connected {
                 added_at_unix_ms: 0,
                 last_endpoint: None,
                 endpoint_aliases: Vec::new(),
+                relay_url: None,
+                relay_host_id: None,
             })
             .unwrap();
         session

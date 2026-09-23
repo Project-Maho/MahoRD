@@ -63,6 +63,14 @@ struct Cli {
     #[arg(long)]
     pairing_id: Option<String>,
 
+    /// Relay base URL to fall back to when the direct TCP connect fails.
+    #[arg(long)]
+    relay_url: Option<String>,
+
+    /// Stable relay host id that published itself on the relay.
+    #[arg(long)]
+    relay_host_id: Option<String>,
+
     /// Optional explicit path to pairing store file.
     #[arg(long)]
     pairing_store: Option<PathBuf>,
@@ -553,6 +561,8 @@ fn run_client(mut cli: Cli) -> Result<()> {
                 added_at_unix_ms: 0,
                 last_endpoint: None,
                 endpoint_aliases: Vec::new(),
+                relay_url: cli.relay_url.clone(),
+                relay_host_id: cli.relay_host_id.clone(),
             };
             info!(pairing_id = %pairing.id, "Connecting with explicit PSK");
             session
