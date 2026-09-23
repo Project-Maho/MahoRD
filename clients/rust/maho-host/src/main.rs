@@ -246,6 +246,13 @@ fn main() -> Result<()> {
 
     let server = HostServer::bind(config)?;
     println!("MahoRD bootstrap PIN: {pin}");
+    if cli.session_worker {
+        // The service worker has no console, so the println above is silently
+        // discarded and the bootstrap PIN would be invisible: a first pairing
+        // could never be completed remotely. Duplicate it into the service log
+        // (SYSTEM/Administrators only) instead.
+        maho_host::host_log(&format!("worker: bootstrap PIN {pin}"));
+    }
     println!("TCP listening on {}", server.tcp_addr()?);
     println!("UDP listening on {}", server.udp_addr()?);
     if let Some(url) = cli

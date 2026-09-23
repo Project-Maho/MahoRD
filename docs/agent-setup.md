@@ -13,6 +13,10 @@ Run the host inside the desktop session you intend to share:
 maho-host --pin generate
 ```
 
+If the host runs under launchd, systemd, or the Windows service manager, it
+has no console: read the bootstrap PIN from the redirected log instead — see
+[connect instructions](../README.md#connect-to-a-computer).
+
 On the agent's computer, replace `HOST` and `PIN` with the actual values:
 
 ```sh

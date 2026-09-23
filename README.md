@@ -191,6 +191,24 @@ window lasts five minutes; established pairings are used for later connections.
   privileges for input injection.
 - **macOS:** grant Screen Recording and Accessibility permissions.
 
+Running the host without a terminal (launchd, systemd, the Windows service
+manager): the daemon has no console, so read the PIN from wherever its
+standard output lands. The line is `MahoRD bootstrap PIN: <8 digits>` and it
+is regenerated on every daemon restart until the first pairing persists.
+
+- **launchd / systemd:** the service definition redirects stdout to a log
+  (`StandardOutPath`, `StandardOutput=`); read it, for example
+  `grep "bootstrap PIN" ~/Library/Logs/maho-host.log` or
+  `journalctl --user -u maho-host | grep "bootstrap PIN"`.
+  `--bootstrap-pin <8 digits>` fixes the PIN for scripted onboarding.
+- **Windows service (`MahoRDHost`, LocalSystem):** the session worker appends
+  the PIN to `%ProgramData%\MahoRD\service.log`, readable by SYSTEM and
+  Administrators only. Migrating an already-paired store instead of
+  re-pairing is covered in
+  [docs/windows-login-screen.md](docs/windows-login-screen.md).
+
+`--list-paired` and `--revoke <ID>` manage established pairings.
+
 ### 2. Open the desktop client
 
 ```sh
