@@ -58,6 +58,9 @@ pub const DEFAULT_UDP_PORT: u16 = 19_731;
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SESSION_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound on how long session teardown waits for the UDP sender thread to
+/// exit before closing the session without it.
+pub const SENDER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(300);
 /// The shared codec remains available through both legacy host paths.
@@ -142,6 +145,22 @@ impl SessionWatch {
 /// Pure decision predicate for the session stall watchdog.
 pub(crate) fn watchdog_should_abort(finished: bool, idle: Duration, timeout: Duration) -> bool {
     !finished && idle >= timeout
+}
+
+/// Waits for a worker that is expected to exit promptly, without letting a
+/// wedged worker hold session teardown open forever.
+///
+/// Returns `false` when the deadline expires; the caller closes the session
+/// anyway, leaving that one worker detached rather than hanging the daemon.
+fn join_with_deadline<T>(handle: thread::JoinHandle<T>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    handle.join().is_ok()
 }
 
 struct ConnectionPermit(Arc<AtomicUsize>);
@@ -3460,14 +3479,22 @@ impl HostServer {
             Ok(())
         })();
 
-        // Release blocked output sends before stopping or joining their producers.
+        // Stop the media pipeline before joining its consumer. `media.stop()`
+        // releases the producer's event sender, which is how the UDP sender
+        // thread observes a closed channel and exits. Joining first could wait
+        // forever on a sender that never wakes, and because the pipeline stop
+        // used to run last, that wait leaked the capture and encode workers at
+        // full CPU for the rest of the daemon's life.
         drop(media_receiver);
         if let Some(tx) = stop_sender_tx {
             let _ = tx.send(());
         }
-        if let Some(handle) = sender_thread {
-            if handle.join().is_err() {
-                warn!("UDP sender thread panicked");
+        if let Some(mut media) = media_handle.take() {
+            media.stop();
+        }
+        if let Some(handle) = sender_thread.take() {
+            if !join_with_deadline(handle, SENDER_JOIN_TIMEOUT) {
+                warn!("UDP sender thread did not exit before the teardown deadline");
             }
         }
         // Release anything the remote user was still holding before the session
@@ -3483,9 +3510,6 @@ impl HostServer {
                 scroll_dy: 0.0,
             };
             inject_input(&reset, |event| input.inject(event));
-        }
-        if let Some(mut media) = media_handle {
-            media.stop();
         }
         state = SessionState::Closed;
         if let Some(trace) = host_trace::enabled() {
@@ -6409,6 +6433,36 @@ mod tests {
             timeout
         ));
         assert!(!watchdog_should_abort(false, Duration::ZERO, timeout));
+    }
+
+    #[test]
+    fn join_with_deadline_reaps_a_finished_worker() {
+        let handle = thread::spawn(|| {});
+        assert!(join_with_deadline(handle, Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn join_with_deadline_gives_up_on_a_wedged_worker() {
+        // Session teardown must never wait indefinitely on the UDP sender. A
+        // sender that never exits used to hold the join open, and because the
+        // media pipeline was stopped after that join, its capture and encode
+        // workers leaked and kept spinning at full CPU.
+        let release = Arc::new(AtomicBool::new(false));
+        let worker_release = Arc::clone(&release);
+        let handle = thread::spawn(move || {
+            while !worker_release.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let started = Instant::now();
+        assert!(!join_with_deadline(handle, Duration::from_millis(50)));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "teardown must not block on a wedged worker"
+        );
+
+        release.store(true, Ordering::Relaxed);
     }
 
     #[test]
