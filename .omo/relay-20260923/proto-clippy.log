@@ -1,0 +1,9 @@
+    Checking libc v0.2.189
+    Checking crypto-common v0.1.7
+    Checking serde v1.0.229
+    Checking digest v0.10.7
+    Checking hmac v0.12.1
+    Checking cpufeatures v0.2.17
+    Checking sha2 v0.10.9
+    Checking maho-proto v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-proto)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.89s

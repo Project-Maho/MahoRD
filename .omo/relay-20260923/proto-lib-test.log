@@ -1,0 +1,27 @@
+   Compiling maho-proto v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-proto)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.84s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_proto-3a31ac7905b87f86)
+
+running 19 tests
+test media::tests::frame_chunk_accepts_last_legal_index ... ok
+test control::tests::input_ack_message_with_error ... ok
+test input::tests::encodes_and_decodes_unicode_char_event ... ok
+test control::tests::input_ack_message_roundtrip ... ok
+test control::tests::control_message_input_ack_roundtrip ... ok
+test control::tests::bodyless_control_message_rejects_trailing_bytes ... ok
+test media::tests::frame_chunk_decode_rejects_index_at_global_limit ... ok
+test media::tests::frame_chunk_encode_rejects_index_at_global_limit ... ok
+test media::tests::frame_header_rejects_size_beyond_chunk_capacity ... ok
+test media::tests::frame_header_accepts_exact_chunk_capacity ... ok
+test media::tests::frame_header_rejects_bytes_with_no_chunks ... ok
+test relay::tests::relay_control_json_roundtrip ... ok
+test relay::tests::relay_frame_rejects_short_header_bad_channel_and_oversize_payload ... ok
+test relay::tests::relay_frame_roundtrip_tcp_and_udp ... ok
+test relay::tests::relay_host_id_rejects_empty_and_illegal_chars ... ok
+test relay::tests::relay_token_matches_golden_vector ... ok
+test framing::tests::test_coalesced_burst_without_tail_zero_compactions ... ok
+test framing::tests::test_burst_1024_coalesced_frames_plus_partial_tail_compaction_limit ... ok
+test relay::tests::relay_token_rejects_wrong_secret ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

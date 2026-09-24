@@ -1,0 +1,9 @@
+   Compiling maho-host v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.49s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_host-7832581a575b547e)
+
+running 1 test
+test relay::tests::host_relay_writes_tcp_and_udp_payloads_to_local_sockets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 133 filtered out; finished in 0.03s
+

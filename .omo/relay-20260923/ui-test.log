@@ -1,0 +1,135 @@
+bun test v1.4.0 (34cbb9a40)
+
+src/lib/overlay.test.ts:
+(pass) keyboard events on overlay UI are not forwarded to the remote host [0.03ms]
+(pass) keyboard events on the video surface are forwarded to the remote host
+(pass) held input tracker is empty by default and tracks key state [0.03ms]
+(pass) releaseEvents emits mouse-ups then key-ups and clears state [0.14ms]
+(pass) releasing a key before releaseEvents drops it from the release batch
+(pass) mouse button up only releases buttons that were pressed
+(pass) held input tracker tracks middle button and emits MiddleMouseUp
+(pass) unsupported extra buttons never map to left button
+(pass) releaseEvents releases all held buttons in order [0.01ms]
+(pass) overlay state toggles expansion and notifies subscribers [0.03ms]
+(pass) overlay state tracks fullscreen pressed-state
+(pass) overlay state tracks pointer lock active state
+(pass) normalizeMouseButton correctly maps valid buttons and returns null for invalid [0.02ms]
+(pass) buttonUpType returns matching wire event type
+(pass) isRemoteInputTarget rejects invalid targets and identifies remote surfaces
+
+src/lib/ipc.test.ts:
+(pass) MAHO_COMMANDS registry > has exact length of 22 commands
+(pass) MAHO_COMMANDS registry > contains all 22 authoritative backend commands [0.01ms]
+(pass) MAHO_COMMANDS registry > contains all 7 dynamically invoked commands [0.06ms]
+(pass) isNativeAvailable > returns false when window.__TAURI__ is not present [0.02ms]
+(pass) isNativeAvailable > returns true when window.__TAURI__ exists
+(pass) invokeCommand > throws clear error when Tauri is not available [0.11ms]
+(pass) invokeCommand > dispatches to window.__TAURI__.core.invoke [0.05ms]
+(pass) invokeCommand > falls back to window.__TAURI__.invoke when core.invoke is absent [0.01ms]
+(pass) invokeCommand > falls back to window.__TAURI__.tauri
+(pass) named thin wrappers > calls each thin wrapper and dispatches expected command and args [0.10ms]
+
+src/lib/connection.test.ts:
+(pass) PIN and address validation matches backend without losing leading zeros [0.17ms]
+(pass) connect passes custom ports through invoke [0.14ms]
+(pass) invalid and unavailable connections never invoke; subscriptions and snapshots are isolated [0.07ms]
+(pass) exact IPC, waiting-video then rendered frame; no PIN in state and busy blocks connect [0.05ms]
+(pass) cancel pending connect (resolve) invalidates immediately and serializes one final cleanup [0.06ms]
+(pass) cancel pending connect (reject) invalidates immediately and serializes one final cleanup [0.04ms]
+(pass) pending connect settles before input release: teardown still waits for release [0.02ms]
+(pass) synchronous connecting subscription can cancel without losing native cleanup ownership [0.03ms]
+(pass) completed input release cannot disconnect an unpublished pending connect [0.03ms]
+(pass) connect rejection cleans up, retaining original error and retryable cleanup failure [0.07ms]
+(pass) a failed cleanup never wedges the client: reconnect is accepted without a retry [0.03ms]
+(pass) release failure is visible, does not prevent teardown, and is retryable without blocking reconnect [0.03ms]
+(pass) stats deduplicate, clear unavailable values, and failure does not disconnect [0.06ms]
+(pass) stale stats resolve and stale frame errors cannot alter new generation [0.04ms]
+(pass) stale stats reject and stale frame errors cannot alter new generation [0.02ms]
+(pass) remote-ended stats and current frame failures use the cleanup path [0.04ms]
+(pass) validateConnection accepts pairingId and passes through invoke [0.02ms]
+
+src/lib/renderer.test.ts:
+(pass) parseFrame > a well-formed buffer yields the right width, height, plane lengths and a null cursor [0.25ms]
+(pass) parseFrame > the same buffer plus a 9-byte tail yields the cursor x, y and visible flag [0.04ms]
+(pass) parseFrame > cursor type 0 yields visible false [0.03ms]
+(pass) parseFrame > cursor type > 0 (e.g. type 2) yields visible true
+(pass) parseFrame > buffers shorter than the header yield null instead of throwing
+(pass) parseFrame > buffers shorter than header+planes both yield null instead of throwing [0.03ms]
+(pass) parseFrame > buffers whose size does not match the framing exactly are rejected [0.02ms]
+(pass) parseFrame > an odd-height frame packed with a floor()'d uv plane is rejected, not mis-sliced
+(pass) parseFrame > calculates UV dimensions matching NV12 half-sampling math [0.02ms]
+(pass) shader artifact range validation > fails if limited-range BT.601 shader expansions or offsets are reintroduced in renderer.ts [0.66ms]
+(pass) BT.601 full-range NV12 round-trip > round-trips black (r=0, g=0, b=0) within 3/255 tolerance [0.11ms]
+(pass) BT.601 full-range NV12 round-trip > round-trips white (r=255, g=255, b=255) within 3/255 tolerance
+(pass) BT.601 full-range NV12 round-trip > round-trips mid grey (r=128, g=128, b=128) within 3/255 tolerance
+(pass) BT.601 full-range NV12 round-trip > round-trips pure red (r=255, g=0, b=0) within 3/255 tolerance
+(pass) BT.601 full-range NV12 round-trip > round-trips pure green (r=0, g=255, b=0) within 3/255 tolerance
+(pass) BT.601 full-range NV12 round-trip > round-trips pure blue (r=0, g=0, b=255) within 3/255 tolerance
+(pass) BT.601 full-range NV12 round-trip > discriminates against limited-range decoding with a tight <= 1/255 bound on mid grey
+(pass) BT.601 full-range NV12 round-trip > explicitly asserts that WHITE comes back near 255 without being clipped by limited-range math
+(pass) BT.601 full-range NV12 round-trip > explicitly asserts that BLACK comes back near 0 without being crushed by limited-range math
+(pass) WebGL context loss and restore > rebuilds the program, textures and state after webglcontextrestored [0.25ms]
+(pass) WebGL context loss and restore > does not assume tightly packed UV rows for an odd width [0.06ms]
+(pass) renderer hot path > render accepts a pre-parsed frame so the buffer is parsed once per frame [0.02ms]
+
+src/lib/library.test.ts:
+(pass) module exposes the same four contract exports [0.03ms]
+(pass) selection matches name, IP and OS; preserves order, identity and input [0.12ms]
+(pass) storage is a strict string-array boundary with normalized unique IP keys [0.14ms]
+(pass) non-default favorites persist across reload and changed pairing IDs, not missing records [0.09ms]
+(pass) filter changes emit synchronously; All clears flags but not query; snapshots isolate arrays [0.09ms]
+(pass) null or missing storage degrades to session-only favorites instead of crashing [0.02ms]
+(pass) read/write storage failure is visible while session choices survive refresh [0.07ms]
+(pass) latest requested refresh wins against stale success and rejection [0.06ms]
+(pass) loading/error retain prior inventory; empty success and unavailable remain distinct [0.04ms]
+(pass) newest error cannot be erased by an older successful refresh [0.02ms]
+
+src/features/library/HostGrid.test.tsx:
+(pass) HostGrid > proves grid rendering, controls, attributes, and interactions [5.97ms]
+(pass) HostGrid > 5. when statusMessage is set to a non-empty string, the grid is NOT rendered and the message text IS [0.44ms]
+
+src/features/session/SessionView.test.tsx:
+(pass) SessionView > renders SessionCanvas and floating session-overlay with pointer-events rules [2.11ms]
+(pass) SessionView > reproduces legacy copy: host name badge, live stats line, and buttons [0.81ms]
+(pass) SessionView > toggles launcher panel when Expand button is clicked [1.27ms]
+(pass) SessionView > on teardown releases held inputs via agentReleaseAll [0.54ms]
+(pass) SessionView > App phase routing > renders the launcher when connection phase is idle [4.16ms]
+(pass) SessionView > App phase routing > renders SessionView when connection phase is connecting, waiting-video, or streaming [1.68ms]
+(pass) SessionView > App phase routing > passes shared connection to ComputersPage so triggering connect switches App to SessionView [3.26ms]
+(pass) SessionView > Remote input forwarding > forwards repeated keyboard events so held keys repeat on the host [0.66ms]
+(pass) SessionView > Remote input forwarding > propagates renderer error to onError and does not mark frame rendered [0.40ms]
+
+src/features/session/useRemoteInput.test.ts:
+(pass) useRemoteInput > keydown with repeat true is forwarded so held keys repeat on the host [0.24ms]
+(pass) useRemoteInput > a drag that leaves the viewport keeps sending move events from the window [0.18ms]
+(pass) useRemoteInput > hover motion outside the viewport with no button held is not forwarded [0.10ms]
+(pass) useRemoteInput > rebinds to a new viewport element and releases held inputs on disconnect [0.24ms]
+(pass) useRemoteInput > the modifier bitmask is shift=1, ctrl=2, alt=4, meta=8 and combines correctly [0.10ms]
+(pass) useRemoteInput > a held button releases exactly once on teardown and is not double-sent [0.10ms]
+(pass) useRemoteInput > releaseAll function returned can be invoked directly [0.08ms]
+(pass) useRemoteInput > releases held inputs on overlay pointerdown, except for #btn-home and #btn-disconnect [0.10ms]
+(pass) useRemoteInput > handles viewport wheel event with preventDefault and clamped coords [0.09ms]
+(pass) useRemoteInput > maps wheel coords through the letterbox and forwards keyboard modifiers [0.09ms]
+(pass) useRemoteInput > mousedown on the viewport focuses the video canvas [0.07ms]
+(pass) useRemoteInput > handles viewport contextmenu with preventDefault [0.06ms]
+
+src/features/session/SessionSettingsPanel.test.tsx:
+(pass) SessionSettingsPanel > changing the volume slider calls the volume wrapper with a 0..1 value, not 0..100 [0.04ms]
+(pass) SessionSettingsPanel > the mute button toggles against the CURRENT muted state [0.02ms]
+(pass) SessionSettingsPanel > choosing a bitrate calls the bitrate wrapper with the Mbps number and persists to localStorage [0.04ms]
+(pass) SessionSettingsPanel > refresh button calls listAudioDevices and apply button calls setAudioDevice [0.03ms]
+(pass) SessionSettingsPanel > renders SessionSettingsPanel without throwing [9.02ms]
+
+src/features/session/SessionCanvas.test.tsx:
+(pass) SessionCanvas > drives the drawing buffer from the frame dimensions, not hardcoded JSX attributes [32.54ms]
+(pass) SessionCanvas > THE CRITICAL INVARIANT: creates renderer exactly once across multiple re-renders and disposes on unmount [0.53ms]
+(pass) SessionCanvas > drives frames through pollFrame when active [16.22ms]
+(pass) SessionCanvas > cancels rAF and stops polling when active turns false [16.62ms]
+(pass) SessionCanvas > updateRemoteCursor > hides cursor when visible is false or coordinates are negative [0.02ms]
+(pass) SessionCanvas > updateRemoteCursor > calculates projection transform matching legacy letterbox math
+(pass) SessionCanvas > updateRemoteCursor > calculates pillarbox projection when canvas aspect is wider than video aspect
+
+ 109 pass
+ 0 fail
+ 709 expect() calls
+Ran 109 tests across 10 files. [460.00ms]

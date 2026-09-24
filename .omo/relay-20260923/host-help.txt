@@ -1,0 +1,54 @@
+MahoRD v3 macOS screen streaming host.
+
+First run: macOS prompts for Screen Recording and Accessibility. Grant both in System Settings > Privacy & Security, then relaunch the host. Screen Recording is required for capture; Accessibility is required for remote input injection.
+
+Usage: maho-host [OPTIONS]
+
+Options:
+      --bootstrap-pin <PIN>
+          Use this exact 8-digit bootstrap PIN
+
+      --pin <generate>
+          Generate and display a fresh 8-digit bootstrap PIN (`--pin generate`)
+
+      --list-paired
+          List persisted paired devices and exit
+
+      --revoke <ID>
+          Revoke one pairing ID and exit
+
+      --lan-bitrate-mbps <MBPS>
+          LAN HEVC bitrate in Mbps. Accepted range: 50 through 150. Without this flag the compatibility default is 8 Mbps
+
+      --no-audio
+          Disable ScreenCaptureKit host-audio capture
+
+      --auto-approve
+          Automatically approve incoming pairing requests (non-interactive / automation)
+
+      --output <NAME>
+          Output name to capture (Linux). Auto-detects the focused output when omitted
+
+      --install-service
+          Register and start the LocalSystem service
+
+      --uninstall-service
+          Stop and remove the LocalSystem service
+
+      --service-run
+          SCM entry point for the LocalSystem service
+
+      --session-worker
+          Mark this process as a service-spawned session worker
+
+      --relay <URL>
+          Relay base URL (`ws://`, `wss://`, `http://`, or `https://`). Also read from MAHO_RELAY_URL
+
+      --relay-host-id <ID>
+          Stable relay host id. Defaults to a sanitized hostname. Also read from MAHO_RELAY_HOST_ID
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version

@@ -1,0 +1,13 @@
+   Compiling maho-relay v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-relay)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.68s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_relay-34851b1ebe192493)
+
+running 5 tests
+test tests::empty_relay_auth_secret_fails_config ... ok
+test tests::register_rejects_wrong_hmac ... ok
+test tests::bridge_forwards_tcp_and_udp_both_directions ... ok
+test tests::fifth_session_is_rejected ... ok
+test tests::payload_over_2mib_is_rejected ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

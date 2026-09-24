@@ -1,0 +1,22 @@
+   Compiling libc v0.2.189
+   Compiling crypto-common v0.1.7
+   Compiling serde_derive v1.0.229
+   Compiling digest v0.10.7
+   Compiling serde v1.0.229
+   Compiling hmac v0.12.1
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling maho-proto v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-proto)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.11s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_proto-3a31ac7905b87f86)
+
+running 6 tests
+test relay::tests::relay_frame_rejects_short_header_bad_channel_and_oversize_payload ... ok
+test relay::tests::relay_frame_roundtrip_tcp_and_udp ... ok
+test relay::tests::relay_host_id_rejects_empty_and_illegal_chars ... ok
+test relay::tests::relay_token_matches_golden_vector ... ok
+test relay::tests::relay_token_rejects_wrong_secret ... ok
+test relay::tests::relay_control_json_roundtrip ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+

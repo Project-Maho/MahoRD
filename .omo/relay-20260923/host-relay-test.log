@@ -1,0 +1,39 @@
+   Compiling futures-macro v0.3.34
+   Compiling tracing v0.1.44
+   Compiling serde v1.0.229
+   Compiling bindgen v0.72.1
+   Compiling hyper v1.11.1
+   Compiling sha1 v0.10.7
+   Compiling futures-util v0.3.34
+   Compiling axum-core v0.5.6
+   Compiling tracing-subscriber v0.3.23
+   Compiling maho-render v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-render)
+   Compiling serde_urlencoded v0.7.1
+   Compiling maho-proto v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-proto)
+   Compiling tungstenite v0.29.0
+   Compiling tungstenite v0.26.2
+   Compiling tower v0.5.3
+   Compiling hyper-util v0.1.20
+   Compiling tokio-tungstenite v0.26.2
+   Compiling tower-http v0.6.11
+   Compiling tokio-tungstenite v0.29.0
+   Compiling ffmpeg-sys-next v8.1.0
+   Compiling hyper-rustls v0.27.9
+   Compiling axum v0.8.9
+   Compiling ffmpeg-next v8.1.0
+   Compiling reqwest v0.12.28
+   Compiling maho-net v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-net)
+   Compiling maho-relay v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-relay)
+   Compiling maho-decode v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-decode)
+   Compiling maho-app v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-app)
+   Compiling maho-host v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 39s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_host-1500b2757221c998)
+
+running 3 tests
+test relay::tests::backoff_caps_at_thirty_seconds ... ok
+test relay::tests::register_url_rewrites_https_and_appends_path ... ok
+test relay::tests::sanitize_host_id_drops_illegal_chars ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.00s
+

@@ -1,0 +1,9 @@
+   Compiling maho-app v0.1.0 (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/maho-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.37s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_app-adef2e1e368000f5)
+
+running 1 test
+test pairing::tests::pairing_round_trip_keeps_relay_url ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 160 filtered out; finished in 0.00s
+

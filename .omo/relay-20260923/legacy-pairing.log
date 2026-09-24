@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.66s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_app-cbd5cb72d18bfe60)
+
+running 1 test
+test pairing::tests::test_legacy_record_readability ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 159 filtered out; finished in 0.08s
+
