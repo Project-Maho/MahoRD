@@ -754,13 +754,16 @@ fn reprobe_output_name(pinned: Option<&str>) -> Option<String> {
     reprobe_output_if_missing(pinned, monitors.as_ref())
 }
 
+/// Lists live-looking Hyprland instance signatures, newest first.
+///
+/// Deliberately ignores `HYPRLAND_INSTANCE_SIGNATURE`: that variable is the one
+/// under suspicion here, because a daemon started before a Hyprland restart
+/// keeps the dead signature for its whole lifetime. Instance directories and
+/// their sockets outlive the compositor that created them, so ordering by
+/// modification time is what puts the live instance first; the caller still
+/// probes each candidate, since only a successful probe proves liveness.
 #[cfg(target_os = "linux")]
-fn find_hyprland_instance_signature() -> Option<String> {
-    if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
-        if !sig.is_empty() {
-            return Some(sig);
-        }
-    }
+fn hyprland_instance_candidates() -> Vec<String> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -768,25 +771,40 @@ fn find_hyprland_instance_signature() -> Option<String> {
             std::path::PathBuf::from(format!("/run/user/{uid}"))
         });
     let hypr_dir = runtime_dir.join("hypr");
-    let entries = std::fs::read_dir(hypr_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() && path.join(".socket.sock").exists() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                return Some(name.to_owned());
+    let Ok(entries) = std::fs::read_dir(hypr_dir) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<(std::time::SystemTime, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() || !path.join(".socket.sock").exists() {
+                return None;
             }
-        }
-    }
-    None
+            let name = path.file_name().and_then(|name| name.to_str())?.to_owned();
+            let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok());
+            Some((modified.unwrap_or(std::time::UNIX_EPOCH), name))
+        })
+        .collect();
+    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    candidates.into_iter().map(|(_, name)| name).collect()
 }
 
-/// Probes Hyprland monitors using `hyprctl monitors -j`.
+/// Runs `hyprctl monitors -j` against an explicit instance signature.
+///
+/// A `None` signature drops any inherited `HYPRLAND_INSTANCE_SIGNATURE` instead
+/// of leaving it for `hyprctl` to pick up: the callers only reach the bare probe
+/// once the inherited value is known to be empty or already proven stale, so
+/// passing it through would just fail the same way a second time.
 #[cfg(target_os = "linux")]
-pub fn probe_hyprland_monitors() -> Option<serde_json::Value> {
+fn hyprland_monitors_with_signature(signature: Option<&str>) -> Option<serde_json::Value> {
     let mut cmd = std::process::Command::new("hyprctl");
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
-        if let Some(sig) = find_hyprland_instance_signature() {
-            cmd.arg("-i").arg(sig);
+    match signature {
+        Some(signature) => {
+            cmd.arg("-i").arg(signature);
+        }
+        None => {
+            cmd.env_remove("HYPRLAND_INSTANCE_SIGNATURE");
         }
     }
     cmd.arg("monitors").arg("-j");
@@ -795,6 +813,55 @@ pub fn probe_hyprland_monitors() -> Option<serde_json::Value> {
         return None;
     }
     serde_json::from_slice(&output.stdout).ok()
+}
+
+/// Resolves monitor topology, rediscovering the instance when the inherited
+/// signature is stale.
+///
+/// An inherited signature that no longer names a live instance makes `hyprctl`
+/// exit non-zero. Treating that as "no compositor" silently degrades input
+/// geometry to a single-output fallback sized to the captured output, which
+/// then scales every pointer coordinate across the real desktop width and
+/// sends the remote cursor to the wrong place.
+#[cfg(target_os = "linux")]
+fn hyprland_monitors_from_candidates<F>(
+    inherited: Option<&str>,
+    candidates: &[String],
+    mut probe: F,
+) -> Option<serde_json::Value>
+where
+    F: FnMut(Option<&str>) -> Option<serde_json::Value>,
+{
+    if let Some(signature) = inherited.filter(|signature| !signature.is_empty()) {
+        if let Some(monitors) = probe(Some(signature)) {
+            return Some(monitors);
+        }
+        warn!(
+            signature,
+            "HYPRLAND_INSTANCE_SIGNATURE is stale; rediscovering the live Hyprland instance"
+        );
+    }
+    for signature in candidates {
+        if Some(signature.as_str()) == inherited {
+            continue;
+        }
+        if let Some(monitors) = probe(Some(signature)) {
+            return Some(monitors);
+        }
+    }
+    probe(None)
+}
+
+/// Probes Hyprland monitors using `hyprctl monitors -j`.
+#[cfg(target_os = "linux")]
+pub fn probe_hyprland_monitors() -> Option<serde_json::Value> {
+    let inherited = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok();
+    let candidates = hyprland_instance_candidates();
+    hyprland_monitors_from_candidates(
+        inherited.as_deref(),
+        &candidates,
+        hyprland_monitors_with_signature,
+    )
 }
 
 /// Derives `OutputGeometry` from compositor monitor topology.
@@ -4780,6 +4847,98 @@ mod tests {
 
         let not_an_array: serde_json::Value = serde_json::json!({"name": "HDMI-A-1"});
         assert_eq!(select_focused_output(&not_an_array), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_hyprland_signature_falls_back_to_rediscovered_instance() {
+        // A daemon that outlives a Hyprland restart keeps the dead signature in
+        // its environment. `hyprctl -i <stale>` fails, and treating that as "no
+        // compositor" degraded input geometry to a single-output fallback, so
+        // the pointer was scaled across the wrong desktop width.
+        let stale = "efb5_1790252082_167242086";
+        let live = "efb5_1790252620_1733994707";
+        let older = "efb5_1789367143_909438767";
+        let candidates = vec![live.to_owned(), stale.to_owned(), older.to_owned()];
+        let monitors = serde_json::json!([{"name": "HDMI-A-2"}]);
+        let mut probed: Vec<Option<String>> = Vec::new();
+
+        let resolved = hyprland_monitors_from_candidates(Some(stale), &candidates, |sig| {
+            probed.push(sig.map(str::to_owned));
+            (sig == Some(live)).then(|| monitors.clone())
+        });
+
+        assert_eq!(resolved, Some(monitors));
+        assert_eq!(
+            probed,
+            vec![Some(stale.to_owned()), Some(live.to_owned())],
+            "a stale signature must be retried against the newest live instance"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_hyprland_signature_is_used_without_rediscovery() {
+        let live = "efb5_1790252620_1733994707";
+        let candidates = vec![live.to_owned(), "other".to_owned()];
+        let monitors = serde_json::json!([{"name": "HDMI-A-2"}]);
+        let mut probes = 0_u32;
+
+        let resolved = hyprland_monitors_from_candidates(Some(live), &candidates, |_| {
+            probes += 1;
+            Some(monitors.clone())
+        });
+
+        assert_eq!(resolved, Some(monitors));
+        assert_eq!(probes, 1, "a live signature must be probed exactly once");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_or_absent_signature_uses_candidates_then_bare_probe() {
+        let monitors = serde_json::json!([{"name": "HDMI-A-2"}]);
+
+        // An empty inherited signature is not a candidate at all.
+        let candidates = vec!["live".to_owned()];
+        let mut probed: Vec<Option<String>> = Vec::new();
+        let resolved = hyprland_monitors_from_candidates(Some(""), &candidates, |sig| {
+            probed.push(sig.map(str::to_owned));
+            (sig == Some("live")).then(|| monitors.clone())
+        });
+        assert_eq!(resolved, Some(monitors));
+        assert_eq!(probed, vec![Some("live".to_owned())]);
+
+        // With nothing discoverable the bare probe still runs; the caller then
+        // falls back to the single-output geometry it already owned.
+        let mut bare: Vec<Option<String>> = Vec::new();
+        let resolved = hyprland_monitors_from_candidates(None, &[], |sig| {
+            bare.push(sig.map(str::to_owned));
+            None
+        });
+        assert_eq!(resolved, None);
+        assert_eq!(bare, vec![None]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_signature_is_not_reprobed_as_a_candidate() {
+        // The stale signature is already known-dead, so discovery must not
+        // spend a second `hyprctl` round trip on it.
+        let stale = "efb5_1790252082_167242086";
+        let candidates = vec![stale.to_owned(), "live".to_owned()];
+        let mut probed: Vec<Option<String>> = Vec::new();
+
+        let resolved = hyprland_monitors_from_candidates(Some(stale), &candidates, |sig| {
+            probed.push(sig.map(str::to_owned));
+            None
+        });
+
+        assert_eq!(resolved, None);
+        assert_eq!(
+            probed,
+            vec![Some(stale.to_owned()), Some("live".to_owned()), None],
+            "the stale signature must not be retried during discovery"
+        );
     }
 
     #[cfg(target_os = "linux")]
