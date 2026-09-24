@@ -40,3 +40,16 @@ clients/rust/target-ios-device/
 
 # Temporary debugging journals
 .debug-journal.md
+
+# Task scratch directories whose bulk is compiled output, disk images and
+# screenshots rather than reviewable text. The text records worth keeping are
+# tracked explicitly.
+.omo/agent-first-20260909/
+.omo/encoder-opt-20260909/
+.omo/lan-discovery-20260909/
+.omo/mass-ulw-20260906/
+.omo/publication-20260909/
+.omo/release-deploy-20260909/
+.omo/remaining-performance-20260909/
+.omo/rust-perf-20260908/
+.omo/scaler-causality-20260909/

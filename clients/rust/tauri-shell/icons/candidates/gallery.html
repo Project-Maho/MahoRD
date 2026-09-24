@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>EclipticRD Logo Candidates - Diagonally Staggered PC & Phone</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #101216;
+      color: #f1f3f5;
+      padding: 40px 24px 80px;
+    }
+    header {
+      text-align: center;
+      max-width: 960px;
+      margin: 0 auto 36px;
+    }
+    h1 {
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: -0.8px;
+      margin-bottom: 12px;
+    }
+    .subtitle {
+      color: #8c93a4;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+    .quick-nav {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      margin-top: 20px;
+      position: sticky;
+      top: 16px;
+      z-index: 100;
+      background: rgba(16, 18, 22, 0.85);
+      backdrop-filter: blur(12px);
+      padding: 10px 0;
+      border-radius: 999px;
+      max-width: 620px;
+      margin-left: auto;
+      margin-right: auto;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .quick-nav a {
+      color: #cfd4dc;
+      text-decoration: none;
+      padding: 6px 16px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .quick-nav a:hover, .quick-nav a.active {
+      background: #ff5a5f;
+      color: white;
+      box-shadow: 0 0 16px rgba(255, 90, 95, 0.35);
+    }
+
+    .section-title {
+      font-size: 22px;
+      font-weight: 700;
+      margin: 48px 0 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .section-tag {
+      font-size: 13px;
+      background: rgba(255, 90, 95, 0.15);
+      color: #ff5a5f;
+      border: 1px solid rgba(255, 90, 95, 0.3);
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+
+    /* Hero Comparison (3 Columns: Uploaded Reference + Staggered V1 + Staggered V2) */
+    .hero-compare {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 24px;
+      max-width: 1280px;
+      margin: 0 auto 40px;
+    }
+    .hero-card {
+      background: #171b23;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 20px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .hero-card:hover {
+      transform: translateY(-6px);
+      box-shadow: 0 20px 45px rgba(0,0,0,0.6);
+    }
+    .hero-card.focus {
+      border: 2px solid #ff5a5f;
+      box-shadow: 0 0 25px rgba(255, 90, 95, 0.25);
+    }
+    .hero-header {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 12px 18px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .hero-card.focus .hero-header {
+      background: rgba(255, 90, 95, 0.15);
+      border-bottom-color: rgba(255, 90, 95, 0.25);
+    }
+    .hero-header .tag {
+      font-weight: 800;
+      font-size: 13px;
+      color: #ff5a5f;
+      letter-spacing: 0.5px;
+    }
+    .hero-header .subtitle-tag {
+      font-size: 11px;
+      color: #c0c6d4;
+      background: rgba(0,0,0,0.4);
+      padding: 3px 8px;
+      border-radius: 6px;
+    }
+    .hero-img-wrap {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      background: #0c0e11;
+    }
+    .hero-img-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .hero-body {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+    }
+    .hero-title {
+      font-size: 19px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .hero-desc {
+      font-size: 13.5px;
+      color: #9299a9;
+      line-height: 1.5;
+      margin-bottom: 16px;
+      flex: 1;
+    }
+
+    /* Dock Mini Preview Simulator */
+    .dock-preview-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(0,0,0,0.3);
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.04);
+    }
+    .dock-label {
+      font-size: 11px;
+      color: #6c7585;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .dock-sim-icons {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .dock-sim-icon {
+      border-radius: 6px;
+      overflow: hidden;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+    }
+    .dock-sim-icon img {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .sim-40 { width: 36px; height: 36px; border-radius: 8px; }
+    .sim-24 { width: 22px; height: 22px; border-radius: 5px; }
+    .sim-16 { width: 15px; height: 15px; border-radius: 3px; }
+
+    /* Modal / Lightbox */
+    .modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.88);
+      backdrop-filter: blur(16px);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .modal.active {
+      display: flex;
+    }
+    .modal-content {
+      position: relative;
+      max-width: 620px;
+      width: 100%;
+      background: #181b22;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.1);
+      overflow: hidden;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.8);
+    }
+    .modal-img-wrap {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      background: #0b0d10;
+    }
+    .modal-img-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .modal-info {
+      padding: 20px 24px;
+    }
+    .modal-close {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      background: rgba(0,0,0,0.6);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: white;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+    }
+    .modal-close:hover {
+      background: #ff5a5f;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>EclipticRD Logo Candidates</h1>
+    <p class="subtitle">지정해주신 <strong>스탠드 모니터 형태</strong>를 기반으로,<br>레퍼런스처럼 <strong>좌우 순서를 반전(좌: 모니터, 우: 스마트폰)</strong>하고 <strong>상하 대각선으로 살짝 비스듬히 걸치도록</strong> 정밀 생성한 결과입니다.</p>
+    <div class="quick-nav">
+      <a href="#custom-section" class="active">✨ 비스듬한 대각선 걸침 2종</a>
+      <a href="gallery.html">전체 갤러리 새로고침</a>
+    </div>
+  </header>
+
+  <!-- SECTION 0: STAGGERED HERO COMPARE -->
+  <div id="custom-section">
+    <div class="section-title">
+      🎯 지정 모니터 + 좌우 순서 반전 + 상하 대각선 걸침
+      <span class="section-tag">✨ 요청 완벽 반영</span>
+    </div>
+
+    <div class="hero-compare">
+      <!-- UPLOADED REFERENCE (PHONE LEFT, MONITOR RIGHT) -->
+      <div class="hero-card" onclick="openModal({src:'user_uploaded_reference.png', no:'UPLOADED', title:'지정 모니터 형태 (원본)', desc:'사용자 업로드 이미지. 모니터 형태(스탠드/받침대)의 기준 레퍼런스.', dockScore:'★★★★☆'})">
+        <div class="hero-header">
+          <span class="tag" style="color: #a0a6b5;">BASE REFERENCE</span>
+          <span class="subtitle-tag">지정 모니터 형태 (업로드 원본)</span>
+        </div>
+        <div class="hero-img-wrap">
+          <img src="user_uploaded_reference.png" alt="Uploaded Reference" />
+        </div>
+        <div class="hero-body">
+          <div class="hero-title">지정 모니터 형태 (업로드 이미지)</div>
+          <div class="hero-desc">사용자 지정 모니터 형태입니다. 좌측 폰 / 우측 모니터 구도였으며, 이 모니터 모양을 그대로 가져와 좌우 순서를 반전하고 비스듬히 걸치는 구도를 만들었습니다.</div>
+          <div class="dock-preview-row">
+            <span class="dock-label">Dock 크기별:</span>
+            <div class="dock-sim-icons">
+              <div class="dock-sim-icon sim-40"><img src="user_uploaded_reference.png" /></div>
+              <div class="dock-sim-icon sim-24"><img src="user_uploaded_reference.png" /></div>
+              <div class="dock-sim-icon sim-16"><img src="user_uploaded_reference.png" /></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STAGGERED V1: MONITOR (LEFT & HIGHER) + PHONE (RIGHT & LOWER) -->
+      <div class="hero-card focus" onclick="openModal({src:'e08_staggered_v1_pc_high_phone_low.jpg', no:'STAGGERED V1', title:'🖥️ 모니터(좌-상단) + 📱 스마트폰(우-하단)', desc:'지정 모니터 형태 완벽 유지! 좌측 모니터가 살짝 위에 위치하고, 우측 스마트폰이 살짝 아래로 내려와 대각선으로 자연스럽게 걸치는 구도.', dockScore:'★★★★★ (최고 추천: E-08 원본과 동일한 경사도)'})">
+        <div class="hero-header">
+          <span class="tag">STAGGERED V1 (최고 추천)</span>
+          <span class="subtitle-tag">🖥️ 모니터(좌-상단) ➔ 📱 폰(우-하단)</span>
+        </div>
+        <div class="hero-img-wrap">
+          <img src="e08_staggered_v1_pc_high_phone_low.jpg" alt="Staggered V1: Monitor Left-High, Phone Right-Low" />
+        </div>
+        <div class="hero-body">
+          <div class="hero-title">🖥️ 모니터(좌-상단) ➔ 📱 폰(우-하단)</div>
+          <div class="hero-desc"><strong>E-08 오리지널 레퍼런스와 정확히 동일한 상하 대각선 경사도</strong>입니다. 좌측의 스탠드 모니터가 살짝 위에 걸치고, 우측 스마트폰이 아래로 내려와 안정적인 대각선 오프셋을 형성합니다.</div>
+          <div class="dock-preview-row">
+            <span class="dock-label">Dock 크기별:</span>
+            <div class="dock-sim-icons">
+              <div class="dock-sim-icon sim-40"><img src="e08_staggered_v1_pc_high_phone_low.jpg" /></div>
+              <div class="dock-sim-icon sim-24"><img src="e08_staggered_v1_pc_high_phone_low.jpg" /></div>
+              <div class="dock-sim-icon sim-16"><img src="e08_staggered_v1_pc_high_phone_low.jpg" /></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STAGGERED V2: MONITOR (LEFT & LOWER) + PHONE (RIGHT & HIGHER) -->
+      <div class="hero-card focus" onclick="openModal({src:'e08_staggered_v2_pc_low_phone_high.jpg', no:'STAGGERED V2', title:'🖥️ 모니터(좌-하단) + 📱 스마트폰(우-상단)', desc:'좌측 모니터가 스탠드 받침대와 함께 아래쪽에 안정적으로 안착하고, 우측 스마트폰이 살짝 위쪽으로 솟아오른 형태의 대각선 걸침 구도.', dockScore:'★★★★★ (균형미 우수)'})">
+        <div class="hero-header">
+          <span class="tag">STAGGERED V2</span>
+          <span class="subtitle-tag">🖥️ 모니터(좌-하단) ➔ 📱 폰(우-상단)</span>
+        </div>
+        <div class="hero-img-wrap">
+          <img src="e08_staggered_v2_pc_low_phone_high.jpg" alt="Staggered V2: Monitor Left-Low, Phone Right-High" />
+        </div>
+        <div class="hero-body">
+          <div class="hero-title">🖥️ 모니터(좌-하단) ➔ 📱 폰(우-상단)</div>
+          <div class="hero-desc">좌측의 스탠드 모니터가 하단에 든든하게 받쳐주고, 우측 스마트폰이 살짝 위쪽으로 올라와 모바일로의 확장감을 주는 역 대각선 걸침 구도입니다.</div>
+          <div class="dock-preview-row">
+            <span class="dock-label">Dock 크기별:</span>
+            <div class="dock-sim-icons">
+              <div class="dock-sim-icon sim-40"><img src="e08_staggered_v2_pc_low_phone_high.jpg" /></div>
+              <div class="dock-sim-icon sim-24"><img src="e08_staggered_v2_pc_low_phone_high.jpg" /></div>
+              <div class="dock-sim-icon sim-16"><img src="e08_staggered_v2_pc_low_phone_high.jpg" /></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL -->
+  <div class="modal" id="modal" onclick="closeModal(event)">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <div class="modal-img-wrap">
+        <img id="modalImg" src="" alt="" />
+      </div>
+      <div class="modal-info">
+        <h2 id="modalTitle" style="font-size: 20px; margin-bottom: 8px;"></h2>
+        <p id="modalDesc" style="color: #9299a9; font-size: 14px; line-height: 1.5;"></p>
+        <p id="modalDock" style="color: #ffc107; font-weight: 600; font-size: 13px; margin-top: 10px;"></p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function openModal(item) {
+      document.getElementById("modalImg").src = item.src;
+      document.getElementById("modalTitle").textContent = `[${item.no}] ${item.title}`;
+      document.getElementById("modalDesc").textContent = item.desc;
+      document.getElementById("modalDock").textContent = `Dock 가독성: ${item.dockScore}`;
+      document.getElementById("modal").classList.add("active");
+    }
+
+    function closeModal() {
+      document.getElementById("modal").classList.remove("active");
+    }
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeModal();
+    });
+  </script>
+</body>
+</html>

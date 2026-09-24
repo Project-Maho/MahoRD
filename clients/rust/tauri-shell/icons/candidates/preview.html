@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>EclipticRD Logo Concepts - Ecliptic Edition</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #121418;
+      color: #f1f3f5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 32px 16px 64px;
+      min-height: 100vh;
+    }
+    h1 {
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 8px;
+    }
+    .badge-group {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .tab-btn {
+      background: rgba(255, 255, 255, 0.06);
+      color: #a0a6b5;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      padding: 8px 18px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .tab-btn.active {
+      background: #ff5a5f;
+      color: white;
+      border-color: #ff5a5f;
+      box-shadow: 0 0 16px rgba(255, 90, 95, 0.4);
+    }
+    .carousel-container {
+      position: relative;
+      width: 100%;
+      max-width: 680px;
+      background: #1a1d24;
+      border-radius: 20px;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.08);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+    }
+    .image-frame {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      max-width: 520px;
+      border-radius: 16px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0f1013;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+    }
+    .image-frame img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: opacity 0.2s ease-in-out;
+    }
+    .nav-btn {
+      position: absolute;
+      top: 42%;
+      transform: translateY(-50%);
+      background: rgba(30, 34, 42, 0.85);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: white;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(8px);
+      transition: all 0.2s ease;
+      user-select: none;
+      z-index: 10;
+    }
+    .nav-btn:hover {
+      background: #ff5a5f;
+      border-color: #ff5a5f;
+      transform: translateY(-50%) scale(1.08);
+    }
+    .nav-btn.prev { left: 16px; }
+    .nav-btn.next { right: 16px; }
+
+    .info-card {
+      margin-top: 20px;
+      width: 100%;
+      text-align: center;
+    }
+    .info-number {
+      font-size: 13px;
+      font-weight: 700;
+      color: #ff5a5f;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .info-title {
+      font-size: 20px;
+      font-weight: 600;
+      margin: 4px 0 8px;
+    }
+    .info-desc {
+      font-size: 14px;
+      color: #9aa2b1;
+      max-width: 500px;
+      margin: 0 auto;
+      line-height: 1.5;
+    }
+    .info-dock {
+      margin-top: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #ffc107;
+    }
+
+    .thumbnails {
+      display: flex;
+      gap: 8px;
+      margin-top: 24px;
+      max-width: 680px;
+      overflow-x: auto;
+      padding: 8px 4px;
+    }
+    .thumb {
+      width: 54px;
+      height: 54px;
+      border-radius: 10px;
+      overflow: hidden;
+      cursor: pointer;
+      border: 2px solid transparent;
+      opacity: 0.5;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .thumb.active {
+      opacity: 1;
+      border-color: #ff5a5f;
+      transform: scale(1.08);
+    }
+    .thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .hint {
+      margin-top: 16px;
+      color: #6c757d;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>EclipticRD Logo Concepts</h1>
+  <div class="badge-group">
+    <button class="tab-btn active" id="tabEcliptic" onclick="switchSet('ecliptic')">🪐 Ecliptic 테마 10선 (신규)</button>
+    <button class="tab-btn" id="tabOriginal" onclick="switchSet('original')">🖥️ 오리지널 10선 (초기)</button>
+  </div>
+
+  <div class="carousel-container">
+    <button class="nav-btn prev" onclick="prevSlide()">&#10094;</button>
+    <div class="image-frame">
+      <img id="mainImage" src="ecliptic_01_orbit_arc.jpg" alt="Logo Concept" />
+    </div>
+    <button class="nav-btn next" onclick="nextSlide()">&#10095;</button>
+
+    <div class="info-card">
+      <div class="info-number" id="slideNumber">ECLIPTIC 01 / 10</div>
+      <h2 class="info-title" id="slideTitle">황도 궤도 아크 & 네온 코어</h2>
+      <p class="info-desc" id="slideDesc">두 화면 사이를 부드럽게 관통하는 타원형 황도 궤도 링. Concept 01의 안정감에 천체 궤도 동역학을 부여.</p>
+      <div class="info-dock" id="slideDock">Dock 작은 크기 시인성: ★★★★★ (강력 추천)</div>
+    </div>
+  </div>
+
+  <div class="thumbnails" id="thumbContainer"></div>
+  <div class="hint">키보드 좌우 방향키(←, →)로도 슬라이드를 넘길 수 있습니다.</div>
+
+  <script>
+    const sets = {
+      ecliptic: [
+        {
+          src: "ecliptic_10_synodic_link.jpg",
+          title: "화이트 프레임 & 듀얼 행성 노드 궤도",
+          desc: "정제된 화이트 모니터 라인과 두 개의 발광 행성 노드를 잇는 코랄 궤도 링. 애플 휴먼 인터페이스 가이드라인에 가장 완벽히 부합하는 초미니멀 완성형.",
+          dock: "Dock 작은 크기 시인성: ★★★★★ (최고 추천)"
+        },
+        {
+          src: "ecliptic_01_orbit_arc.jpg",
+          title: "황도 궤도 아크 & 네온 코어",
+          desc: "두 화면 사이를 감싸며 지나가는 타원형 황도 궤도 링. Concept 01의 안정적인 구도에 천체 궤적을 결합.",
+          dock: "Dock 작은 크기 시인성: ★★★★★ (강력 추천)"
+        },
+        {
+          src: "ecliptic_02_corona_glow.jpg",
+          title: "일식(Eclipse) 코로나 버스트 & 인터섹션",
+          desc: "두 화면이 완전히 겹쳐지는 순간 태양 코로나처럼 코랄빛이 방사되는 일식 모티프. 강렬한 에너지와 초저지연을 형상화.",
+          dock: "Dock 작은 크기 시인성: ★★★★☆ (시각적 임팩트 최상)"
+        },
+        {
+          src: "ecliptic_03_ring_bridge.jpg",
+          title: "토성 링 스타일의 볼드 플래닛 링",
+          desc: "두 화면을 하나의 행성계처럼 관통하는 굵은 코랄 궤도 링. 군더더기 없는 두꺼운 두께로 16px 초소형에서도 형태 유지.",
+          dock: "Dock 작은 크기 시인성: ★★★★★ (극상의 가독성)"
+        },
+        {
+          src: "ecliptic_04_curved_horizon.jpg",
+          title: "스위핑 황도 수평선 궤적",
+          desc: "화면 아래에서 위로 치솟는 유려한 황도 수평선 곡선으로 두 모니터를 연결. 시선 이동과 데이터 상승 속도감 강조.",
+          dock: "Dock 작은 크기 시인성: ★★★★☆ (우수)"
+        },
+        {
+          src: "ecliptic_06_halo_bridge.jpg",
+          title: "초승달(Crescent) 림라이트 & 솔리드 바",
+          desc: "전면 모니터에 걸린 일식의 초승달 형상 코랄 림라이트와 중앙 수평 바의 결합. Concept 01 바 형태를 보존하면서 일식 테마 부여.",
+          dock: "Dock 작은 크기 시인성: ★★★★☆ (세련미 우수)"
+        },
+        {
+          src: "ecliptic_08_ring_loop.jpg",
+          title: "듀얼 발광 궤도 루프",
+          desc: "두 모니터를 감싸며 고속으로 회전하는 입체 궤도 링. 네온 코랄 발광 효과가 차콜 배경과 극적인 대비를 형성.",
+          dock: "Dock 작은 크기 시인성: ★★★★★ (강력 추천)"
+        },
+        {
+          src: "ecliptic_07_orbital_transfer.jpg",
+          title: "궤도 전이(Orbital Transfer) 벡터 링",
+          desc: "호만 전이 궤도(Hohmann transfer orbit)를 연상시키는 화살표 노드와 모니터 실루엣. 시스템 엔지니어링 감성.",
+          dock: "Dock 작은 크기 시인성: ★★★☆☆ (보통)"
+        },
+        {
+          src: "ecliptic_09_solar_disc.jpg",
+          title: "개기일식 솔라 디스크 & 빔",
+          desc: "두 화면 중앙에 완벽한 일식 암흑 원반과 상하/좌우로 뿜어져 나오는 코랄 라이트 빔.",
+          dock: "Dock 작은 크기 시인성: ★★★☆☆ (보통)"
+        },
+        {
+          src: "ecliptic_05_inclined_plane.jpg",
+          title: "황도 경사면(23.5°) 원격 전송 스트림",
+          desc: "실제 황도 경사각(23.5도)을 모티브로 로컬/원격 PC 간 데이터가 공간을 건너뛰는 천체 항법도 스타일.",
+          dock: "Dock 작은 크기 시인성: ★★☆☆☆ (축소 시 디테일 복잡)"
+        }
+      ],
+      original: [
+        {
+          src: "01_screen_bridge.jpg",
+          title: "수평 오프셋 & 솔리드 코랄 브릿지",
+          desc: "앞/뒤 화면 겹침과 중앙의 굵은 코랄 바. 정통 macOS 앱 아이콘 스타일에 가장 부합.",
+          dock: "Dock 작은 크기 시인성: ★★★★★ (강력 추천)"
+        },
+        {
+          src: "03_interlocking_screens.jpg",
+          title: "인터로킹 프레임 & 발광 코랄 코어",
+          desc: "두 화면의 교차 영역 자체가 코랄 허브로 빛나는 극단적 미니멀리즘.",
+          dock: "Dock 작은 크기 시인성: ★★★★★ (강력 추천)"
+        },
+        {
+          src: "04_coral_beam.jpg",
+          title: "대칭형 듀얼 모니터 & 볼드 빔",
+          desc: "좌우 완벽한 수평 대칭과 직관적인 두꺼운 수평 빔 연결.",
+          dock: "Dock 작은 크기 시인성: ★★★★☆ (우수)"
+        },
+        {
+          src: "10_abstract_screens.jpg",
+          title: "미니멀 기하학 인터섹션",
+          desc: "두 정사각형 프레임이 겹치는 중심부에 코랄 링크 배치.",
+          dock: "Dock 작은 크기 시인성: ★★★★★ (강력 추천)"
+        },
+        {
+          src: "08_bidirectional_link.jpg",
+          title: "양방향 동기화 에이전트 링크",
+          desc: "두 직사각형 사이 양방향 화살표. 명확한 통신 표현.",
+          dock: "Dock 작은 크기 시인성: ★★★★☆ (우수)"
+        },
+        {
+          src: "02_diagonal_link.jpg",
+          title: "대각선 레이아웃 & 직각 버스 링크",
+          desc: "대각선 배치로 동적 느낌 강조, 회로 느낌의 버스 라인.",
+          dock: "Dock 작은 크기 시인성: ★★★☆☆ (보통)"
+        },
+        {
+          src: "05_negative_link.jpg",
+          title: "레이어드 섀도우 & 네거티브 링크",
+          desc: "차콜 단색 음영 베이스에 T자형 코랄 앵커.",
+          dock: "Dock 작은 크기 시인성: ★★★☆☆ (보통)"
+        },
+        {
+          src: "09_tab_connector.jpg",
+          title: "팝아웃 디스플레이 & 체결 탭",
+          desc: "앞 화면이 튀어나오면서 코랄 탭으로 락킹된 형태.",
+          dock: "Dock 작은 크기 시인성: ★★★☆☆ (보통)"
+        },
+        {
+          src: "06_data_bridge.jpg",
+          title: "듀얼 루프 데이터 버스",
+          desc: "단자 핀과 루프 라인이 들어간 테크니컬한 스타일.",
+          dock: "Dock 작은 크기 시인성: ★★☆☆☆ (복잡)"
+        },
+        {
+          src: "07_offset_screens.jpg",
+          title: "오프셋 화면 & 고속 패킷 스트림",
+          desc: "화면 내부 UI 요소와 고속 데이터 전송 화살표.",
+          dock: "Dock 작은 크기 시인성: ★★☆☆☆ (복잡)"
+        }
+      ]
+    };
+
+    let currentSetKey = "ecliptic";
+    let currentIndex = 0;
+
+    const mainImg = document.getElementById("mainImage");
+    const numEl = document.getElementById("slideNumber");
+    const titleEl = document.getElementById("slideTitle");
+    const descEl = document.getElementById("slideDesc");
+    const dockEl = document.getElementById("slideDock");
+    const thumbContainer = document.getElementById("thumbContainer");
+
+    function switchSet(setName) {
+      currentSetKey = setName;
+      currentIndex = 0;
+      document.getElementById("tabEcliptic").classList.toggle("active", setName === "ecliptic");
+      document.getElementById("tabOriginal").classList.toggle("active", setName === "original");
+      renderThumbs();
+      updateSlide();
+    }
+
+    function renderThumbs() {
+      thumbContainer.innerHTML = "";
+      const currentList = sets[currentSetKey];
+      currentList.forEach((item, idx) => {
+        const thumb = document.createElement("div");
+        thumb.className = "thumb" + (idx === currentIndex ? " active" : "");
+        thumb.onclick = () => goToSlide(idx);
+        const img = document.createElement("img");
+        img.src = item.src;
+        thumb.appendChild(img);
+        thumbContainer.appendChild(thumb);
+      });
+    }
+
+    function updateSlide() {
+      const currentList = sets[currentSetKey];
+      const item = currentList[currentIndex];
+      mainImg.style.opacity = 0;
+      setTimeout(() => {
+        mainImg.src = item.src;
+        const prefix = currentSetKey === "ecliptic" ? "ECLIPTIC" : "ORIGINAL";
+        numEl.textContent = `${prefix} ${String(currentIndex + 1).padStart(2, '0')} / ${currentList.length}`;
+        titleEl.textContent = item.title;
+        descEl.textContent = item.desc;
+        dockEl.textContent = item.dock;
+        mainImg.style.opacity = 1;
+      }, 150);
+
+      document.querySelectorAll(".thumb").forEach((el, idx) => {
+        el.classList.toggle("active", idx === currentIndex);
+      });
+    }
+
+    function prevSlide() {
+      const currentList = sets[currentSetKey];
+      currentIndex = (currentIndex - 1 + currentList.length) % currentList.length;
+      updateSlide();
+    }
+
+    function nextSlide() {
+      const currentList = sets[currentSetKey];
+      currentIndex = (currentIndex + 1) % currentList.length;
+      updateSlide();
+    }
+
+    function goToSlide(idx) {
+      currentIndex = idx;
+      updateSlide();
+    }
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowLeft") prevSlide();
+      if (e.key === "ArrowRight") nextSlide();
+    });
+
+    renderThumbs();
+    updateSlide();
+  </script>
+</body>
+</html>
