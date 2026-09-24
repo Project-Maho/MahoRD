@@ -34,3 +34,9 @@ clients/rust/target-tauri/
 .omo/evidence/
 .omo/drafts/
 *.tar.gz
+
+# Non-default Rust target dirs (the iOS device build tree)
+clients/rust/target-ios-device/
+
+# Temporary debugging journals
+.debug-journal.md

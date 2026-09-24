@@ -1,5 +1,6 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -9,16 +10,77 @@ use crate::session::DisplayInfo;
 #[cfg(any(target_os = "macos", test))]
 const CAPTURE_QUEUE_DEPTH: usize = 3;
 
+/// Roughly one second of ScreenCaptureKit's ~20 ms audio packets.
+///
+/// Audio needs a queue of its own: one 4K keyframe can hold the consumer for
+/// several frame intervals, and unlike a dropped frame, a dropped PCM packet is
+/// an audible gap. Packets are small (about 7.5 KiB), so the depth is cheap.
 #[cfg(any(target_os = "macos", test))]
-fn capture_channel() -> (mpsc::SyncSender<CaptureEvent>, mpsc::Receiver<CaptureEvent>) {
-    mpsc::sync_channel(CAPTURE_QUEUE_DEPTH)
+const AUDIO_QUEUE_DEPTH: usize = 50;
+
+/// The capture callback's publishing end: video and audio are queued
+/// independently so neither can evict the other.
+#[cfg(any(target_os = "macos", test))]
+struct CaptureSenders {
+    video: mpsc::SyncSender<CaptureEvent>,
+    audio: mpsc::SyncSender<CaptureEvent>,
+    dropped_audio: Arc<AtomicU64>,
+}
+
+/// Receiving ends of [`CaptureSenders`]. `Stopped` arrives on `video`.
+#[cfg(any(target_os = "macos", test))]
+pub struct CaptureOutputs {
+    pub video: mpsc::Receiver<CaptureEvent>,
+    pub audio: mpsc::Receiver<CaptureEvent>,
+    dropped_audio: Arc<AtomicU64>,
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn publish_capture(sender: &mpsc::SyncSender<CaptureEvent>, event: CaptureEvent) {
+impl CaptureOutputs {
+    /// Audio packets the capture callback discarded because the consumer
+    /// stalled past [`AUDIO_QUEUE_DEPTH`]. Each one is an audible gap.
+    pub fn dropped_audio_packets(&self) -> u64 {
+        self.dropped_audio.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn capture_channel() -> (CaptureSenders, CaptureOutputs) {
+    let (video_tx, video) = mpsc::sync_channel(CAPTURE_QUEUE_DEPTH);
+    let (audio_tx, audio) = mpsc::sync_channel(AUDIO_QUEUE_DEPTH);
+    let dropped_audio = Arc::new(AtomicU64::new(0));
+    (
+        CaptureSenders {
+            video: video_tx,
+            audio: audio_tx,
+            dropped_audio: Arc::clone(&dropped_audio),
+        },
+        CaptureOutputs {
+            video,
+            audio,
+            dropped_audio,
+        },
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn publish_capture(senders: &CaptureSenders, event: CaptureEvent) {
+    let audio = matches!(event, CaptureEvent::Audio { .. });
+    let sender = if audio {
+        &senders.audio
+    } else {
+        &senders.video
+    };
     match sender.try_send(event) {
         Ok(()) => {}
-        Err(mpsc::TrySendError::Full(_)) => {}
+        Err(mpsc::TrySendError::Full(_)) => {
+            // A stalled consumer drops the newest event rather than blocking the
+            // native callback. Video recovers on the next frame; audio does not,
+            // so the loss is counted instead of vanishing silently.
+            if audio {
+                senders.dropped_audio.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         Err(mpsc::TrySendError::Disconnected(_)) => {}
     }
 }
@@ -55,12 +117,42 @@ pub struct CaptureFrame {
 #[derive(Debug)]
 pub enum CaptureEvent {
     Video(CaptureFrame),
-    /// ScreenCaptureKit is configured for 48 kHz stereo Float32 interleaved PCM.
+    /// Wire format: 48 kHz stereo Float32 LE *interleaved* PCM. ScreenCaptureKit
+    /// itself delivers non-interleaved (planar) samples, so the capture path
+    /// interleaves them before publishing; see [`interleave_planar_f32_stereo`].
     Audio {
         pcm_f32_le: Vec<u8>,
         captured_at: Instant,
     },
     Stopped(String),
+}
+
+/// Bytes in one Float32 sample of the wire audio format.
+#[cfg(any(target_os = "macos", test))]
+const WIRE_AUDIO_SAMPLE_BYTES: usize = 4;
+
+/// Weaves per-channel Float32 LE planes into interleaved stereo, the format
+/// every host puts on the wire and `maho-render::audio` plays back.
+///
+/// Mono duplicates its single plane and channels past the first two are dropped,
+/// matching the Windows downmix in `windows_logic::convert_to_wire_audio`.
+/// Returns `None` for empty, misaligned, or ragged planes.
+#[cfg(any(target_os = "macos", test))]
+fn interleave_planar_f32_stereo(planes: &[&[u8]]) -> Option<Vec<u8>> {
+    let left = *planes.first()?;
+    if left.is_empty() || left.len() % WIRE_AUDIO_SAMPLE_BYTES != 0 {
+        return None;
+    }
+    let right = planes.get(1).copied().unwrap_or(left);
+    if right.len() != left.len() {
+        return None;
+    }
+    let mut interleaved = Vec::with_capacity(left.len() * 2);
+    for offset in (0..left.len()).step_by(WIRE_AUDIO_SAMPLE_BYTES) {
+        interleaved.extend_from_slice(&left[offset..offset + WIRE_AUDIO_SAMPLE_BYTES]);
+        interleaved.extend_from_slice(&right[offset..offset + WIRE_AUDIO_SAMPLE_BYTES]);
+    }
+    Some(interleaved)
 }
 
 #[derive(Debug, Error)]
@@ -123,7 +215,11 @@ mod macos {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{define_class, msg_send, AnyThread, DeclaredClass};
-    use objc2_core_media::CMSampleBuffer;
+    use objc2_core_audio_types::{
+        kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, AudioBuffer, AudioBufferList,
+    };
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_media::{CMAudioFormatDescriptionGetStreamBasicDescription, CMSampleBuffer};
     use objc2_core_video::{
         kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
         CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
@@ -143,7 +239,7 @@ mod macos {
     }
 
     struct SinkIvars {
-        sender: mpsc::SyncSender<CaptureEvent>,
+        senders: CaptureSenders,
     }
 
     define_class!(
@@ -176,15 +272,15 @@ mod macos {
                     None
                 };
                 if let Some(event) = event {
-                    publish_capture(&self.ivars().sender, event);
+                    publish_capture(&self.ivars().senders, event);
                 }
             }
         }
     );
 
     impl FrameSink {
-        fn new(sender: mpsc::SyncSender<CaptureEvent>) -> Retained<Self> {
-            let this = Self::alloc().set_ivars(SinkIvars { sender });
+        fn new(senders: CaptureSenders) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(SinkIvars { senders });
             unsafe { msg_send![super(this), init] }
         }
     }
@@ -217,7 +313,26 @@ mod macos {
         })
     }
 
+    /// Upper bound on the planes read out of one sample buffer. The stream is
+    /// configured for stereo; the slack only keeps a surprising layout in-bounds.
+    const MAX_AUDIO_PLANES: usize = 8;
+
+    /// `AudioBufferList` is a header plus a trailing array declared as length 1.
+    /// This gives the native call room for `MAX_AUDIO_PLANES` buffers.
+    #[repr(C)]
+    struct AudioBufferListStorage {
+        list: AudioBufferList,
+        _extra: [AudioBuffer; MAX_AUDIO_PLANES - 1],
+    }
+
     unsafe fn copy_audio_frame(sample: &CMSampleBuffer) -> Option<Vec<u8>> {
+        // ScreenCaptureKit hands out non-interleaved Float32: one plane per
+        // channel, so the raw block buffer is `[L...][R...]`. Copying it straight
+        // through is heard as pitch-shifted static because the wire format is
+        // interleaved. Anything else keeps the verbatim copy below.
+        if planar_f32_audio(sample) {
+            return copy_planar_audio_frame(sample);
+        }
         let block = sample.data_buffer()?;
         let length = block.data_length();
         if length == 0 {
@@ -229,6 +344,90 @@ mod macos {
             return None;
         }
         Some(bytes)
+    }
+
+    /// True only for the layout [`copy_planar_audio_frame`] knows how to weave:
+    /// non-interleaved 32-bit float.
+    unsafe fn planar_f32_audio(sample: &CMSampleBuffer) -> bool {
+        let Some(description) = sample.format_description() else {
+            return false;
+        };
+        // SAFETY: the description is retained for this scope, and the returned
+        // ASBD pointer is read-only storage owned by it.
+        let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(&description);
+        let Some(asbd) = (unsafe { asbd.as_ref() }) else {
+            return false;
+        };
+        let flags = asbd.mFormatFlags;
+        flags & kAudioFormatFlagIsNonInterleaved != 0
+            && flags & kAudioFormatFlagIsFloat != 0
+            && asbd.mBitsPerChannel as usize == WIRE_AUDIO_SAMPLE_BYTES * 8
+    }
+
+    unsafe fn copy_planar_audio_frame(sample: &CMSampleBuffer) -> Option<Vec<u8>> {
+        // CoreMedia rejects a buffer list sized for more planes than the sample
+        // actually carries, so ask for the exact size before filling it.
+        let mut needed = 0_usize;
+        // SAFETY: the size out-parameter is a live local, and null buffer-list
+        // and block-buffer pointers request a size-only query.
+        let status = unsafe {
+            sample.audio_buffer_list_with_retained_block_buffer(
+                std::ptr::addr_of_mut!(needed),
+                std::ptr::null_mut(),
+                0,
+                None,
+                None,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 || needed > std::mem::size_of::<AudioBufferListStorage>() {
+            return None;
+        }
+        // SAFETY: every field is a plain integer or a pointer, for which an
+        // all-zero value is valid; the native call fills it before any read.
+        let mut storage: AudioBufferListStorage = unsafe { std::mem::zeroed() };
+        let mut block: *mut objc2_core_media::CMBlockBuffer = std::ptr::null_mut();
+        // SAFETY: the out-parameters are live locals, and `needed` is the size
+        // the previous query asked for, bounded by the storage reserved above.
+        let status = unsafe {
+            sample.audio_buffer_list_with_retained_block_buffer(
+                std::ptr::null_mut(),
+                std::ptr::addr_of_mut!(storage.list),
+                needed,
+                None,
+                None,
+                0,
+                std::ptr::addr_of_mut!(block),
+            )
+        };
+        // The returned block buffer owns the plane memory. Adopt it first so it
+        // is released on every exit, including the failure path below.
+        // SAFETY: the native call returns a +1 reference or null.
+        let block = NonNull::new(block).map(|block| unsafe { CFRetained::from_raw(block) });
+        if status != 0 {
+            return None;
+        }
+        let block = block?;
+        let count = (storage.list.mNumberBuffers as usize).min(MAX_AUDIO_PLANES);
+        let mut planes = Vec::with_capacity(count);
+        for index in 0..count {
+            // SAFETY: `mBuffers` is a trailing array; `count` is clamped to the
+            // capacity reserved by `AudioBufferListStorage`.
+            let buffer = unsafe { *std::ptr::addr_of!(storage.list.mBuffers[0]).add(index) };
+            let data = NonNull::new(buffer.mData)?;
+            // SAFETY: the adopted block buffer keeps this plane alive, and the
+            // native call reports its length in `mDataByteSize`.
+            planes.push(unsafe {
+                std::slice::from_raw_parts(
+                    data.as_ptr().cast::<u8>(),
+                    buffer.mDataByteSize as usize,
+                )
+            });
+        }
+        let interleaved = interleave_planar_f32_stereo(&planes);
+        drop(block);
+        interleaved
     }
 
     #[allow(clippy::type_complexity)]
@@ -270,9 +469,7 @@ mod macos {
             })
         }
 
-        pub fn start(
-            config: CaptureConfig,
-        ) -> Result<(Self, mpsc::Receiver<CaptureEvent>), CaptureError> {
+        pub fn start(config: CaptureConfig) -> Result<(Self, CaptureOutputs), CaptureError> {
             Self::start_cancellable(
                 config,
                 &AtomicBool::new(false),
@@ -286,7 +483,7 @@ mod macos {
             config: CaptureConfig,
             stop: &AtomicBool,
             deadline: Instant,
-        ) -> Result<(Self, mpsc::Receiver<CaptureEvent>), CaptureError> {
+        ) -> Result<(Self, CaptureOutputs), CaptureError> {
             check_start(stop, deadline)?;
             // SAFETY: CoreGraphics preflight has no arguments or ownership transfer.
             if !unsafe { CGPreflightScreenCaptureAccess() } {
@@ -350,6 +547,10 @@ mod macos {
                     stream_config.setMinimumFrameInterval(objc2_core_media::kCMTimeZero);
                 }
                 stream_config.setCapturesAudio(config.capture_audio);
+                // Without this, anything the host itself plays is captured and
+                // streamed back to the client, which can feed back into the
+                // host's own output.
+                stream_config.setExcludesCurrentProcessAudio(true);
                 stream_config.setSampleRate(48_000);
                 stream_config.setChannelCount(2);
 
@@ -359,8 +560,8 @@ mod macos {
                     &stream_config,
                     None,
                 );
-                let (sender, receiver) = capture_channel();
-                let sink = FrameSink::new(sender);
+                let (senders, outputs) = capture_channel();
+                let sink = FrameSink::new(senders);
                 let queue = dispatch2::DispatchQueue::new("maho-host.sck-output", None);
                 stream
                     .addStreamOutput_type_sampleHandlerQueue_error(
@@ -413,7 +614,7 @@ mod macos {
                     stop,
                     deadline.min(Instant::now() + Duration::from_secs(10)),
                 )?;
-                Ok((capture, receiver))
+                Ok((capture, outputs))
             })
         }
 
@@ -506,8 +707,8 @@ mod macos {
                     None,
                 )
             };
-            let (sender, _receiver) = capture_channel();
-            let sink = FrameSink::new(sender);
+            let (senders, _outputs) = capture_channel();
+            let sink = FrameSink::new(senders);
             let weak = objc2::rc::Weak::new(&*sink);
             (
                 MacScreenCapture {
@@ -631,6 +832,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn planar_stereo_planes_are_woven_into_interleaved_frames() {
+        // Given: one plane per channel, as ScreenCaptureKit delivers them.
+        let left: Vec<u8> = [1.0_f32, 2.0, 3.0]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        let right: Vec<u8> = [-1.0_f32, -2.0, -3.0]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        // When: the capture path converts them to the wire format.
+        let wire = interleave_planar_f32_stereo(&[&left, &right]).expect("planes interleave");
+        // Then: samples alternate L,R instead of staying plane-ordered.
+        let samples: Vec<f32> = wire
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        assert_eq!(samples, vec![1.0, -1.0, 2.0, -2.0, 3.0, -3.0]);
+    }
+
+    #[test]
+    fn single_plane_audio_is_duplicated_across_both_channels() {
+        // Given: a mono capture with only one plane.
+        let mono: Vec<u8> = [0.5_f32, -0.25]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        // When / Then: each sample lands in both wire channels.
+        let wire = interleave_planar_f32_stereo(&[&mono]).expect("mono interleaves");
+        let samples: Vec<f32> = wire
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        assert_eq!(samples, vec![0.5, 0.5, -0.25, -0.25]);
+    }
+
+    #[test]
+    fn extra_planes_are_dropped_to_the_stereo_wire_format() {
+        // Given: a surround layout with more planes than the wire carries.
+        let plane = 1.0_f32.to_le_bytes();
+        let center = 9.0_f32.to_le_bytes();
+        let wire = interleave_planar_f32_stereo(&[&plane, &plane, &center]).expect("interleaves");
+        // Then: only the first two channels survive, like the Windows downmix.
+        assert_eq!(wire.len(), 8);
+        assert!(!wire.windows(4).any(|w| w == center));
+    }
+
+    #[test]
+    fn unusable_planes_are_rejected_instead_of_emitting_skewed_audio() {
+        // Given: no planes, an empty plane, a partial sample, ragged lengths.
+        let sample = 1.0_f32.to_le_bytes();
+        let ragged: Vec<u8> = [1.0_f32, 2.0]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        // When / Then: every malformed layout is dropped, not reinterpreted.
+        assert!(interleave_planar_f32_stereo(&[]).is_none());
+        assert!(interleave_planar_f32_stereo(&[&[]]).is_none());
+        assert!(interleave_planar_f32_stereo(&[&[0, 1, 2]]).is_none());
+        assert!(interleave_planar_f32_stereo(&[&sample, &ragged]).is_none());
+    }
+
+    #[test]
+    fn interleaved_output_stays_aligned_to_stereo_f32_frames() {
+        // Given: a plane sized like one real ScreenCaptureKit callback (960 frames).
+        let plane = vec![0_u8; 960 * WIRE_AUDIO_SAMPLE_BYTES];
+        let wire = interleave_planar_f32_stereo(&[&plane, &plane]).expect("interleaves");
+        // Then: the client's 8-byte stereo frame alignment check passes.
+        assert_eq!(wire.len(), 960 * 2 * WIRE_AUDIO_SAMPLE_BYTES);
+        assert_eq!(wire.len() % (WIRE_AUDIO_SAMPLE_BYTES * 2), 0);
+    }
+
+    #[test]
     fn cancelled_start_drops_late_success_without_waiting_for_callback() {
         // Given: a callback-owned resource and an already cancelled waiter.
         struct CaptureGuard(mpsc::Sender<()>);
@@ -693,8 +967,8 @@ mod tests {
     #[test]
     fn stalled_capture_consumer_retains_only_queue_capacity() {
         // Given: the callback's actual constructor and publisher, without a consumer.
-        let (sender, receiver) = capture_channel();
-        // When: alternate raw video/audio events exceed capacity.
+        let (senders, outputs) = capture_channel();
+        // When: alternate raw video/audio events exceed video capacity.
         for index in 0..100 {
             let event = if index % 2 == 0 {
                 CaptureEvent::Video(CaptureFrame {
@@ -710,20 +984,76 @@ mod tests {
                     captured_at: Instant::now(),
                 }
             };
-            publish_capture(&sender, event);
+            publish_capture(&senders, event);
         }
-        // Then: only the first capacity events remain, in order.
-        let retained: Vec<_> = receiver
+        // Then: video keeps only its own capacity, in order.
+        let retained: Vec<_> = outputs
+            .video
             .try_iter()
             .map(|event| match event {
                 CaptureEvent::Video(frame) => frame.bgra[0],
-                CaptureEvent::Audio { pcm_f32_le, .. } => pcm_f32_le[0],
+                CaptureEvent::Audio { .. } => panic!("audio evicted a video slot"),
                 CaptureEvent::Stopped(_) => panic!("unexpected stop"),
             })
             .collect();
-        assert_eq!(retained, (0..CAPTURE_QUEUE_DEPTH as u8).collect::<Vec<_>>());
-        drop(receiver);
-        publish_capture(&sender, CaptureEvent::Stopped(String::new()));
+        assert_eq!(
+            retained,
+            (0..CAPTURE_QUEUE_DEPTH as u8)
+                .map(|i| i * 2)
+                .collect::<Vec<_>>()
+        );
+        // And: audio is not evicted by the video burst that overran its queue.
+        assert_eq!(outputs.audio.try_iter().count(), 50);
+        assert_eq!(outputs.dropped_audio_packets(), 0);
+        drop(outputs);
+        publish_capture(&senders, CaptureEvent::Stopped(String::new()));
+    }
+
+    #[test]
+    fn stalled_audio_consumer_drops_are_counted_not_silent() {
+        // Given: a stalled consumer and more audio packets than the queue holds.
+        let (senders, outputs) = capture_channel();
+        let overflow = 7;
+        for index in 0..(AUDIO_QUEUE_DEPTH + overflow) {
+            publish_capture(
+                &senders,
+                CaptureEvent::Audio {
+                    pcm_f32_le: vec![index as u8; 4],
+                    captured_at: Instant::now(),
+                },
+            );
+        }
+        // Then: the queue holds its capacity and every lost packet is accounted.
+        assert_eq!(outputs.audio.try_iter().count(), AUDIO_QUEUE_DEPTH);
+        assert_eq!(outputs.dropped_audio_packets(), overflow as u64);
+    }
+
+    #[test]
+    fn a_video_burst_never_costs_an_audio_packet() {
+        // Given: audio arriving while video overruns its much shallower queue.
+        let (senders, outputs) = capture_channel();
+        for index in 0..(CAPTURE_QUEUE_DEPTH as u8 + 20) {
+            publish_capture(
+                &senders,
+                CaptureEvent::Video(CaptureFrame {
+                    width: 1,
+                    height: 1,
+                    bytes_per_row: 4,
+                    bgra: vec![index; 4],
+                    captured_at: Instant::now(),
+                }),
+            );
+        }
+        publish_capture(
+            &senders,
+            CaptureEvent::Audio {
+                pcm_f32_le: vec![9; 8],
+                captured_at: Instant::now(),
+            },
+        );
+        // Then: the audio packet survives the video backlog.
+        assert_eq!(outputs.audio.try_iter().count(), 1);
+        assert_eq!(outputs.dropped_audio_packets(), 0);
     }
 }
 

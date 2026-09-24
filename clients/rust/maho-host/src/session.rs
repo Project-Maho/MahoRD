@@ -1183,6 +1183,7 @@ impl MediaSource for MacMediaSource {
                     &state.cancelled,
                     Instant::now() + Duration::from_secs(15),
                 )?;
+                let mut reported_audio_drops = 0_u64;
                 let _capture = MacCaptureOwner(Some(capture));
                 if state.is_cancelled() {
                     return Ok(());
@@ -1216,26 +1217,46 @@ impl MediaSource for MacMediaSource {
                                 return Err(SessionError::MediaStopped)
                             }
                         }
-                        match capture_rx.try_recv() {
+                        match capture_rx.video.try_recv() {
                             Ok(CaptureEvent::Video(frame)) => {
                                 progressed = true;
                                 if !submit_capture_frame(&encoder.sender, frame) {
                                     return Err(SessionError::MediaStopped);
                                 }
                             }
+                            Ok(CaptureEvent::Stopped(error)) => {
+                                return Err(SessionError::Io(io::Error::other(error)));
+                            }
+                            // Audio is routed to its own queue by the capture callback.
+                            Ok(CaptureEvent::Audio { .. }) => {}
+                            Err(mpsc::TryRecvError::Empty) => {}
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                return Err(SessionError::MediaStopped)
+                            }
+                        }
+                        // Audio has its own queue, so it is drained in the same
+                        // pass: waiting for a video event would let a silent or
+                        // static screen stall playback.
+                        match capture_rx.audio.try_recv() {
                             Ok(CaptureEvent::Audio { pcm_f32_le, .. }) => {
                                 progressed = true;
                                 if !state.publish(sender, MediaEvent::Audio(pcm_f32_le)) {
                                     return Ok(());
                                 }
                             }
-                            Ok(CaptureEvent::Stopped(error)) => {
-                                return Err(SessionError::Io(io::Error::other(error)));
-                            }
+                            Ok(CaptureEvent::Video(_)) | Ok(CaptureEvent::Stopped(_)) => {}
                             Err(mpsc::TryRecvError::Empty) => {}
                             Err(mpsc::TryRecvError::Disconnected) => {
                                 return Err(SessionError::MediaStopped)
                             }
+                        }
+                        let dropped_audio = capture_rx.dropped_audio_packets();
+                        if dropped_audio > reported_audio_drops {
+                            tracing::warn!(
+                                dropped_audio,
+                                "capture audio packets dropped; playback has gaps"
+                            );
+                            reported_audio_drops = dropped_audio;
                         }
                         if !progressed {
                             thread::park_timeout(Duration::from_millis(2));
