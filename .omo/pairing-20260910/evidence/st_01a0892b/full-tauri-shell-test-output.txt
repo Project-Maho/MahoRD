@@ -1,0 +1,62 @@
+
+running 57 tests
+test desktop_integration_tests::gamepad_and_pen_payloads_convert_properly ... ok
+test desktop_integration_tests::middle_and_relative_payloads_use_legacy_variants ... ok
+test desktop_integration_tests::non_video_dispatch_characterization ... ok
+test desktop_integration_tests::media_audio_reaches_native_queue ... ok
+test desktop_integration_tests::callback_error_is_visible_and_stops_failed_output ... ok
+test desktop_integration_tests::unknown_buttons_reject ... ok
+test discovery_tests::empty_successful_lan_with_failed_tailscale_yields_empty_success ... ok
+test discovery_tests::both_sources_failing_yields_an_error ... ok
+test discovery_tests::empty_observation_never_invents_online_testbeds ... ok
+test desktop_integration_tests::disconnect_clears_agent_keys_even_without_transport ... ok
+test desktop_integration_tests::unavailable_session_output_can_be_explicitly_recovered ... ok
+test desktop_integration_tests::audio_commands_apply_gain_mute_and_validate ... ok
+test discovery_tests::lan_host_with_matching_stored_name_remains_unpaired ... ok
+test desktop_integration_tests::device_switch_drops_old_output_and_never_replays_old_pcm ... ok
+test desktop_integration_tests::disconnect_yields_while_input_submission_holds_session_lock ... ok
+test discovery_tests::lan_survives_missing_or_failed_tailscale ... ok
+test desktop_integration_tests::pairing_store_round_trip_and_deletion ... ok
+test discovery_tests::missing_command_is_an_error_not_hosts ... ok
+test discovery_tests::malformed_status_is_an_error_not_an_empty_success ... ok
+test discovery_tests::observe_installed_tailscale ... ignored, explicit installed-Tailscale observation; run with --ignored --nocapture
+test discovery_tests::nonzero_exit_rejects_even_valid_peer_json ... ok
+test discovery_tests::non_host_mobile_platforms_are_excluded_from_host_list ... ok
+test discovery_tests::null_peer_map_has_no_hosts ... ok
+test discovery_tests::absent_executable_uses_the_actual_async_command_seam ... ok
+test desktop_integration_tests::stop_and_restart_isolate_audio_and_failed_start ... ok
+test discovery_tests::source_dedup_merges_lan_and_tailscale_by_name_and_inherits_pairing ... ok
+test discovery_tests::pairing_does_not_infer_identity_from_testbed_ips_case_or_substrings ... ok
+test discovery_tests::stored_pairings_and_self_do_not_create_observed_peers ... ok
+test discovery_tests::source_dedup_prioritizes_lan_over_tailscale ... ok
+test discovery_tests::observed_known_and_other_peers_keep_presence_and_json_fields ... ok
+test pairing_tests::test_failed_reconnect_preserves_original_cause_and_never_falls_back_to_bootstrap_pin ... ok
+test pairing_tests::test_list_pairings_json_excludes_key_field ... ok
+test recovery_tests::blocked_decode_does_not_block_reception_and_stop_joins ... ok
+test pairing_tests::test_list_pairings_store_seam_isolated_store_serializes_only_allowed_metadata ... ok
+test pairing_tests::test_missing_pin_and_missing_record_fails_immediately_without_bootstrap ... ok
+test discovery_tests::list_hosts_internal_returns_lan_immediately_without_waiting_for_slow_tailscale ... ok
+test discovery_tests::managed_state_lan_retry_does_not_permanently_lock_initialization_error ... ok
+test desktop_integration_tests::malformed_media_audio_is_atomic_and_visible ... ok
+test recovery_tests::decoder_panic_reaches_media_owner_after_join ... ok
+test tests::convert_pointer_input_payload ... ok
+test tests::convert_keyboard_input_payload ... ok
+test tests::display_is_latest_wins_and_snapshot_ownership_is_shared ... ok
+test tests::latency_tracker_calculates_percentiles ... ok
+test tests::app_state_lifecycle ... ok
+test tests::media_worker_uses_shared_stop_token ... ok
+test tests::disconnect_join_leaves_executor_responsive_and_clears_frames ... ok
+test tests::screenshot_excludes_ipc_header_exact_pixels ... ok
+test tests::poll_retains_agent_dimensions_and_capture ... ok
+test tests::screenshot_encoding_leaves_executor_and_mailbox_responsive ... ok
+test recovery_tests::media_gap_requests_once_and_suppresses_dependents ... ok
+test recovery_tests::decode_failure_requests_recovery_and_suppresses_dependents ... ok
+test mailbox_tests::clipboard_worker_yields_executor_and_owns_generation_until_completion ... ok
+test mailbox_tests::clipboard_failure_is_reported_instead_of_silently_discarded ... ok
+test mailbox_tests::tcp_stop_error_survives_full_media_and_frame_cleanup ... ok
+test mailbox_tests::frame_consumer_applies_only_latest_clipboard ... ok
+test mailbox_tests::frame_consumer_rejects_closed_runtime_instead_of_returning_stale_frame ... ok
+test pairing_tests::test_loopback_reconnect_failure_does_not_trigger_bootstrap_request ... ok
+
+test result: ok. 56 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.08s
+

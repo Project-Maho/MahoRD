@@ -1,0 +1,18 @@
+status: completed exit_code: 0
+IDENTITY_QA_STEP desktop opening
+IDENTITY_QA_STEP desktop opened
+IDENTITY_QA_STEP desktop inventory
+IDENTITY_QA_STEP desktop cards
+IDENTITY_QA_STEP desktop reachable {"x":627.453125,"y":400,"width":82.90625,"height":40,"inViewport":true,"hit":true,"enabled":true}
+IDENTITY_QA_STEP desktop clicked
+IDENTITY_PAGE_PASS {"label":"desktop","width":1280,"height":800,"cards":[{"id":"lead-saved-a","text":"Same desktop\nSAVED\nID: lead-saved-a\n192.0.2.25:19730 (UDP 19731)\nConnect\nForget\n","rect":{"x":232,"y":388,"width":325,"height":172}},{"id":"lead-saved-b","text":"Same desktop\nSAVED\nID: lead-saved-b\nfe80::1%5:19730 (UDP 19731)\nConnect\nForget\n","rect":{"x":569,"y":388,"width":325,"height":172}}],"reachability":{"x":627.453125,"y":400,"width":82.90625,"height":40,"inViewport":true,"hit":true,"enabled":true},"trustedClick":true,"call":{"cmd":"connect","args":{"host":"fe80::1%5","tcpPort":19730,"udpPort":19731,"pin":null,"pairingId":"lead-saved-b"}}}
+PAGE CLEANUP {"origin":"http://127.0.0.1:59288","webViewClosed":true,"serverStopped":true}
+IDENTITY_QA_STEP mobile-width opening
+IDENTITY_QA_STEP mobile-width opened
+IDENTITY_QA_STEP mobile-width inventory
+IDENTITY_QA_STEP mobile-width cards
+IDENTITY_QA_STEP mobile-width reachable {"x":146.453125,"y":466,"width":82.90625,"height":40,"inViewport":true,"hit":true,"enabled":true}
+IDENTITY_QA_STEP mobile-width clicked
+IDENTITY_PAGE_PASS {"label":"mobile-width","width":430,"height":932,"cards":[{"id":"lead-saved-a","text":"Same desktop\nSAVED\nID: lead-saved-a\n192.0.2.25:19730 (UDP 19731)\nConnect\nForget\n","rect":{"x":88,"y":672,"width":309,"height":172}},{"id":"lead-saved-b","text":"Same desktop\nSAVED\nID: lead-saved-b\nfe80::1%5:19730 (UDP 19731)\nConnect\nForget\n","rect":{"x":88,"y":856,"width":309,"height":172}}],"reachability":{"x":146.453125,"y":466,"width":82.90625,"height":40,"inViewport":true,"hit":true,"enabled":true},"trustedClick":true,"call":{"cmd":"connect","args":{"host":"fe80::1%5","tcpPort":19730,"udpPort":19731,"pin":null,"pairingId":"lead-saved-b"}}}
+PAGE CLEANUP {"origin":"http://127.0.0.1:59294","webViewClosed":true,"serverStopped":true}
+Independent post-run probes: TCP HTTP listeners 59288 and 59294 both refused connection after cleanup.

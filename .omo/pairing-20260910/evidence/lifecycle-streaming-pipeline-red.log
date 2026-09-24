@@ -1,0 +1,11 @@
+bun test v1.4.0 (34cbb9a40)
+
+clients/rust/ios-shell/ui/test/page-modal.test.mjs:
+(fail) actual-page video streaming pipeline: poll_frame NV12 frame transitions waiting-video to streaming, renders WebGL, dispatches presented, and hides modal [20000.24ms]
+  ^ this test timed out after 20000ms.
+
+ 0 pass
+ 2 filtered out
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [20.21s]

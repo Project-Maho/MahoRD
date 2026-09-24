@@ -1,0 +1,65 @@
+{
+  "definition": {
+    "key": "pairing-20260910-d",
+    "name": "Pairing phase D - native teardown and reachable cancellation",
+    "nodes": [
+      {
+        "id": "native-lifecycle",
+        "label": "R5 native terminal and cancellation owner",
+        "subagent_type": "hephaestus",
+        "model": "quotio/gemini-3.8-flash-high",
+        "load_skills": [
+          "programming",
+          "debugging"
+        ],
+        "task_summary": "Fix iOS native TCP termination, cancellation and owned-worker teardown",
+        "prompt": "TASK: Implement the iOS native lifecycle owner required by R5/R6. DELIVERABLE: scoped native code and tests plus .omo/pairing-20260910/reports/d-native.md. SCOPE: ios-shell/src/state.rs, commands.rs, lib.rs registration if needed, native tests and native test-only manifest dependencies. Read core session APIs but do not change them without reporting the exact needed contract to the coordinator. Do not touch UI or desktop. Consume RuntimeEvents, propagate generation-bound terminal reason, stop/join runtime and workers, release input, clean up audio failures, and cancel in-progress native connection without waiting behind its lifecycle lock. Keep serialized ownership transfer. VERIFY: failing-first production-owner tests, including real authenticated loopback TCP remote close with UDP silent, stale terminal event ignored, canceled connect cannot install resources, and worker completion signals; run cargo test --manifest-path clients/rust/Cargo.toml -p erd-ios on Omarchy plus exact newly named tests and diagnostics. STOP WHEN: actual RED/GREEN evidence and complete scoped code/report delivered with no owned test resources remaining. Read .omo/pairing-20260910/phase-d-handoff.md, contracts.md, and docs/remote-connection-pairing-review-plan-20260910.md before edits. All handoff constraints bind. Append exact new regression names and RED commands to the existing append-only notepad before RED; capture lifecycle-* evidence. Rust check/test/build ONLY through SSH indo@100.91.254.71 at /home/indo/projects/erd-pairing-20260910 with FFmpeg7 environment; sync only owned changed files. No commits, model-setting changes, emulators, installs/deploys, production host changes or edits outside your scope. Preserve all C identity behavior and unrelated changes. Use event-driven deterministic tests and monitors. Lead owns physical-device QA and final review; distinguish missing physical evidence from passed fixtures. LEAD REVIEW CORRECTIONS (must fix before acceptance): 1) tests/lifecycle.rs test_canceled_connect_cannot_install_resources uses a forbidden 5ms sleep and fixed localhost ports 19999/19998; a ConnectionRefused satisfies its only is_err assertion. Replace with owned ephemeral real loopback server, event subscription BEFORE trigger proving connect is pending at TLS or consent/HandshakeAck, then cancellation must settle promptly with IpcErrorCode::Cancelled and no resources. Test cancel-before-native-registration race as well. 2) ClientSession::connect_with_psk at erd-app/src/session.rs keeps TcpStream local through blocking TLS and only then stores self.tcp; ClientSession::read_tcp_packet holds the same TCP mutex disconnect needs during blocking handshake read. Therefore calling session.disconnect from cancel_active_connect is neither prompt nor Tokio-safe. You are now explicitly authorized to edit ONLY necessary cancellation seams in erd-app/src/session.rs and directly related tests in addition to original scope; preserve R1-R4/R8-R11 behavior and all unrelated existing edits. Provide a real interrupt handle/socket ownership mechanism across TCP/TLS/consent/handshake, not shorter timeouts or a detached blocked task. No other worker currently owns core session.rs. 3) handle_terminal_shutdown currently swallows poisoned mutex, session.disconnect/runtime.stop/worker.join errors and sets Idle before successful reap. Return/retain cleanup failure, share one teardown completion owner, do not allow concurrent disconnect to return while another worker still owns teardown or let late error restore terminal after idle. 4) Worker handles are locally accumulated and installed only after supervisor/audio/media may already terminate; errors spawning later workers or early audio activation bypass completion notification, detach started handles, and connect returns hardcoded ready after early terminal. Own all spawned workers before they may report events or rigorously rollback startup, avoid joining under inner mutex (current generation mismatch branch does), and return current terminal state/error instead of hardcoded ready. Add deterministic early-TCP-close/audio-init-failure regressions. 5) TempStoreGuard changes process HOME/XDG_DATA_HOME concurrently even though with_pairing_store injects a path. Remove all env mutation and unused second mac store; use only isolated injected stores. Replace 500ms polling timeout loops with bounded waits for exact expected completion events, subscribe before trigger, make LoopbackServer close/join event-driven on all failure paths rather than 10s timeout being a success release. 6) Remove the newly added #[allow(clippy::module_inception)] suppression; fix module naming/structure narrowly. Headless audio test mode must be explicit injection, not a production CPAL-error fallback. Do not claim audio error consumer tested when test calls final shutdown directly; inject actual AudioOutputEvent::Error through the production event seam. 7) Re-read producer report and correct false claims of cancellation, no sleeps/polling, zero suppressions, all workers reaped. Pin exact new regression names/commands before RED. Run scoped tests only, not broad workspace until final integration. Deliver actual failures then passing corrected scenarios. Preserve UI/modal work. Stop after corrected native/core seam and evidence."
+      },
+      {
+        "id": "ui-lifecycle",
+        "label": "R6 UI cleanup ownership",
+        "subagent_type": "hephaestus",
+        "model": "quotio/gemini-3.8-flash-high",
+        "load_skills": [
+          "programming",
+          "debugging"
+        ],
+        "task_summary": "Fix iOS error cleanup, pending connection cancellation and generation races",
+        "prompt": "TASK: Implement R6 in the actual iOS connection-state manager. DELIVERABLE: code/regressions and .omo/pairing-20260910/reports/d-ui.md describing the exact state API for the modal owner. SCOPE: ios-shell/ui/connection-state.js and ui/test/connection-state.test.mjs plus discovery.test.mjs only for related regression expectations. Read desktop state manager as reference; do not edit desktop, native, app.js, HTML or CSS. Native commands remain connect/disconnect/stats. Own resources independently of display state; share pending cleanup; initiate native disconnect promptly during pending connect; retain cleanup-failed lock/retry and original error; ensure error dismiss cleans resources; ignore stale generations. Preserve exact saved pairingId and no PIN fallback. VERIFY: bun test clients/rust/ios-shell/ui/test/connection-state.test.mjs clients/rust/ios-shell/ui/test/discovery.test.mjs with new event-driven RED/GREEN cases covering every transition above. STOP WHEN: scoped implementation and passing single-run test evidence/report delivered. Read .omo/pairing-20260910/phase-d-handoff.md, contracts.md, and docs/remote-connection-pairing-review-plan-20260910.md before edits. All handoff constraints bind. Append exact new regression names and RED commands to the existing append-only notepad before RED; capture lifecycle-* evidence. Rust check/test/build ONLY through SSH indo@100.91.254.71 at /home/indo/projects/erd-pairing-20260910 with FFmpeg7 environment; sync only owned changed files. No commits, model-setting changes, emulators, installs/deploys, production host changes or edits outside your scope. Preserve all C identity behavior and unrelated changes. Use event-driven deterministic tests and monitors. Lead owns physical-device QA and final review; distinguish missing physical evidence from passed fixtures."
+      },
+      {
+        "id": "connecting-modal",
+        "label": "R7 reachable modal and focus",
+        "dependsOn": [
+          "ui-lifecycle"
+        ],
+        "subagent_type": "hephaestus",
+        "model": "quotio/gemini-3.8-flash-high",
+        "load_skills": [
+          "frontend",
+          "visual-qa",
+          "programming"
+        ],
+        "task_summary": "Fix the real iOS connecting modal, Cancel reachability and focus restoration",
+        "prompt": "TASK: Implement R7 against the finished UI lifecycle state contract. DELIVERABLE: modal code, real-page tests/screenshots/action logs and .omo/pairing-20260910/reports/d-modal.md. SCOPE: ios-shell/ui/app.js, index.html, styles.css and dedicated UI real-page harness/test files. Read reports/d-ui.md before editing. Do not edit connection-state.js, native or desktop. Make connecting/disconnecting modal independent of hidden session/connect views, Cancel reachable during pending connect, cleanup progress visible, background inert, focus trapped/restored, submit PIN cleared. Keep saved credentials and discovery behavior. VERIFY: existing evidence/r7-scenario.md and r7-red-results.md plus a new named actual-page regression pinned before RED; real browser fill/click #connect-host/#btn-connect-submit/#btn-cancel-connect at 430x932 and 1280x800, deferred IPC arrival/cleanup events, hit-testing, focus and no stale reconnection. Run the new page tests and current full mobile Bun suite once reliably; screenshot and inspect. STOP WHEN: implementation, GREEN browser interaction evidence, screenshots and resource cleanup receipts are delivered, with physical-iPhone limits stated honestly. Read .omo/pairing-20260910/phase-d-handoff.md, contracts.md, and docs/remote-connection-pairing-review-plan-20260910.md before edits. All handoff constraints bind. Append exact new regression names and RED commands to the existing append-only notepad before RED; capture lifecycle-* evidence. Rust check/test/build ONLY through SSH indo@100.91.254.71 at /home/indo/projects/erd-pairing-20260910 with FFmpeg7 environment; sync only owned changed files. No commits, model-setting changes, emulators, installs/deploys, production host changes or edits outside your scope. Preserve all C identity behavior and unrelated changes. Use event-driven deterministic tests and monitors. Lead owns physical-device QA and final review; distinguish missing physical evidence from passed fixtures."
+      },
+      {
+        "id": "verify-lifecycle",
+        "label": "Independent D verification",
+        "dependsOn": [
+          "native-lifecycle",
+          "ui-lifecycle",
+          "connecting-modal"
+        ],
+        "subagent_type": "hephaestus",
+        "model": "quotio/gemini-3.8-flash-high",
+        "load_skills": [
+          "programming",
+          "visual-qa"
+        ],
+        "task_summary": "Verify iOS teardown, error ownership, cancellation and modal integration",
+        "prompt": "TASK: Independently verify phase D against R5/R6/R7 and retained R8/R9 contracts. DELIVERABLE: .omo/pairing-20260910/reports/d-verify.md with exact requirement mapping and captured command/exit/source evidence. SCOPE: read native/UI producer files and reports; write only report/evidence, no product/test edits. VERIFY: run exact new native cases from d-native.md and cargo test --manifest-path clients/rust/Cargo.toml -p erd-ios on Omarchy; run bun test clients/rust/ios-shell/ui/test and the real-page suite from d-modal.md on actual current local files; compare remote source hashes; inspect that production consumes terminal events and joins resources rather than merely setting stats. Verify cleanup-failed locks connection, cancel reaches native during pending connect, and actual DOM Cancel is reachable with focus/background isolation. Do not count fake IPC as device/native proof or zero-selected tests as passes. STOP WHEN: all checks and residual failures/physical gates are precisely recorded and owned verification resources closed. Read .omo/pairing-20260910/phase-d-handoff.md, contracts.md, and docs/remote-connection-pairing-review-plan-20260910.md before edits. All handoff constraints bind. Append exact new regression names and RED commands to the existing append-only notepad before RED; capture lifecycle-* evidence. Rust check/test/build ONLY through SSH indo@100.91.254.71 at /home/indo/projects/erd-pairing-20260910 with FFmpeg7 environment; sync only owned changed files. No commits, model-setting changes, emulators, installs/deploys, production host changes or edits outside your scope. Preserve all C identity behavior and unrelated changes. Use event-driven deterministic tests and monitors. Lead owns physical-device QA and final review; distinguish missing physical evidence from passed fixtures."
+      }
+    ]
+  }
+}

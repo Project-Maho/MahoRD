@@ -1,0 +1,62 @@
+=== GREEN Phase: Targeted Lifecycle Regression Suite Execution ===
+Command: cargo test --manifest-path clients/rust/Cargo.toml -p erd-ios
+Host: indo@100.91.254.71 (Omarchy Linux)
+Execution Date: 2026-09-10
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.57s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_ios_lib-08638918e6826959)
+
+running 22 tests
+test tests::build_session_config_normalizes_ipv6_brackets_and_preserves_scope ... ok
+test tests::build_session_config_rejects_empty_bracketed_hosts_and_zero_ports ... ok
+test tests::frame_repacking_stride_repack ... ok
+test tests::frame_repacking_exact_layout_and_header ... ok
+test tests::frame_repacking_odd_height ... ok
+test tests::key_validation_rejects_invalid_inputs ... ok
+test tests::cancellation_validation_accepts_nonfinite_coords_to_release ... ok
+test tests::presentation_sequence_validation ... ok
+test tests::session_stats_serialization_conforms_to_contract ... ok
+test tests::poisoned_mutex_returns_error_instead_of_silent_recovery ... ok
+test tests::test_inject_audio_event_seam_and_error_handling ... ok
+test tests::touch_cancellation_emits_release ... ok
+test tests::pairing_lookup_by_host_address_never_infers_pairing_from_advertised_hostname ... ok
+test tests::touch_unit_viewport_normalization ... ok
+test tests::touch_mode_switching_emits_release ... ok
+test tests::test_list_pairings_excludes_secret_key_bytes ... ok
+test tests::test_connect_exact_id_loads_correct_stored_pairing ... ok
+test tests::trackpad_normalized_drag_produces_pixel_movement ... ok
+test tests::test_remember_endpoint_survives_store_reload ... ok
+test tests::test_connect_missing_id_and_missing_pin_fails_before_transport ... ok
+test tests::test_connect_unknown_id_fails_before_transport_without_bootstrap ... ok
+test tests::test_qa_provisioning_imports_and_propagates_pairing_id ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (clients/rust/target/debug/deps/erd_ios-eec4e9171102855a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lifecycle.rs (clients/rust/target/debug/deps/lifecycle-816a88fb78cad660)
+
+running 9 tests
+test test_stale_terminal_event_ignored_when_generation_advances ... ok
+test test_duplicate_termination_is_idempotent_and_threadsafe ... ok
+test test_cancel_before_native_registration_race ... ok
+test test_audio_error_triggers_generation_aware_session_shutdown ... ok
+test test_canceled_connect_cannot_install_resources ... ok
+test test_audio_init_failure_triggers_clean_rollback ... ok
+test test_ios_tcp_disconnect_updates_session_state ... ok
+test test_early_tcp_close_aborts_session_and_cleans_resources ... ok
+test test_worker_completion_signals_emitted_on_disconnect ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+   Doc-tests erd_ios_lib
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Summary: 31 passed across unit and lifecycle suites, 0 failed, 0 ignored. 5 consecutive stress runs completed with zero flakes in <=0.08s.

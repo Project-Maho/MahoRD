@@ -1,0 +1,41 @@
+Mutation 2: Default-PIN fallback inserted on missing PIN/record in authenticate_client_session:
+```rust
+} else {
+    session
+        .pair_with_pin("12345678")
+        .map_err(|e| format!("Pairing error: {e}"))
+}
+```
+
+Command:
+cargo test --manifest-path clients/rust/Cargo.toml -p tauri-shell --lib pairing
+Exit Code: 101
+
+Output:
+running 9 tests
+test discovery_tests::stored_pairings_and_self_do_not_create_observed_peers ... ok
+test pairing_tests::test_list_pairings_store_seam_isolated_store_serializes_only_allowed_metadata ... ok
+test pairing_tests::test_list_pairings_json_excludes_key_field ... FAILED
+test pairing_tests::test_failed_reconnect_preserves_original_cause_and_never_falls_back_to_bootstrap_pin ... FAILED
+test discovery_tests::pairing_does_not_infer_identity_from_testbed_ips_case_or_substrings ... ok
+test discovery_tests::source_dedup_merges_lan_and_tailscale_by_name_and_inherits_pairing ... ok
+test desktop_integration_tests::pairing_store_round_trip_and_deletion ... ok
+test pairing_tests::test_missing_pin_and_missing_record_fails_immediately_without_bootstrap ... FAILED
+test pairing_tests::test_loopback_reconnect_failure_does_not_trigger_bootstrap_request ... ok
+
+failures:
+
+---- pairing_tests::test_missing_pin_and_missing_record_fails_immediately_without_bootstrap stdout ----
+
+thread 'pairing_tests::test_missing_pin_and_missing_record_fails_immediately_without_bootstrap' (3962559) panicked at tauri-shell/src-tauri/src/pairing_tests.rs:190:5:
+assertion `left == right` failed: Must return explicit no PIN/pairing error
+  left: "Pairing error: I/O failed: Connection refused (os error 111)"
+ right: "No PIN provided and no previous pairing found in store"
+
+failures:
+    pairing_tests::test_failed_reconnect_preserves_original_cause_and_never_falls_back_to_bootstrap_pin
+    pairing_tests::test_list_pairings_json_excludes_key_field
+    pairing_tests::test_missing_pin_and_missing_record_fails_immediately_without_bootstrap
+
+test result: FAILED. 6 passed; 3 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.13s
+error: test failed, to rerun pass `-p tauri-shell --lib`

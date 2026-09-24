@@ -1,0 +1,32 @@
+=== R10 Interface-Name Resolver Assertion Sensitivity Evidence ===
+Date: 2026-09-10
+Task ID: st_01a08a51
+Target: indo@100.91.254.71 (/home/indo/projects/erd-pairing-20260910)
+Description: Demonstrates that the strengthened test fails reliably when asserted resolver behavior is absent (controlled invalid interface / resolver failure), whereas the prior nested if-let implementation passed silently.
+
+Command:
+ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:\$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p erd-net --test discovery_scoped_ipv6 -- test_resolver_resolves_interface_name_scope"
+
+Exit code: 101
+
+Output:
+   Compiling erd-net v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/erd-net)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running tests/discovery_scoped_ipv6.rs (clients/rust/target/debug/deps/discovery_scoped_ipv6-2c04201a1ca7c202)
+
+running 1 test
+test test_resolver_resolves_interface_name_scope ... FAILED
+
+failures:
+
+---- test_resolver_resolves_interface_name_scope stdout ----
+thread 'test_resolver_resolves_interface_name_scope' (4186263) panicked at erd-net/tests/discovery_scoped_ipv6.rs:159:10:
+interface name resolver must succeed for real existing runner interface 'lo': Custom { kind: Uncategorized, error: "failed to lookup address information: Name or service not known" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    test_resolver_resolves_interface_name_scope
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p erd-net --test discovery_scoped_ipv6`

@@ -1,0 +1,69 @@
+# Red Regression Evidence (Captured before production fixes)
+
+## 1. R11 PIN Selection Regression (Default was hardcoded "12345678", ignoring generator)
+Command:
+`ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib cargo test --manifest-path clients/rust/Cargo.toml -p erd-host pin"`
+
+Result:
+```
+running 5 tests
+test tests::test_pin_explicit_bootstrap_pin_bypasses_generator ... ok
+test tests::test_pin_default_selects_injected_generator_branch ... FAILED
+test tests::test_random_pin_retained_and_format_valid ... ok
+test tests::test_pin_generate_flag_selects_injected_generator_branch ... ok
+test tests::test_pin_validation_accepts_8_digits_and_rejects_invalid ... ok
+
+failures:
+
+---- tests::test_pin_default_selects_injected_generator_branch stdout ----
+
+thread 'tests::test_pin_default_selects_injected_generator_branch' panicked at erd-host/src/main.rs:241:9:
+assertion `left == right` failed: default invocation must invoke generator
+  left: 0
+ right: 1
+
+failures:
+    tests::test_pin_default_selects_injected_generator_branch
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+## 2. R2 Bootstrap Consent Binding Regression (Unconsented Handshake accepted, Mismatched ID accepted, Duplicate Handshake accepted)
+Command:
+`ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib cargo test --manifest-path clients/rust/Cargo.toml -p erd-host bootstrap"`
+
+Result:
+```
+running 7 tests
+test session::tests::lockout_disables_bootstrap_after_five_failures ... ok
+test session::tests::bootstrap_kdf_runs_once_per_unchanged_pairing_window ... ok
+test session::tests::cached_bootstrap_obeys_lockout_expiry_and_pairing_revocation ... ok
+test session::tests::test_bootstrap_authenticated_session_rejects_duplicate_handshake ... FAILED
+test session::tests::test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input ... FAILED
+test session::tests::test_bootstrap_consent_b_cannot_use_a ... FAILED
+test session::tests::test_bootstrap_normal_b_and_paired_a_work ... ok
+
+failures:
+
+---- session::tests::test_bootstrap_authenticated_session_rejects_duplicate_handshake stdout ----
+
+thread 'session::tests::test_bootstrap_authenticated_session_rejects_duplicate_handshake' panicked at erd-host/src/session.rs:4589:9:
+server must reject duplicate handshake with AlreadyAuthenticated, got: Ok(())
+
+---- session::tests::test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input stdout ----
+
+thread 'session::tests::test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input' panicked at erd-host/src/session.rs:4332:9:
+server must reject unconsented bootstrap handshake with PreAuth, got: Ok(())
+
+---- session::tests::test_bootstrap_consent_b_cannot_use_a stdout ----
+
+thread 'session::tests::test_bootstrap_consent_b_cannot_use_a' panicked at erd-host/src/session.rs:4412:9:
+server must reject handshake with mismatched pairing ID with IdentityMismatch, got: Ok(())
+
+failures:
+    session::tests::test_bootstrap_authenticated_session_rejects_duplicate_handshake
+    session::tests::test_bootstrap_consent_b_cannot_use_a
+    session::tests::test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input
+
+test result: FAILED. 4 passed; 3 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.53s
+```

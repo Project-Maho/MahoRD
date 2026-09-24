@@ -1,0 +1,181 @@
+Exact staged tree: cd272cb6ead190f544d6ca569279bb7cca32c994
+Isolated source: /home/indo/projects/erd-metadata-snapshot-u8e0lS
+Command: cargo test --manifest-path clients/rust/Cargo.toml -p erd-app -p erd-mobile -p erd-host -p tauri-shell -p erd-ios pairing
+Execution: Omarchy only, with FFmpeg7 PKG_CONFIG_PATH and LD_LIBRARY_PATH.
+status: completed exit_code: 0
+   Compiling erd-proto v0.1.0 (/home/indo/projects/erd-metadata-snapshot-u8e0lS/clients/rust/erd-proto)
+   Compiling erd-render v0.1.0 (/home/indo/projects/erd-metadata-snapshot-u8e0lS/clients/rust/erd-render)
+   Compiling tauri-shell v0.1.0 (/home/indo/projects/erd-metadata-snapshot-u8e0lS/clients/rust/tauri-shell)
+   Compiling erd-ios v0.1.0 (/home/indo/projects/erd-metadata-snapshot-u8e0lS/clients/rust/ios-shell)
+   Compiling erd-net v0.1.0 (/home/indo/projects/erd-metadata-snapshot-u8e0lS/clients/rust/erd-net)
+   Compiling erd-decode v0.1.0 (/home/indo/projects/erd-metadata-snapshot-u8e0lS/clients/rust/erd-decode)
+   Compiling erd-app v0.1.0 (/home/indo/projects/erd-metadata-snapshot-u8e0lS/clients/rust/erd-app)
+   Compiling erd-host v0.1.0 (/home/indo/projects/erd-metadata-snapshot-u8e0lS/clients/rust/erd-host)
+   Compiling erd-mobile v0.1.0 (/home/indo/projects/erd-metadata-snapshot-u8e0lS/clients/rust/erd-mobile)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.14s
+
+running 12 tests
+test pairing::tests::test_client_default_path_filename ... ok
+test pairing::tests::test_id_key_mismatch_no_mutation ... ok
+test pairing::tests::ephemeral_pairing_store_roundtrip_and_delete ... ok
+     Running unittests src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_app-2503d24c72e72352)
+test pairing::tests::test_key_free_summary_serialization ... ok
+test pairing::tests::test_preservation_of_credentials ... ok
+test pairing::tests::test_legacy_record_readability ... ok
+test pairing::tests::test_metadata_roundtrip_and_dedup ... ok
+test pairing::tests::test_missing_record_no_resurrection ... ok
+test pairing::tests::test_legacy_client_migration_skips_when_client_pairings_already_exists ... ok
+test pairing::tests::test_legacy_client_migration_preserves_legacy_and_writes_client_pairings ... ok
+test pairing::tests::test_temporary_file_naming_isolated ... ok
+test pairing::tests::test_deletion_isolated_from_legacy ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 121 filtered out; finished in 0.00s
+
+     Running unittests src/bin/erd_client.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_client-6c337346d74872fe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 2 tests
+test connect_with_pairing_direct_round_trip ... ok
+     Running tests/agent_control_e2e.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/agent_control_e2e-176bd1a44c5cc874)
+     Running tests/cli_mcp_contract.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/cli_mcp_contract-20b4f69c0ea70dbf)
+     Running tests/cli_receiver_telemetry.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/cli_receiver_telemetry-f3916a3a28159ef7)
+     Running tests/client_copy_cost.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/client_copy_cost-34cbfbfc52793f73)
+     Running tests/core_semantics.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/core_semantics-756e58d208abc1b0)
+     Running tests/media_reassembly.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/media_reassembly-4c793601adda3787)
+     Running tests/receiver_telemetry.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/receiver_telemetry-7aa70fb6f39f9c3a)
+     Running tests/session_mock.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/session_mock-539e30e7d6a17533)
+test mock_server_pairing_handshake_and_input_round_trip ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.14s
+
+     Running unittests src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_host-8644c19f564ad4db)
+
+running 3 tests
+test session::tests::pairing_store_mirrors_swift_json_and_is_mode_0600 ... ok
+test session::tests::bootstrap_kdf_runs_once_per_unchanged_pairing_window ... ok
+test session::tests::cached_bootstrap_obeys_lockout_expiry_and_pairing_revocation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 0.07s
+
+     Running unittests src/bin/captest.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/captest-6493ffb05226865c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_host-2fbec750c2332b22)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/linux_audio_selection.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/linux_audio_selection-98459b85c020fccf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/pairing_isolation.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/pairing_isolation-cded966f8effca19)
+
+running 2 tests
+
+running 1 test
+
+running 1 test
+test test_legacy_pairing_keys_not_auto_imported_by_host_and_migrated_by_client ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+test test_legacy_pairing_keys_not_auto_imported_by_host_and_migrated_by_client ... ok
+test test_outbound_client_pairing_rejected_as_host_authorization ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.07s
+
+test test_outbound_client_pairing_rejected_as_host_authorization ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_ios_lib-c60e386e9573f519)
+
+running 1 test
+test tests::tests::pairing_lookup_by_host_address_never_infers_pairing_from_advertised_hostname ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_ios-53e02ecce93346e4)
+     Running unittests src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_mobile-5d8b421e676e2001)
+
+running 1 test
+test storage::tests::secure_pairing_store_round_trip_and_delete ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+
+     Running tests/mobile_regressions.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/mobile_regressions-8a8dac9f9d2c0107)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+
+     Running unittests src-tauri/src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/tauri_shell_lib-00c078f39caf4161)
+
+running 5 tests
+test discovery_tests::stored_pairings_and_self_do_not_create_observed_peers ... ok
+test discovery_tests::pairing_does_not_infer_identity_from_testbed_ips_case_or_substrings ... ok
+test pairing_tests::test_list_pairings_json_excludes_key_field ... ok
+test desktop_integration_tests::pairing_store_round_trip_and_deletion ... ok
+test pairing_tests::test_list_pairings_store_seam_isolated_store_serializes_only_allowed_metadata ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src-tauri/src/main.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/tauri_shell-a063da5316b88cdd)
+Commit: beb3a3c7eade8223b54adf6a9d06f2454161858f feat(pairing): persist credential endpoints without changing keys
+Only pairing.rs and metadata initializer hunks staged. Active D and desktop hosting changes excluded.

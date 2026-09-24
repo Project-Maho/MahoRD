@@ -1,0 +1,100 @@
+status: completed exit_code: 0
+   Compiling erd-app v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/erd-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.13s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_app-fa73e0a6b217a4ff)
+
+running 12 tests
+test pairing::tests::test_client_default_path_filename ... ok
+test pairing::tests::ephemeral_pairing_store_roundtrip_and_delete ... ok
+test pairing::tests::test_id_key_mismatch_no_mutation ... ok
+test pairing::tests::test_key_free_summary_serialization ... ok
+test pairing::tests::test_legacy_record_readability ... ok
+test pairing::tests::test_missing_record_no_resurrection ... ok
+test pairing::tests::test_metadata_roundtrip_and_dedup ... ok
+test pairing::tests::test_preservation_of_credentials ... ok
+test pairing::tests::test_legacy_client_migration_preserves_legacy_and_writes_client_pairings ... ok
+test pairing::tests::test_legacy_client_migration_skips_when_client_pairings_already_exists ... ok
+test pairing::tests::test_deletion_isolated_from_legacy ... ok
+test pairing::tests::test_temporary_file_naming_isolated ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 121 filtered out; finished in 0.00s
+
+     Running unittests src/bin/erd_client.rs (clients/rust/target/debug/deps/erd_client-1f4ae43453446b9e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/agent_control_e2e.rs (clients/rust/target/debug/deps/agent_control_e2e-32a28db646899134)
+     Running tests/cli_mcp_contract.rs (clients/rust/target/debug/deps/cli_mcp_contract-2bb4f012d5dd0ad6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/cli_receiver_telemetry.rs (clients/rust/target/debug/deps/cli_receiver_telemetry-dab1d190c4cd748d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/client_copy_cost.rs (clients/rust/target/debug/deps/client_copy_cost-ece62556bb1f6ed8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/core_semantics.rs (clients/rust/target/debug/deps/core_semantics-fc173b316188a439)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/media_reassembly.rs (clients/rust/target/debug/deps/media_reassembly-ff6453ff684c1e05)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/receiver_telemetry.rs (clients/rust/target/debug/deps/receiver_telemetry-d9754557ec0a0e18)
+     Running tests/session_mock.rs (clients/rust/target/debug/deps/session_mock-54582c90b09275f5)
+
+running 2 tests
+test connect_with_pairing_direct_round_trip ... ok
+test mock_server_pairing_handshake_and_input_round_trip ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.14s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_app-fa73e0a6b217a4ff)
+
+running 2 tests
+test error::tests::test_ipc_error_machine_fields_and_no_secret_leak ... ok
+test error::tests::test_ipc_error_code_and_stage_serialization ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/discovery_scoped_ipv6.rs (clients/rust/target/debug/deps/discovery_scoped_ipv6-2c04201a1ca7c202)
+
+running 8 tests
+test test_choose_preferred_endpoint_selects_scoped_ipv6_and_preserves_scope ... ok
+test test_ipv4_preferred_over_scoped_ipv6_link_local ... ok
+test test_scoped_ipv6_link_local_published ... ok
+test test_resolver_resolves_interface_name_scope ... ok
+test test_parse_service_metadata_scoped_accepts_scoped_ipv6 ... ok
+test test_scoped_ipv6_link_local_with_scope_zero_retracted ... ok
+test test_unscoped_ipv6_link_local_retracted ... ok
+test test_scoped_ipv6_published_string_and_resolver_retain_scope ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

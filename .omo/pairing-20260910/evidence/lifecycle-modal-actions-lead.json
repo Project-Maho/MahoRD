@@ -1,0 +1,230 @@
+{
+  "timestamp": "2026-09-10T15:39:07.719Z",
+  "testRun": "R7 Modal UX & Lifecycle Verification",
+  "viewports": [
+    {
+      "viewport": "430x932",
+      "dimensions": {
+        "width": 430,
+        "height": 932
+      },
+      "steps": [
+        {
+          "step": "page_ready",
+          "origin": "http://127.0.0.1:60046"
+        },
+        {
+          "step": "form_filled",
+          "host": "192.0.2.10",
+          "hasPin": true
+        },
+        {
+          "step": "command_armed",
+          "command": "connect",
+          "armed": true
+        },
+        {
+          "step": "connect_issued",
+          "command": "connect",
+          "args": {
+            "host": "192.0.2.10",
+            "pin": "[REDACTED]"
+          }
+        },
+        {
+          "step": "pin_cleared_verification",
+          "pinValue": "",
+          "isCleared": true
+        },
+        {
+          "step": "connecting_modal_inspected",
+          "modalParent": "body",
+          "hiddenAncestor": null,
+          "modalHidden": false,
+          "modalRect": {
+            "x": 0,
+            "y": 0,
+            "width": 430,
+            "height": 932
+          },
+          "btnRect": {
+            "x": 173.40625,
+            "y": 506.5,
+            "width": 83.1875,
+            "height": 44
+          },
+          "btnDisabled": false,
+          "inViewport": true,
+          "hitTargetId": "btn-cancel-connect",
+          "hitMatches": true,
+          "activeElementId": "btn-cancel-connect",
+          "connectViewInert": true,
+          "sessionViewInert": true
+        },
+        {
+          "step": "focus_trap_exercised",
+          "afterTab": true,
+          "afterShiftTab": true,
+          "afterBgAttempt": true
+        },
+        {
+          "step": "command_armed",
+          "command": "disconnect",
+          "armed": true
+        },
+        {
+          "step": "disconnect_issued",
+          "command": "disconnect"
+        },
+        {
+          "step": "disconnecting_inspected",
+          "modalHidden": false,
+          "btnDisabled": true,
+          "statusText": "Disconnecting..."
+        },
+        {
+          "step": "cleanup_disconnect_settled_connect_pending",
+          "modalHidden": false,
+          "btnDisabled": true,
+          "statusText": "Disconnecting...",
+          "modalRemainsDuringCleanup": true
+        },
+        {
+          "step": "settled_inspected",
+          "modalHidden": true,
+          "connectViewInert": false,
+          "activeElementId": "btn-connect-submit",
+          "submitDisabled": false
+        },
+        {
+          "step": "stale_connect_check",
+          "totalConnectCalls": 1,
+          "noStaleCalls": true
+        }
+      ],
+      "screenshots": {
+        "connecting": ".omo/pairing-20260910/evidence/lifecycle-modal-connecting-430x932.png",
+        "disconnecting": ".omo/pairing-20260910/evidence/lifecycle-modal-disconnecting-430x932.png",
+        "settled": ".omo/pairing-20260910/evidence/lifecycle-modal-settled-430x932.png"
+      },
+      "cleanup": {
+        "webViewClosed": true,
+        "serverStopped": true
+      }
+    },
+    {
+      "viewport": "1280x800",
+      "dimensions": {
+        "width": 1280,
+        "height": 800
+      },
+      "steps": [
+        {
+          "step": "page_ready",
+          "origin": "http://127.0.0.1:60053"
+        },
+        {
+          "step": "form_filled",
+          "host": "192.0.2.10",
+          "hasPin": true
+        },
+        {
+          "step": "command_armed",
+          "command": "connect",
+          "armed": true
+        },
+        {
+          "step": "connect_issued",
+          "command": "connect",
+          "args": {
+            "host": "192.0.2.10",
+            "pin": "[REDACTED]"
+          }
+        },
+        {
+          "step": "pin_cleared_verification",
+          "pinValue": "",
+          "isCleared": true
+        },
+        {
+          "step": "connecting_modal_inspected",
+          "modalParent": "body",
+          "hiddenAncestor": null,
+          "modalHidden": false,
+          "modalRect": {
+            "x": 0,
+            "y": 0,
+            "width": 1280,
+            "height": 800
+          },
+          "btnRect": {
+            "x": 598.40625,
+            "y": 440.5,
+            "width": 83.1875,
+            "height": 44
+          },
+          "btnDisabled": false,
+          "inViewport": true,
+          "hitTargetId": "btn-cancel-connect",
+          "hitMatches": true,
+          "activeElementId": "btn-cancel-connect",
+          "connectViewInert": true,
+          "sessionViewInert": true
+        },
+        {
+          "step": "focus_trap_exercised",
+          "afterTab": true,
+          "afterShiftTab": true,
+          "afterBgAttempt": true
+        },
+        {
+          "step": "command_armed",
+          "command": "disconnect",
+          "armed": true
+        },
+        {
+          "step": "disconnect_issued",
+          "command": "disconnect"
+        },
+        {
+          "step": "disconnecting_inspected",
+          "modalHidden": false,
+          "btnDisabled": true,
+          "statusText": "Disconnecting..."
+        },
+        {
+          "step": "cleanup_disconnect_settled_connect_pending",
+          "modalHidden": false,
+          "btnDisabled": true,
+          "statusText": "Disconnecting...",
+          "modalRemainsDuringCleanup": true
+        },
+        {
+          "step": "settled_inspected",
+          "modalHidden": true,
+          "connectViewInert": false,
+          "activeElementId": "btn-connect-submit",
+          "submitDisabled": false
+        },
+        {
+          "step": "stale_connect_check",
+          "totalConnectCalls": 1,
+          "noStaleCalls": true
+        }
+      ],
+      "screenshots": {
+        "connecting": ".omo/pairing-20260910/evidence/lifecycle-modal-connecting-1280x800.png",
+        "disconnecting": ".omo/pairing-20260910/evidence/lifecycle-modal-disconnecting-1280x800.png",
+        "settled": ".omo/pairing-20260910/evidence/lifecycle-modal-settled-1280x800.png"
+      },
+      "cleanup": {
+        "webViewClosed": true,
+        "serverStopped": true
+      }
+    }
+  ],
+  "summary": {
+    "status": "PASS",
+    "totalScenarios": 2
+  }
+}

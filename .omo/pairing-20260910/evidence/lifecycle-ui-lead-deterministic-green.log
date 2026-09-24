@@ -1,0 +1,58 @@
+status: completed exit_code: 0
+bun test v1.4.0 (34cbb9a40)
+
+clients/rust/ios-shell/ui/test/discovery.test.mjs:
+✓ validateConnectRequest accepts valid custom tcpPort and udpPort [0.79ms]
+✓ validateConnectRequest omits port fields when absent for backward compatibility [0.02ms]
+✓ validateConnectRequest rejects empty bracketed hosts [0.02ms]
+✓ validateConnectRequest rejects port 0, negative, and out-of-range ports [0.04ms]
+✓ validateConnectRequest preserves and normalizes IPv6 addresses without bracket corruption [0.01ms]
+✓ safe port passing propagates to native connect invoke call [0.18ms]
+✓ null bridge connect cannot report success [0.06ms]
+✓ initial state has idle discovery and empty discovered hosts [0.03ms]
+✓ startDiscovery transitions discoveryState to loading while snapshot is pending [0.21ms]
+✓ pending list_hosts completes after stop and does not repopulate list [0.04ms]
+✓ stop before native call begins prevents native list_hosts from being invoked [0.03ms]
+✓ stop then resume waits for native stop before new list_hosts [0.03ms]
+✓ old completion does not clear new pending request [0.04ms]
+✓ list_hosts resolution populates discoveredHosts and transitions discoveryState to idle [0.06ms]
+✓ empty discovery snapshot yields empty list without error [0.02ms]
+✓ disappearing hosts are pruned from discoveredHosts on subsequent snapshot [0.03ms]
+✓ discovery failure sets discoveryState to error while preserving direct connect [0.38ms]
+✓ discovery refresh scheduling stops when active session begins and resumes on disconnect [0.23ms]
+✓ session/background disconnect does not restart periodic timer [0.04ms]
+✓ lifecycle background transitions halt discovery refresh and foreground transitions resume [0.09ms]
+✓ findDiscoveredHostById returns latest updated record when IP or ports change [0.03ms]
+✓ findDiscoveredHostById returns null when host is removed or inputs invalid
+✓ selecting a discovered host card populates target parameters without inferring paired state [0.04ms]
+✓ card-initiated connect requires PIN for unpaired host: asserts missing-PIN rejects and valid-PIN succeeds [0.04ms]
+✓ unpaired discovered host with identical name does not choose saved credential [0.12ms]
+
+clients/rust/ios-shell/ui/test/connection-state.test.mjs:
+✓ validateConnectRequest validates required host and optional 8-digit PIN [0.03ms]
+✓ createConnectionManager transitions state from idle to waiting-video to streaming [0.05ms]
+✓ createConnectionManager ignores stale frame tokens from prior generation [0.03ms]
+✓ createConnectionManager reports error when native bridge is missing [0.03ms]
+✓ saved-mode click passes explicit pairingId to native connect without PIN [0.05ms]
+✓ list_pairings populates savedPairings and excludes secret keys from state [0.03ms]
+✓ connect without PIN and without pairingId returns pairing-required error [0.10ms]
+✓ UI saved-mode click to actual invoke argument passes exact pairingId without PIN [0.03ms]
+✓ startup provisioning auto-connect dispatches connect with explicit pairingId [0.03ms]
+✓ cleanup invokes native disconnect even when state is error [0.25ms]
+✓ cleanup failure transitions to cleanup-failed and does not revert to idle [0.20ms]
+✓ concurrent disconnect calls share single pending cleanup promise [0.04ms]
+✓ prompt native disconnect during pending connect cancels immediately and serializes cleanup [0.07ms]
+✓ cleanup-failed retains lock and blocks connect until retryCleanup succeeds [0.05ms]
+✓ connect rejection cleans up, retaining original error and retryable cleanup failure [0.04ms]
+✓ ensure error dismiss cleans resources and never reverts to idle on cleanup failure [0.04ms]
+✓ stale connect completion after disconnect cannot revive session [0.02ms]
+✓ lead_disconnect_waits_for_pending_connect [0.19ms]
+✓ lead_disconnected_stats_end_ui_session [0.05ms]
+✓ disconnect during pending connect: order A where connect settles before disconnect [0.05ms]
+✓ disconnect during pending connect: order B where disconnect settles before connect [0.03ms]
+✓ native stats contract: stale generation terminal stats is suppressed [0.03ms]
+✓ final subscription snapshot reports busy=false when ownership and connect truly ended [0.06ms]
+
+ 48 pass
+ 0 fail
+Ran 48 tests across 2 files. [811.00ms]

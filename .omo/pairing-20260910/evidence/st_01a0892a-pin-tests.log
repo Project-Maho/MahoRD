@@ -1,0 +1,39 @@
+Command: ssh -o BatchMode=yes indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib cargo test --manifest-path clients/rust/Cargo.toml -p erd-host pin"
+Exit Code: 0
+
+Output:
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.49s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_host-3d5d23414c23b8a6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 0.00s
+
+     Running unittests src/bin/captest.rs (clients/rust/target/debug/deps/captest-6be07aa7247e5813)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (clients/rust/target/debug/deps/erd_host-63f9d0457be7c696)
+
+running 5 tests
+test tests::test_pin_explicit_bootstrap_pin_bypasses_generator ... ok
+test tests::test_pin_default_selects_injected_generator_branch ... ok
+test tests::test_pin_validation_accepts_8_digits_and_rejects_invalid ... ok
+test tests::test_random_pin_retained_and_format_valid ... ok
+test tests::test_pin_generate_flag_selects_injected_generator_branch ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/linux_audio_selection.rs (clients/rust/target/debug/deps/linux_audio_selection-fddf09607c8fefd1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/pairing_isolation.rs (clients/rust/target/debug/deps/pairing_isolation-9d808868c5fab39c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s

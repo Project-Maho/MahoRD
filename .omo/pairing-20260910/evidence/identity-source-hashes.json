@@ -1,0 +1,14 @@
+{
+  "matched": true,
+  "files": {
+    "clients/rust/erd-app/src/pairing.rs": "f20b931a2ed41a8288e297a5796b106833c75c565b201560f2b8dca26b5ed818",
+    "clients/rust/erd-app/src/error.rs": "184a32f5e9b3d4bb3c533623172f71ca3a68033b41c397f71930272037038c35",
+    "clients/rust/erd-net/src/discovery/endpoint.rs": "53e9ce61916b59a6d4977b6d5c171cfeb33e4ca11003cf72713d0d0902930189",
+    "clients/rust/tauri-shell/src-tauri/src/lib.rs": "c4241ae04f4184250c7fc5b76405df3d8d16a46eb6086934df91de3760e6c76f",
+    "clients/rust/tauri-shell/src-tauri/src/pairing_tests.rs": "b0baf847fa538f0026ed726a11295116ee14b1bad7151743e32a1d7311d63d0a",
+    "clients/rust/ios-shell/src/state.rs": "91c0a17a6a495dfed35ba6cc2aa2b7b1de1ca22e73c838a342fe50ee4f1c6d35",
+    "clients/rust/ios-shell/src/commands.rs": "0ba940038bd62435851ca36c4f2291e7893c273124d3f60fe2bf28096887d6f2",
+    "clients/rust/ios-shell/src/tests.rs": "53fdd33e1b196fae3a25047cd6315e0b49e6cb566b89046330c72e32ee2b3a10"
+  },
+  "monitor": "mon_PXP5Z1R3D59MJ64N"
+}

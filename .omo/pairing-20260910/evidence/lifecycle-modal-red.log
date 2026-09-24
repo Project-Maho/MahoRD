@@ -1,0 +1,109 @@
+bun test v1.4.0 (34cbb9a40)
+
+clients/rust/ios-shell/ui/test/page-modal.test.mjs:
+181 |       expect(connectCall.cmd).toBe('connect');
+182 |       expect(connectCall.args.host).toBe('192.0.2.10');
+183 | 
+184 |       // Assert PIN input is cleared immediately upon submit
+185 |       const pinValue = await page.inputValue('#connect-pin');
+186 |       expect(pinValue).toBe('');
+                             ^
+error: expect(received).toBe(expected)
+
+Expected: ""
+Received: "12345678"
+
+      at <anonymous> (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/ios-shell/ui/test/page-modal.test.mjs:186:24)
+(fail) real browser interaction at 430x932: fill, submit, modal appearance, hit-test, focus trap, cancel click, cleanup progress, focus restore, and no stale reconnect [719.33ms]
+181 |       expect(connectCall.cmd).toBe('connect');
+182 |       expect(connectCall.args.host).toBe('192.0.2.10');
+183 | 
+184 |       // Assert PIN input is cleared immediately upon submit
+185 |       const pinValue = await page.inputValue('#connect-pin');
+186 |       expect(pinValue).toBe('');
+                             ^
+error: expect(received).toBe(expected)
+
+Expected: ""
+Received: "12345678"
+
+      at <anonymous> (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/ios-shell/ui/test/page-modal.test.mjs:186:24)
+(fail) real browser interaction at 1280x800: fill, submit, modal appearance, hit-test, focus trap, cancel click, cleanup progress, focus restore, and no stale reconnect [420.18ms]
+
+clients/rust/ios-shell/ui/test/dom-modal.test.mjs:
+14 |         parentId: modal && modal.parentElement ? modal.parentElement.id : null,
+15 |       };
+16 |     })()`);
+17 | 
+18 |     expect(info.modalExists).toBe(true);
+19 |     expect(info.parentIsSession).toBe(false);
+                                      ^
+error: expect(received).toBe(expected)
+
+Expected: false
+Received: true
+
+      at <anonymous> (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/ios-shell/ui/test/dom-modal.test.mjs:19:34)
+(fail) connecting modal is child of body, not hidden session view [231.17ms]
+61 |         disabled: btn.disabled,
+62 |       };
+63 |     })()`);
+64 | 
+65 |     expect(cancelInfo.modalHidden).toBe(false);
+66 |     expect(cancelInfo.modalRectWidth).toBeGreaterThan(0);
+                                           ^
+error: expect(received).toBeGreaterThan(expected)
+
+Expected: > 0
+Received: 0
+
+      at <anonymous> (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/ios-shell/ui/test/dom-modal.test.mjs:66:39)
+(fail) cancel button is clickable and dispatches disconnect while connecting [76.64ms]
+ 98 |         sessionViewInert: sessionView.inert === true || sessionView.hasAttribute('inert'),
+ 99 |         connectViewAriaHidden: connectView.getAttribute('aria-hidden'),
+100 |       };
+101 |     })()`);
+102 | 
+103 |     expect(inertInfo.connectViewInert).toBe(true);
+                                             ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/ios-shell/ui/test/dom-modal.test.mjs:103:40)
+(fail) background views are marked inert and aria-hidden when modal is open [66.74ms]
+122 | 
+123 |     const activeInModal = await page.evaluate(`(() => {
+124 |       const btnCancel = document.getElementById('btn-cancel-connect');
+125 |       return document.activeElement === btnCancel;
+126 |     })()`);
+127 |     expect(activeInModal).toBe(true);
+                                ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/ios-shell/ui/test/dom-modal.test.mjs:127:27)
+(fail) focus is trapped to modal and restored on close [73.89ms]
+160 |     await page.evaluate(`fixture.command('connect', () => {
+161 |       document.getElementById('btn-connect-submit').click();
+162 |     })`);
+163 | 
+164 |     const pinValue = await page.evaluate(`document.getElementById('connect-pin').value`);
+165 |     expect(pinValue).toBe('');
+                           ^
+error: expect(received).toBe(expected)
+
+Expected: ""
+Received: "12345678"
+
+      at <anonymous> (/Volumes/T9-Mac/project/EclipticRD-Rewrite/clients/rust/ios-shell/ui/test/dom-modal.test.mjs:165:22)
+(fail) pin input is cleared upon submission [71.57ms]
+(pass) cleanup progress visible and cancel button disabled during disconnecting [78.86ms]
+
+ 1 pass
+ 7 fail
+ 16 expect() calls
+Ran 8 tests across 2 files. [2.02s]

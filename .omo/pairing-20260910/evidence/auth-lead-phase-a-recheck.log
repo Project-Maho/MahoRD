@@ -1,0 +1,568 @@
+status: completed exit_code: 0
+REPORTED_FILTER_EXIT=1
+error: unexpected argument 'test_failed_reconnect' found
+
+Usage: cargo test [OPTIONS] [TESTNAME] [-- [ARGS]...]
+
+For more information, try '--help'.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_app-2503d24c72e72352)
+
+running 125 tests
+test agent_input::tests::action_budget_rejects_drag_expansion ... ok
+test agent_input::tests::action_budget_rejects_text_expansion ... ok
+test agent_input::tests::monitor_info_equality ... ok
+test agent_input::tests::normalizes_already_normalized_coordinates ... ok
+test agent_input::tests::left_mouse_drag_emits_left_dragged_event ... ok
+test agent_input::tests::action_budget_rejects_click_expansion ... ok
+test agent_input::tests::converts_actions_to_wire_input_events ... ok
+test agent_input::tests::parses_hotkey_combinations ... ok
+test agent_input::tests::parses_standard_key_names_and_modifiers ... ok
+test agent_input::tests::deserializes_screen_info_with_backward_compatibility ... ok
+test agent_input::tests::normalizes_coordinates_from_physical_pixels ... ok
+test agent_input::tests::action_budget_accepts_maximum_text_and_drag ... ok
+test agent_input::tests::right_mouse_drag_emits_right_dragged_event ... ok
+test agent_input::tests::synthesizes_ascii_characters ... ok
+test agent_input::tests::serializes_screen_info_with_logical_dimensions_and_monitors ... ok
+test agent_input::tests::deserializes_screen_info_with_new_fields ... ok
+test agent_input::tests::tracker_records_and_releases_all ... ok
+test agent_input::tests::types_multilingual_text_with_unicode_char_events ... ok
+test agent_input::tests::normalizes_coordinates_with_y_flip ... ok
+test agent_input::tests::rejects_non_finite_coordinates ... ok
+test agent_input::tests::encodes_nv12_screenshot_to_valid_png_and_jpeg ... ok
+test agent_server::tests::health_endpoint_requires_no_auth ... ok
+test agent_server::tests::disconnect_release_failure_never_reports_success ... ok
+test agent_server::tests::authorized_request_with_x_erd_token_returns_200 ... ok
+test agent_server::tests::disconnect_on_unsupported_backend_refuses_without_stopping ... ok
+test agent_server::tests::authorized_request_with_bearer_token_returns_200 ... ok
+test agent_server::tests::disconnect_gates_new_input_before_release ... ok
+test agent_server::tests::disconnect_answers_then_stops_worker_listener_and_backend_session ... ok
+test agent_server::tests::disconnect_response_fully_arrives_before_backend_stop_unblocks ... ok
+test agent_server::tests::health_responds_when_input_action_backend_is_blocked ... ok
+test agent_server::tests::health_responds_when_input_batch_backend_is_blocked ... ok
+test agent_server::tests::reader_accumulates_fragmented_headers_and_body ... ok
+test agent_server::tests::disconnect_releases_held_input_with_reset_transaction_before_answering ... ok
+test agent_server::tests::concurrent_action_and_reset_cannot_interleave_a_blocked_batch ... ok
+test agent_server::tests::idle_header_and_body_reader_deadlines ... ok
+test agent_server::tests::oversized_http_request_returns_413 ... ok
+test agent_server::tests::health_responds_when_input_reset_backend_is_blocked ... ok
+test agent_server::tests::response_headers_omit_access_control_allow_origin_wildcard ... ok
+test agent_server::tests::reset_release_failure_never_reports_success ... ok
+test frame_queue::tests::decode_failure_discards_pending_dependents_and_requests_only_once ... ok
+test agent_server::tests::unauthorized_request_returns_401 ... ok
+test agent_server::tests::shutdown_closes_owned_idle_connections ... ok
+test frame_queue::tests::decode_failure_preserves_already_queued_independent_chain ... ok
+test agent_server::tests::health_responds_when_screenshot_backend_is_blocked ... ok
+test frame_queue::tests::duplicate_and_late_frames_are_rejected_across_wrap ... ok
+test frame_queue::tests::four_slots_overflow_then_recover_with_original_receive_instant ... ok
+test agent_server::tests::wait_change_returns_immediately_when_frame_changed ... ok
+test latency::tests::empty_and_untimed_windows_are_absent ... ok
+test latency::tests::duration_conversion_preserves_legacy_truncation_and_saturation ... ok
+test agent_server::tests::wait_change_requires_authentication ... ok
+test frame_queue::tests::receiver_trace_attributes_queue_overload_and_recovery ... ok
+test frame_queue::tests::stop_wakes_blocking_waiter_and_rejects_producer ... ok
+test latency::tests::empty_recorder_stats ... ok
+test latency::tests::future_only_window_is_absent_even_with_maximum_duration ... ok
+test latency::tests::interval_is_observed_at_completion_not_start ... ok
+test latency::tests::legacy_sample_fallback_and_reversed_chronology_remain_compatible ... ok
+test agent_server::tests::saturated_screenshot_rejects_without_starting_another_job ... ok
+test latency::tests::out_of_order_insertions_evict_by_write_order_not_timestamp ... ok
+test latency::tests::queries_do_not_destroy_retained_data_or_change_legacy_json ... ok
+test latency::tests::real_zero_interval_is_present_in_a_zero_width_window ... ok
+test latency::tests::reversed_interval_does_not_record_or_evict_a_valid_sample ... ok
+test agent_server::tests::server_handles_http_requests ... ok
+test latency::tests::ring_buffer_wraparound_maintains_latest_capacity ... ok
+test latency::tests::saturated_lifetime_count_does_not_replace_window_count ... ok
+test latency::tests::single_sample_stats ... ok
+test latency::tests::timed_sample_expires_on_read_without_another_write ... ok
+test latency::tests::timed_window_includes_both_edges_and_uses_only_matching_ranks_and_count ... ok
+test latency::tests::window_wraparound_retains_only_latest_insertions_with_window_count ... ok
+test latency::tests::synthetic_1000_sample_distribution_sanity ... ok
+test latency::tests::default_capacity_is_a_hard_bound_with_exact_legacy_percentiles ... ok
+test latency::tests::zero_capacity_still_retains_one_and_legacy_writes_evict_timestamps ... ok
+test mcp_server::stdio::unix_tests::unix_adapter_roundtrips_and_reads_eof ... ok
+test mcp_server::tests::cancelled_reader_releases_and_returns_cleanup_failure ... ok
+test mcp_server::tests::dispatch_contract::successful_down_then_failed_up_is_followed_by_reset ... ok
+test mcp_server::tests::eof_releases_before_completion ... ok
+test mcp_server::tests::invalid_envelope_never_dispatches ... ok
+test mcp_server::tests::partial_dispatch_resets ... ok
+test mcp_server::tests::read_error_releases ... ok
+test mcp_server::tests::release_failure_is_error ... ok
+test mcp_server::tests::writer_error_releases ... ok
+test media::receiver_timing_tests::frame_retention_complete_orphans_preserve_pending_frames ... ok
+test media::receiver_timing_tests::frame_retention_duplicate_and_invalid_headers_preserve_other_frames ... ok
+test mcp_server::tests::protocol_errors_notifications_and_tool_names ... ok
+test media::receiver_timing_tests::receiver_assembly_keeps_first_orphan_and_one_shot_completion_start ... ok
+test agent_server::tests::screenshot_response_includes_frame_metadata_when_present ... ok
+test mcp_server::tests::invalid_arguments_send_nothing ... ok
+test media::receiver_timing_tests::receiver_header_completion_and_failed_completion_do_not_leak_timing ... ok
+test media::receiver_timing_tests::receiver_timing_does_not_change_legacy_header_gap_loss ... ok
+test pairing::tests::ephemeral_pairing_store_roundtrip_and_delete ... ok
+test pairing::tests::test_client_default_path_filename ... ok
+test receiver_stats::tests::receiver_assembly_observes_completion_and_rejects_reverse_time ... ok
+test pairing::tests::test_temporary_file_naming_isolated ... ok
+test pairing::tests::test_legacy_client_migration_skips_when_client_pairings_already_exists ... ok
+test pairing::tests::test_legacy_client_migration_preserves_legacy_and_writes_client_pairings ... ok
+test receiver_stats::tests::receiver_future_host_and_assembly_samples_are_absent_and_reset_discards_all_state ... ok
+test pairing::tests::test_deletion_isolated_from_legacy ... ok
+test receiver_stats::tests::receiver_host_checked_stages_duplicates_wrap_reorder_and_idle_expiry ... ok
+test receiver_stats::tests::receiver_invalid_host_order_does_not_poison_identity_or_admit_partial_stages ... ok
+test receiver_stats::tests::receiver_loss_grace_boundary_late_arrival_and_idle_expiry ... ok
+test receiver_stats::tests::receiver_loss_reorders_wraps_deduplicates_and_never_guesses_edges ... ok
+test receiver_stats::tests::receiver_throughput_uses_only_positive_observed_interval_and_expires ... ok
+test receiver_stats::tests::receiver_trace_attributes_assembly_timeout_capacity_and_completion ... ok
+test receiver_stats::tests::receiver_huge_forward_gap_is_arithmetic_and_half_range_is_ambiguous ... ok
+test receiver_stats::tests::receiver_trace_attributes_gap_deadline_eviction_and_late ... ok
+test receiver_stats::tests::receiver_trace_attributes_invalid_assembly ... ok
+test session::cancellation_tests::client_session_tracks_input_ack_events ... ok
+test receiver_stats::tests::receiver_loss_matches_explicit_positions_for_every_small_gap_mask ... ok
+test mcp_server::tests::dispatch_contract::every_advertised_tool_has_a_successful_dispatch_contract ... ok
+test session::cancellation_tests::session_runtime_stop_propagates_worker_panic ... ok
+test mcp_server::tests::handles_mcp_protocol_handshake_and_tool_calls ... ok
+test agent_server::tests::reader_enforces_size_and_framing_boundaries ... ok
+test session::cancellation_tests::udp_cancel_wakes_registered_receive ... ok
+test receiver_stats::tests::receiver_gap_grace_starts_when_gap_is_observed_and_finalized_history_is_bounded ... ok
+test agent_server::tests::idle_connections_are_capped ... ok
+test session::cancellation_tests::runtime_input_and_stop_progress_with_partial_frame ... ok
+test session::cancellation_tests::tls_read_step_returns_with_partial_frame ... ok
+test session::tcp_write_tests::disconnect_cancels_actual_pressured_writer ... ok
+test session::tcp_write_tests::runtime_stop_cancels_actual_pressured_writer_without_peer_release ... ok
+test session::cancellation_tests::client_session_udp_receive_reuses_buffer_across_cancellations ... ok
+test session::tcp_write_tests::runtime_surfaces_callback_backpressure_instead_of_dropping_pong ... ok
+test media::receiver_timing_tests::frame_retention_bounds_header_bursts ... ok
+test agent_server::tests::wait_change_returns_timeout_when_no_change ... ok
+test receiver_stats::tests::receiver_trace_retains_first_fixed_capacity_and_counts_overflow ... ok
+test receiver_stats::tests::receiver_samples_and_identity_window_have_hard_caps ... ok
+test session::tcp_write_tests::runtime_pressure_drains_ordered_controls_input_and_generated_pong ... ok
+
+test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.56s
+
+
+running 16 tests
+     Running unittests src/bin/erd_client.rs (clients/rust/target/debug/deps/erd_client-6c337346d74872fe)
+test continuity_tests::late_frames_cannot_reenter_a_recovered_chain ... ok
+test continuity_tests::frame_ids_wrap_without_false_recovery ... ok
+test continuity_tests::upstream_gap_suppresses_dependents_until_keyframe ... ok
+test pipeline_tests::overload_discards_backlog_and_recovers_in_keyframe_order ... ok
+test pipeline_tests::screenshot_snapshot_shares_storage_after_new_frame_is_published ... ok
+test pipeline_tests::screenshot_storage_preserves_pixels_with_consumers ... ok
+test pipeline_tests::screenshot_storage_is_unused_without_consumers ... ok
+test pipeline_tests::agent_worker_join_returns_when_worker_ends_on_disconnect ... ok
+test recovery_characterization::receive_timestamp_is_preserved ... ok
+test recovery_characterization::stop_disconnects_empty_consumer ... ok
+test receiver_telemetry_tests::receiver_export_retains_legacy_flat_fields_and_rank_meaning ... ok
+test pipeline_tests::agent_worker_join_stops_listener_on_lifecycle_stop ... ok
+test pipeline_tests::agent_default_has_no_deadline ... ok
+test pipeline_tests::producer_exits_when_full_queue_is_stopped ... ok
+test continuity_codec_tests::real_hevc_recovers_after_missing_chunk_overflow_and_completion_inversion ... ok
+test pipeline_tests::agent_runtime_returns_timeout_before_blocked_backend_is_released ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s
+
+     Running tests/agent_control_e2e.rs (clients/rust/target/debug/deps/agent_control_e2e-176bd1a44c5cc874)
+
+running 3 tests
+test e2e_coordinate_normalization_across_resolutions ... ok
+test e2e_agent_actions_encode_and_decode_on_mock_host ... ok
+test e2e_agent_http_and_mcp_servers_integration ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_mcp_contract.rs (clients/rust/target/debug/deps/cli_mcp_contract-20b4f69c0ea70dbf)
+
+running 5 tests
+test corrupt_store_keeps_stdout_protocol_only ... ok
+test startup_failure_cancels_fixture_admission ... ok
+test eof_releases_then_disconnects_with_http ... ok
+test http_stop_joins_mcp_with_stdin_open ... ok
+test occupied_http_port_exits_without_a_default_deadline ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 3 tests
+     Running tests/cli_receiver_telemetry.rs (clients/rust/target/debug/deps/cli_receiver_telemetry-f3916a3a28159ef7)
+test actual_executable_exports_receiver_on_media_error_and_closes_transport ... ok
+test actual_executable_closes_transport_even_when_stats_file_is_unwritable ... ok
+test actual_executable_exports_authenticated_receiver_and_legacy_decode_statistics ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/client_copy_cost.rs (clients/rust/target/debug/deps/client_copy_cost-34cbfbfc52793f73)
+
+running 3 tests
+test exact_statistics_when_using_receive_to_decode_end_boundary ... ok
+test exact_owned_pixels_when_native_decoder_consumes_fixture ... ok
+test identical_screenshots_when_snapshot_ownership_is_shared ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.40s
+
+     Running tests/core_semantics.rs (clients/rust/target/debug/deps/core_semantics-756e58d208abc1b0)
+
+running 6 tests
+test audio_reassembly_skips_lost_frame_when_a_newer_frame_arrives ... ok
+test clipboard_suppresses_echo_duplicate_concealed_and_oversized_text ... ok
+test input_normalization_flips_y_and_clamps_edges ... ok
+test windows_virtual_keys_map_to_macos_key_codes ... ok
+test abr_reduces_above_five_percent_and_recovers_after_thirty_stable_seconds ... ok
+test audio_reassembly_accepts_out_of_order_fragments ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/media_reassembly.rs (clients/rust/target/debug/deps/media_reassembly-4c793601adda3787)
+
+running 8 tests
+test clear_discards_orphans_and_preserves_header_first_recovery ... ok
+test cursor_updates_are_clamped_for_overlay_use ... ok
+test later_orphan_chunks_do_not_refresh_expiry ... ok
+test expired_orphans_release_reorder_capacity ... ok
+test orphan_survival_matches_assembly_timeout_boundary ... ok
+test video_chunks_reassemble_out_of_order_and_from_orphans ... ok
+test video_reassembly_enforces_protocol_caps ... ok
+test newest_orphan_survives_expiry_of_older_records ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/receiver_telemetry.rs (clients/rust/target/debug/deps/receiver_telemetry-7aa70fb6f39f9c3a)
+
+running 5 tests
+test receiver_trace_attributes_authenticated_and_rejected_ingress ... ok
+test authenticated_tls_udp_ingress_records_stats_and_assembly_without_changing_ping ... ok
+test mixed_udp_kinds_share_packet_inference_but_tcp_stats_and_invalid_auth_do_not ... ok
+test linux_transport_overload_preserves_accounting_and_recovers ... ok
+test late_authenticated_chunk_completes_frame_without_rewriting_finalized_loss ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/session_mock.rs (clients/rust/target/debug/deps/session_mock-539e30e7d6a17533)
+
+running 7 tests
+test pre_ready_input_is_refused ... ok
+test mock_server_abr_bitrate_adjust_round_trip ... ok
+test connect_with_pairing_direct_round_trip ... ok
+test mock_server_stream_config_negotiation_round_trip ... ok
+test stalled_consumer_retains_latest_clipboard_and_terminal_error ... ok
+test mock_server_pairing_handshake_and_input_round_trip ... ok
+test handshake_ack_timeout_is_reported ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+
+running 90 tests
+test audio_linux::tests::empty_audio_does_not_create_invalid_zero_count_fragment ... ok
+test audio_linux::tests::fragments_audio_at_wire_limit ... ok
+test capture_linux::tests::pending_frame_slice_keeps_request_and_observes_stop ... ok
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_host-8644c19f564ad4db)
+test clipboard_linux::tests::four_kibibyte_limit_is_utf8_bytes ... ok
+test clipboard_linux::tests::suppresses_remote_echo_and_unchanged_local_content ... ok
+test encode_linux::tests::accepts_existing_avcc ... ok
+test capture_linux::tests::cancelled_initialization_does_not_wait_for_compositor ... ok
+test clipboard_linux::tests::hashes_equal_content_equally ... ok
+test encode_linux::tests::converts_annex_b_to_avcc_without_padding ... ok
+test encode_linux::tests::detects_h264_and_hevc_parameter_sets ... ok
+test inject_linux::tests::ascii_to_evdev_maps_alphanumerics_and_symbols ... ok
+test encode_linux::tests::packet_timestamp_requires_identity_and_preserves_present_pts ... ok
+test encode_linux::tests::reused_frame_detaches_from_retained_native_reference ... ok
+[libx264 @ 0x7f396c0040c0] VBV maxrate specified, but no bufsize, ignored
+test inject_linux::tests::maps_middle_click_and_reset_button_codes ... ok
+test inject_linux::tests::maps_normalized_coordinates_into_target_output ... ok
+test inject_linux::tests::maps_v3_keycodes_and_modifiers ... ok
+test session::native_pipeline::tests::audio_notification_reads_newest_whole_stereo_block ... ok
+test session::native_pipeline::tests::control_wakes_idle_encoder_without_capture ... ok
+test session::native_pipeline::tests::critical_initialization_error_wakes_sibling ... ok
+test session::native_pipeline::tests::delayed_output_keeps_its_accepted_input_timestamps ... ok
+test session::native_pipeline::tests::full_compressed_queue_does_not_lose_future_audio_notifications ... ok
+test session::native_pipeline::tests::failed_startup_reaps_gated_workers_without_entering_native_code ... ok
+test session::native_pipeline::tests::latest_raw_survives_encoder_backpressure ... ok
+test session::native_pipeline::tests::newest_bitrate_and_keyframe_survive_raw_replacement ... ok
+test audio_linux::tests::audio_eof_is_terminal ... ok
+test session::native_pipeline::tests::optional_audio_exit_does_not_stop_video ... ok
+test session::native_pipeline::tests::stale_audio_is_dropped_without_replaying_older_blocks ... ok
+test session::native_pipeline::tests::production_encoder_loop_keeps_outputs_ordered_and_controls_latest ... ok
+test session::native_pipeline::tests::stalls::reselects_after_bitrate_stall ... ok
+test session::native_pipeline::tests::stop_clears_raw_controls_and_rejects_future_work ... ok
+test session::native_pipeline::tests::stop_after_consumer_drop_reaps_capture_encode_and_audio ... ok
+test session::native_pipeline::tests::stop_wakes_and_reaps_idle_encoder ... ok
+test encode_linux::tests::forced_key_frame_is_an_idr ... ok
+test encode_linux::tests::conversion_frames_are_reused_after_warmup ... ok
+test audio_linux::tests::audio_read_buffer_is_reused_and_pcm_is_stereo_aligned ... ok
+[libx264 @ 0x7f3954001200] VBV maxrate specified, but no bufsize, ignored
+[libx264 @ 0x7f3960000d40] VBV maxrate specified, but no bufsize, ignored
+[libx264 @ 0x7f396c0040c0] using cpu capabilities: MMX2 SSE2Fast SSSE3 SSE4.2 AVX FMA3 BMI2 AVX2
+[libx264 @ 0x7f3960000d40] using cpu capabilities: MMX2 SSE2Fast SSSE3 SSE4.2 AVX FMA3 BMI2 AVX2
+[libx264 @ 0x7f3954001200] using cpu capabilities: MMX2 SSE2Fast SSSE3 SSE4.2 AVX FMA3 BMI2 AVX2
+[libx264 @ 0x7f396c0040c0] profile Constrained Baseline, level 1.2, 4:2:0, 8-bit
+[libx264 @ 0x7f3960000d40] profile Constrained Baseline, level 1.2, 4:2:0, 8-bit
+[libx264 @ 0x7f3954001200] profile Constrained Baseline, level 1.2, 4:2:0, 8-bit
+[libx264 @ 0x7f396c0040c0] frame I:2     Avg QP: 0.00  size:   432
+[libx264 @ 0x7f396c0040c0] frame P:1     Avg QP: 0.00  size:    10
+[libx264 @ 0x7f396c0040c0] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x7f396c0040c0] mb P  I16..4:  0.0%  0.0%  0.0%  P16..4:  0.0%  0.0%  0.0%  0.0%  0.0%    skip:100.0%
+[libx264 @ 0x7f396c0040c0] final ratefactor: 2.98
+[libx264 @ 0x7f396c0040c0] coded y,uvDC,uvAC intra: 0.0% 50.0% 25.0% inter: 0.0% 0.0% 0.0%
+[libx264 @ 0x7f396c0040c0] i16 v,h,dc,p: 50%  0% 50%  0%
+[libx264 @ 0x7f396c0040c0] i8c dc,h,v,p: 75% 25%  0%  0%
+[libx264 @ 0x7f396c0040c0] kb/s:69.92
+[libx264 @ 0x7f39600a8d40] VBV maxrate specified, but no bufsize, ignored
+[libx264 @ 0x7f3954001200] frame I:1     Avg QP: 0.00  size:   739
+[libx264 @ 0x7f3954001200] frame P:16    Avg QP: 0.06  size:   147
+[libx264 @ 0x7f3954001200] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x7f3954001200] mb P  I16..4: 76.6%  0.0%  0.0%  P16..4: 23.4%  0.0%  0.0%  0.0%  0.0%    skip: 0.0%
+[libx264 @ 0x7f3954001200] final ratefactor: -0.21
+[libx264 @ 0x7f3954001200] coded y,uvDC,uvAC intra: 0.0% 35.8% 32.1% inter: 100.0% 0.0% 0.0%
+[libx264 @ 0x7f3954001200] i16 v,h,dc,p: 64%  0% 36%  0%
+[libx264 @ 0x7f3954001200] i8c dc,h,v,p: 68% 32%  0%  0%
+[libx264 @ 0x7f3954001200] kb/s:43.74
+[libx264 @ 0x7f39600a8d40] using cpu capabilities: MMX2 SSE2Fast SSSE3 SSE4.2 AVX FMA3 BMI2 AVX2
+[libx264 @ 0x7f39600a8d40] profile Constrained Baseline, level 1.3, 4:2:0, 8-bit
+[libx264 @ 0x7f3960000d40] frame I:1     Avg QP: 0.00  size:   739
+[libx264 @ 0x7f3960000d40] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x7f3960000d40] final ratefactor: 7.69
+[libx264 @ 0x7f3960000d40] coded y,uvDC,uvAC intra: 0.0% 50.0% 25.0%
+[libx264 @ 0x7f3960000d40] i16 v,h,dc,p: 50%  0% 50%  0%
+[libx264 @ 0x7f3960000d40] i8c dc,h,v,p: 75% 25%  0%  0%
+[libx264 @ 0x7f3960000d40] kb/s:177.36
+[libx264 @ 0x7f39600a8d40] frame I:1     Avg QP: 0.00  size:   848
+[libx264 @ 0x7f39600a8d40] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x7f39600a8d40] final ratefactor: 2.67
+[libx264 @ 0x7f39600a8d40] coded y,uvDC,uvAC intra: 0.0% 50.0% 50.0%
+[libx264 @ 0x7f39600a8d40] i16 v,h,dc,p: 50%  0% 50%  0%
+[libx264 @ 0x7f39600a8d40] i8c dc,h,v,p: 50% 50%  0%  0%
+test encode_linux::tests::bitrate_reopens_codec_and_preserves_pts ... ok
+test session::native_pipeline::tests::keepalive_arc_clone_shares_the_full_nv12_allocation ... ok
+test session::tests::direction_keys_arm_and_only_matching_direction_opens ... ok
+[libx264 @ 0x7f39600a8d40] kb/s:203.52
+test capture_linux::tests::pending_initialization_cancels_after_request_flush ... ok
+test session::tests::host_default_store_path_and_current_psks_isolation ... ok
+test session::tests::input_injection_preserves_behavior_with_trace_only_metadata ... ok
+test session::tests::lockout_disables_bootstrap_after_five_failures ... ok
+test session::tests::pairing_store_mirrors_swift_json_and_is_mode_0600 ... ok
+test session::tests::pre_auth_gating_refuses_input_and_control ... ok
+test audio_linux::tests::pending_audio_read_cancels_and_reaps_child ... ok
+test audio_linux::tests::fake_pactl_cancel_is_gated_and_reaped ... ok
+test audio_linux::tests::pactl_query_bounds_output_and_deadline_and_parses_source ... ok
+test inject_linux::tests::safely_ignores_unicode_char_events ... ok
+test session::tests::resolve_output_target_precedence_and_strict_explicit_matching ... ok
+test session::tests::bind_with_advertising_fallback_keeps_host_usable ... ok
+test session::tests::select_focused_output_finds_focused_or_falls_back_to_first ... ok
+test session::tests::bootstrap_kdf_runs_once_per_unchanged_pairing_window ... ok
+test session::tests::sender_packetization::audio_empty_data_is_noop ... ok
+test session::tests::sender_packetization::video_datagrams_fit_mtu_budget_and_reassemble ... ok
+test session::tests::sender_packetization::video_frame_exceeding_max_chunks_is_rejected ... ok
+test session::tests::sender_packetization::audio_datagrams_fit_mtu_budget_and_reassemble ... ok
+test session::tests::sender_reuses_video_packet_buffers ... ok
+test session::tests::sender_reuses_audio_packet_buffers ... ok
+test session::tests::sender_trace::sender_failed_sink_records_attempt_error_and_nonce_progression ... ok
+test session::tests::sender_trace::windows_stage_attribution_events_record_and_serialize ... ok
+test session::tests::bind_synthetic_does_not_start_mdns_advertisement ... ok
+test session::tests::sender_trace::sender_trace_retains_first_fixed_records_and_overflow ... ok
+test session::tests::cached_bootstrap_obeys_lockout_expiry_and_pairing_revocation ... ok
+test session::tests::bitrate_adjust_updates_encoder_and_rejects_malformed_limits ... ok
+test session::tests::preauth_deadline_releases_idle_client_before_peer_disconnect ... ok
+test session::tests::timestamp_stats_round_trip ... ok
+test windows_logic::freshness::tests::windows_freshness_idle_repeat_preserves_origin_and_resets_work_age ... ok
+test windows_logic::tests::clipboard_hash_is_utf8_byte_based ... ok
+test windows_logic::tests::hashes_and_suppresses_clipboard_echo ... ok
+test windows_logic::tests::maps_alphabet_digits_navigation_and_modifiers ... ok
+test windows_logic::tests::mono_is_duplicated_and_s16_converted ... ok
+test windows_logic::tests::multichannel_keeps_front_pair_and_partial_frames_are_dropped ... ok
+test windows_logic::tests::normalizes_target_monitor_into_virtual_desktop ... ok
+test windows_logic::tests::resampling_scales_frame_count_toward_48k ... ok
+test windows_logic::tests::stereo_48k_float_passes_through ... ok
+test windows_logic::tests::windows_geometry_dpi_scaling_resolves_physical_and_logical ... ok
+test windows_logic::tests::windows_geometry_invalid_dimensions_rejected ... ok
+test windows_logic::tests::windows_geometry_ordinary_100_percent_scaling ... ok
+test windows_logic::tests::windows_geometry_rotated_display_rejected_without_pixel_transform ... ok
+test session::tests::admission_deadline_releases_silent_tls_then_accepts_paired_client ... ok
+test session::tests::disconnect_before_udp_unblocks_full_media_queue ... ok
+test session::tests::protocol_error_stops_all_media_workers ... ok
+test session::tests::stream_configuration_negotiates_valid_and_rejects_invalid_values ... ok
+test session::tests::test_bootstrap_authenticated_session_rejects_duplicate_handshake ... ok
+test session::tests::test_bootstrap_consent_b_cannot_use_a ... ok
+test session::tests::scripted_loopback_pairs_arms_ciphers_and_receives_ten_timestamped_frames ... ok
+test session::tests::preauth_deadline_bounds_granted_client_without_handshake ... ok
+test session::tests::test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input ... ok
+test session::tests::preauth_deadline_bounds_pending_consent ... ok
+test session::tests::test_bootstrap_normal_b_and_paired_a_work ... ok
+
+test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/captest.rs (clients/rust/target/debug/deps/captest-6493ffb05226865c)
+     Running unittests src/main.rs (clients/rust/target/debug/deps/erd_host-2fbec750c2332b22)
+
+running 5 tests
+test tests::test_pin_default_selects_injected_generator_branch ... ok
+test tests::test_pin_explicit_bootstrap_pin_bypasses_generator ... ok
+test tests::test_pin_generate_flag_selects_injected_generator_branch ... ok
+test tests::test_pin_validation_accepts_8_digits_and_rejects_invalid ... ok
+test tests::test_random_pin_retained_and_format_valid ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+     Running tests/linux_audio_selection.rs (clients/rust/target/debug/deps/linux_audio_selection-98459b85c020fccf)
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test audio_selection_pulse_failed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+test audio_selection_pipewire_override ... oktest audio_selection_pipewire_default ... 
+oktest audio_selection_pulse_override ... 
+
+test result: okok
+. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out
+test result: ; finished in 0.00sok
+
+
+test result: . 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered outok; finished in 0.00s. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out
+
+; finished in 0.00s
+
+test audio_selection_pulse_failed ... ok
+test audio_selection_pipewire_override ... ok
+test audio_selection_pulse_override ... ok
+test audio_selection_pipewire_default ... ok
+test audio_selection_pulse_empty ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.05s
+
+test audio_selection_pulse_empty ... ok
+test audio_selection_pulse_default ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.06s
+
+test audio_selection_pulse_default ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/pairing_isolation.rs (clients/rust/target/debug/deps/pairing_isolation-cded966f8effca19)
+
+running 2 tests
+
+running 1 test
+
+running 1 test
+test test_legacy_pairing_keys_not_auto_imported_by_host_and_migrated_by_client ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+test test_legacy_pairing_keys_not_auto_imported_by_host_and_migrated_by_client ... ok
+test test_outbound_client_pairing_rejected_as_host_authorization ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.06s
+
+test test_outbound_client_pairing_rejected_as_host_authorization ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests src-tauri/src/lib.rs (clients/rust/target/debug/deps/tauri_shell_lib-00c078f39caf4161)
+
+running 57 tests
+test desktop_integration_tests::gamepad_and_pen_payloads_convert_properly ... ok
+test desktop_integration_tests::middle_and_relative_payloads_use_legacy_variants ... ok
+test desktop_integration_tests::non_video_dispatch_characterization ... ok
+test desktop_integration_tests::unknown_buttons_reject ... ok
+test desktop_integration_tests::callback_error_is_visible_and_stops_failed_output ... ok
+test desktop_integration_tests::media_audio_reaches_native_queue ... ok
+test discovery_tests::both_sources_failing_yields_an_error ... ok
+test discovery_tests::empty_observation_never_invents_online_testbeds ... ok
+test desktop_integration_tests::disconnect_clears_agent_keys_even_without_transport ... ok
+test desktop_integration_tests::disconnect_yields_while_input_submission_holds_session_lock ... ok
+test discovery_tests::lan_survives_missing_or_failed_tailscale ... ok
+test discovery_tests::lan_host_with_matching_stored_name_remains_unpaired ... ok
+test desktop_integration_tests::pairing_store_round_trip_and_deletion ... ok
+test desktop_integration_tests::device_switch_drops_old_output_and_never_replays_old_pcm ... ok
+test discovery_tests::empty_successful_lan_with_failed_tailscale_yields_empty_success ... ok
+test desktop_integration_tests::unavailable_session_output_can_be_explicitly_recovered ... ok
+test discovery_tests::absent_executable_uses_the_actual_async_command_seam ... ok
+test discovery_tests::missing_command_is_an_error_not_hosts ... ok
+test discovery_tests::malformed_status_is_an_error_not_an_empty_success ... ok
+test discovery_tests::nonzero_exit_rejects_even_valid_peer_json ... ok
+test discovery_tests::observe_installed_tailscale ... ignored, explicit installed-Tailscale observation; run with --ignored --nocapture
+test discovery_tests::null_peer_map_has_no_hosts ... ok
+test discovery_tests::non_host_mobile_platforms_are_excluded_from_host_list ... ok
+test desktop_integration_tests::stop_and_restart_isolate_audio_and_failed_start ... ok
+test discovery_tests::source_dedup_merges_lan_and_tailscale_by_name_and_inherits_pairing ... ok
+test desktop_integration_tests::audio_commands_apply_gain_mute_and_validate ... ok
+test discovery_tests::observed_known_and_other_peers_keep_presence_and_json_fields ... ok
+test discovery_tests::source_dedup_prioritizes_lan_over_tailscale ... ok
+test discovery_tests::pairing_does_not_infer_identity_from_testbed_ips_case_or_substrings ... ok
+test discovery_tests::stored_pairings_and_self_do_not_create_observed_peers ... ok
+test discovery_tests::managed_state_lan_retry_does_not_permanently_lock_initialization_error ... ok
+test discovery_tests::list_hosts_internal_returns_lan_immediately_without_waiting_for_slow_tailscale ... ok
+test recovery_tests::blocked_decode_does_not_block_reception_and_stop_joins ... ok
+test desktop_integration_tests::malformed_media_audio_is_atomic_and_visible ... ok
+test recovery_tests::decoder_panic_reaches_media_owner_after_join ... ok
+test recovery_tests::media_gap_requests_once_and_suppresses_dependents ... ok
+test tests::app_state_lifecycle ... ok
+test tests::convert_keyboard_input_payload ... ok
+test tests::convert_pointer_input_payload ... ok
+test tests::disconnect_join_leaves_executor_responsive_and_clears_frames ... ok
+test tests::display_is_latest_wins_and_snapshot_ownership_is_shared ... ok
+test tests::latency_tracker_calculates_percentiles ... ok
+test recovery_tests::decode_failure_requests_recovery_and_suppresses_dependents ... ok
+test tests::media_worker_uses_shared_stop_token ... ok
+test tests::poll_retains_agent_dimensions_and_capture ... ok
+test tests::screenshot_encoding_leaves_executor_and_mailbox_responsive ... ok
+test tests::screenshot_excludes_ipc_header_exact_pixels ... ok
+test pairing_tests::test_failed_reconnect_preserves_original_cause_and_never_falls_back_to_bootstrap_pin ... ok
+test pairing_tests::test_list_pairings_json_excludes_key_field ... ok
+test pairing_tests::test_list_pairings_store_seam_isolated_store_serializes_only_allowed_metadata ... ok
+test pairing_tests::test_missing_pin_and_missing_record_fails_immediately_without_bootstrap ... ok
+test mailbox_tests::clipboard_worker_yields_executor_and_owns_generation_until_completion ... ok
+test mailbox_tests::frame_consumer_applies_only_latest_clipboard ... ok
+test mailbox_tests::frame_consumer_rejects_closed_runtime_instead_of_returning_stale_frame ... ok
+test mailbox_tests::clipboard_failure_is_reported_instead_of_silently_discarded ... ok
+test mailbox_tests::tcp_stop_error_survives_full_media_and_frame_cleanup ... ok
+test pairing_tests::test_loopback_reconnect_failure_does_not_trigger_bootstrap_request ... ok
+
+test result: ok. 56 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running unittests src-tauri/src/main.rs (clients/rust/target/debug/deps/tauri_shell-a063da5316b88cdd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests erd_app
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests erd_host
+
+running 3 tests
+test erd-host/src/session.rs - session::TIMESTAMP_STATS_MAGIC (line 59) ... ok
+test erd-host/src/session.rs - session (line 59) ... ok
+test erd-host/src/session.rs - session::TimestampStats (line 59) ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+   Doc-tests tauri_shell_lib
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+LEAD_TEST_EXIT=0
+    Checking tauri-shell v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/tauri-shell)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.66s
+LEAD_CLIPPY_EXIT=0

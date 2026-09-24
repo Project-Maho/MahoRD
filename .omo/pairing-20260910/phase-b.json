@@ -1,0 +1,34 @@
+{
+  "definition": {
+    "key": "pairing-20260910-b",
+    "name": "Pairing phase B - authenticated media registration",
+    "nodes": [
+      {
+        "id": "authenticated-registration",
+        "label": "R3 authenticated UDP endpoint",
+        "subagent_type": "hephaestus",
+        "model": "quotio/gemini-3.8-flash-high",
+        "task_summary": "Implement authenticated UDP registration with real socket proof",
+        "load_skills": [
+          "programming",
+          "debugging"
+        ],
+        "prompt": "TASK: Implement R3 current-session authenticated UDP registration on host and all native clients. DELIVERABLE: minimal tested implementation and .omo/pairing-20260910/reports/b-udp.md. SCOPE: clients/rust/erd-proto/src/handshake.rs, erd-app/src/session.rs, erd-app/src/bin/erd_client.rs, erd-host/src/session.rs; erd-net/src/udp_gcm.rs only if existing API is insufficient; corresponding protocol/app/host/net test fixtures. No identity/discovery/UI/lifecycle implementation or capture/encode refactor. REQUIREMENTS: mandatory authenticated-registration capability bit 7 on both handshake sides; preserve v3 codec, fail before Ready/media on missing support. Reuse sealed empty Ping, validate authenticated header/payload, preserve cipher nonce ownership, and fix endpoint after first valid registration. Reject plaintext, wrong-key, tampered, prior-session, non-registration and post-registration hijack attempts without changing endpoint. Remember the real CLI has its own explicit capability mask, independent of SessionConfig::direct. VERIFY: genuine RED before fix and GREEN on real UDP sockets after invalid packets demonstrably consumed, with controlled frame to valid socket; real client/host capability-mismatch tests; cargo test --manifest-path clients/rust/Cargo.toml -p erd-host -p erd-app udp plus affected proto/net and new named tests. Update only modern fixtures to advertise capability; keep intentional legacy rejection cases. Prepare actual erd-client and existing QA wrapper builds on Omarchy for coordinator live rerun. STOP WHEN all R3 code and socket/capability regressions pass once with receipts, scoped builds pass, and b-udp.md exists. Work only in /Volumes/T9-Mac/project/EclipticRD-Rewrite. All implementation/follow-up fixes must use this Gemini 3.8 Flash invocation; never change model settings. Read docs/remote-connection-pairing-review-plan-20260910.md, .omo/pairing-20260910/contracts.md (opening lead amendments take precedence), and .omo/pairing-20260910/phase-b-handoff.md. Preserve existing unrelated dirty discovery/UI/input changes, and the uncommitted A-stage client authentication helper/tests awaiting integration in C. Use apply_patch for every source edit. No commits, publishing, permanent deployment, production-host restarts, or emulators. All Rust check/test/build ONLY on indo@100.91.254.71 in /home/indo/projects/erd-pairing-20260910, with PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig and LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH. Sync only assigned changed files, with relative paths. Start long commands via tool.monitor from eval, never sleep/poll. Before each new RED action pin exact test name and invocation in the append-only notepad /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ulw-20260910-111421.XXXXXX.md.pNqwGP19PH. Existing original live RED is already captured; do not fake a RED by changing a test assertion. Reports must contain actual commands, selected-test counts, raw output paths, exit codes, and owned resource cleanup. Final personal review belongs to the coordinator."
+      },
+      {
+        "id": "verify-registration",
+        "label": "Verify R3 protocol and sockets",
+        "dependsOn": [
+          "authenticated-registration"
+        ],
+        "subagent_type": "hephaestus",
+        "model": "quotio/gemini-3.8-flash-high",
+        "task_summary": "Independently verify R3 registration and compatibility evidence",
+        "load_skills": [
+          "programming"
+        ],
+        "prompt": "TASK: Independently verify phase B R3 implementation and proof. DELIVERABLE: .omo/pairing-20260910/reports/b-verify.md with PASS/FAIL per requirement and exact evidence. SCOPE: read producer changes and evidence; write only report/evidence, not production/tests. VERIFY: run cargo test --manifest-path clients/rust/Cargo.toml -p erd-host -p erd-app udp and exact new capability/registration targets; inspect actual input consumption ordering, wrong-key/prior-session rejection, non-registration rejection, immutable endpoint and controlled frame receipt. Check host rejects missing client support before media starts, client rejects missing server support before Ready, CLI explicit mask and default client config both advertise support, and no plaintext fallback or nonce reset exists. Exclude zero-selected tests and assertion-flip RED claims. Report any real failure without modifying sources. Coordinator will personally run .omo/pairing-20260910/qa/r3-live.mjs against fresh binaries after your gate; do not claim that live GREEN exists before it runs. STOP WHEN independent commands complete, all findings are recorded accurately, and b-verify.md exists. Work only in /Volumes/T9-Mac/project/EclipticRD-Rewrite. All implementation/follow-up fixes must use this Gemini 3.8 Flash invocation; never change model settings. Read docs/remote-connection-pairing-review-plan-20260910.md, .omo/pairing-20260910/contracts.md (opening lead amendments take precedence), and .omo/pairing-20260910/phase-b-handoff.md. Preserve existing unrelated dirty discovery/UI/input changes, and the uncommitted A-stage client authentication helper/tests awaiting integration in C. Use apply_patch for every source edit. No commits, publishing, permanent deployment, production-host restarts, or emulators. All Rust check/test/build ONLY on indo@100.91.254.71 in /home/indo/projects/erd-pairing-20260910, with PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig and LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH. Sync only assigned changed files, with relative paths. Start long commands via tool.monitor from eval, never sleep/poll. Before each new RED action pin exact test name and invocation in the append-only notepad /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ulw-20260910-111421.XXXXXX.md.pNqwGP19PH. Existing original live RED is already captured; do not fake a RED by changing a test assertion. Reports must contain actual commands, selected-test counts, raw output paths, exit codes, and owned resource cleanup. Final personal review belongs to the coordinator."
+      }
+    ]
+  }
+}

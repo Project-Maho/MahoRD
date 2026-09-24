@@ -1,0 +1,7 @@
+Command: ssh -o BatchMode=yes indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib cargo clippy --manifest-path clients/rust/Cargo.toml -p erd-host --all-targets --no-deps -- -D warnings"
+Exit Code: 0
+
+Output:
+    Checking erd-host v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/erd-host)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.33s
+Status: 0 warnings, 0 errors. Clean.

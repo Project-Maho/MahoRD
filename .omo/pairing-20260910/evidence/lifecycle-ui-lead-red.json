@@ -1,0 +1,66 @@
+{
+  "source": "clients/rust/ios-shell/ui/connection-state.js",
+  "observations": [
+    {
+      "scenario": "lead_disconnect_waits_for_pending_connect",
+      "cleanupReturnedBeforeConnectSettlement": true,
+      "state": "idle",
+      "snapshot": {
+        "state": "idle",
+        "busy": true,
+        "hasOwnedSession": false,
+        "host": null,
+        "generation": 2,
+        "lastError": null,
+        "cleanupError": null,
+        "touchMode": "direct",
+        "isMuted": false,
+        "renderedFrames": 0,
+        "stats": null,
+        "hasNative": true,
+        "discoveryState": "idle",
+        "discoveredHosts": [],
+        "discoveryLoading": false,
+        "discoveryError": null,
+        "selectedHost": null,
+        "savedPairings": [],
+        "selectedPairing": null
+      },
+      "calls": [
+        "stop_discovery",
+        "connect",
+        "disconnect"
+      ],
+      "pass": false
+    },
+    {
+      "scenario": "lead_disconnected_stats_end_ui_session",
+      "snapshot": {
+        "state": "waiting-video",
+        "busy": true,
+        "hasOwnedSession": true,
+        "host": "192.0.2.10",
+        "generation": 1,
+        "lastError": null,
+        "cleanupError": null,
+        "touchMode": "direct",
+        "isMuted": false,
+        "renderedFrames": 0,
+        "stats": {
+          "state": "disconnected",
+          "last_error": "remote-closed"
+        },
+        "hasNative": true,
+        "discoveryState": "idle",
+        "discoveredHosts": [],
+        "discoveryLoading": false,
+        "discoveryError": null,
+        "selectedHost": null,
+        "savedPairings": [],
+        "selectedPairing": null
+      },
+      "pass": false
+    }
+  ],
+  "cleanup": "Both pending connects settled and both managers disconnected; no timers or native transports started."
+}

@@ -1,0 +1,130 @@
+status: completed exit_code: 0
+bun test v1.4.0 (34cbb9a40)
+
+clients/rust/tauri-shell/ui/connection-state.test.mjs:
+✓ PIN and address validation matches backend without losing leading zeros [0.16ms]
+✓ connect passes custom ports through invoke [0.11ms]
+✓ invalid and unavailable connections never invoke; subscriptions and snapshots are isolated [0.04ms]
+✓ exact IPC, waiting-video then rendered frame; no PIN in state and busy blocks connect [0.04ms]
+✓ cancel pending connect (resolve) invalidates immediately and serializes one final cleanup [0.13ms]
+✓ cancel pending connect (reject) invalidates immediately and serializes one final cleanup [0.04ms]
+✓ pending connect settles before input release: teardown still waits for release [0.02ms]
+✓ synchronous connecting subscription can cancel without losing native cleanup ownership [0.02ms]
+✓ completed input release cannot disconnect an unpublished pending connect [0.02ms]
+✓ connect rejection cleans up, retaining original error and retryable cleanup failure [0.07ms]
+✓ release failure is visible, does not prevent teardown, and holds lock until retry [0.03ms]
+✓ stats deduplicate, clear unavailable values, and failure does not disconnect [0.06ms]
+✓ stale stats resolve and stale frame errors cannot alter new generation [0.04ms]
+✓ stale stats reject and stale frame errors cannot alter new generation [0.02ms]
+✓ remote-ended stats and current frame failures use the cleanup path [0.03ms]
+✓ validateConnection accepts pairingId and passes through invoke [0.02ms]
+
+clients/rust/tauri-shell/tests/frontend-page.test.mjs:
+PAGE CLEANUP {"origin":"http://127.0.0.1:53077","webViewClosed":true,"serverStopped":true}
+✓ audio controls drive native commands and expose device failure [365.25ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53082","webViewClosed":true,"serverStopped":true}
+✓ audio startup failure is recoverable and compact controls stay viewport bounded [109.92ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53087","webViewClosed":true,"serverStopped":true}
+✓ failed held release still releases remaining keys and does not poison later sessions [111.68ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53092","webViewClosed":true,"serverStopped":true}
+✓ C3 failed key release does not skip remaining keys or poison cleanup and reconnect [89.67ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53097","webViewClosed":true,"serverStopped":true}
+✓ C2 cleanup failure retry and C3 unavailable stats and renderer [90.86ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53102","webViewClosed":true,"serverStopped":true}
+✓ C1 real page search, composed filters, favorites and same-origin persistence [98.47ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53107","webViewClosed":true,"serverStopped":true}
+✓ C2 real direct form rejects fields and cancels late connect with final cleanup [89.58ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53112","webViewClosed":true,"serverStopped":true}
+✓ C4 external labels are literal; favorite is isolated and quoted Connect captures original target [89.35ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53117","webViewClosed":true,"serverStopped":true}
+✓ C3 real WebGL frame, stale poll, local keys, held release and fullscreen failure [97.08ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53123","webViewClosed":true,"serverStopped":true}
+PAGE CLEANUP {"origin":"http://127.0.0.1:53128","webViewClosed":true,"serverStopped":true}
+✓ C1 refresh failure/retry, empty inventory, unpaired prefill and no bridge [163.62ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53133","webViewClosed":true,"serverStopped":true}
+✓ C3 middle button, extra button rejection, focus-loss release and relative pointer in live session [89.50ms]
+PAGE CLEANUP {"origin":"http://127.0.0.1:53138","webViewClosed":true,"serverStopped":true}
+✓ R8 saved credentials display separately, click connect passes explicit pairingId without PIN, and forget removes card [81.42ms]
+
+ 28 pass
+ 0 fail
+ 81 expect() calls
+Ran 28 tests across 2 files. [2.73s]
+bun test v1.4.0 (34cbb9a40)
+
+clients/rust/ios-shell/ui/test/frame-parser.test.mjs:
+✓ parseNv12Frame parses valid 4x2 NV12 frame buffer [0.70ms]
+✓ parseNv12Frame rejects buffer shorter than 16-byte header [0.06ms]
+✓ parseNv12Frame rejects truncated frame data [0.02ms]
+✓ parseNv12Frame rejects zero dimensions [0.02ms]
+✓ parseNv12Frame accepts Uint8Array slices
+
+clients/rust/ios-shell/ui/test/discovery.test.mjs:
+✓ validateConnectRequest accepts valid custom tcpPort and udpPort [0.05ms]
+✓ validateConnectRequest omits port fields when absent for backward compatibility [0.01ms]
+✓ validateConnectRequest rejects empty bracketed hosts [0.03ms]
+✓ validateConnectRequest rejects port 0, negative, and out-of-range ports [0.03ms]
+✓ validateConnectRequest preserves and normalizes IPv6 addresses without bracket corruption [0.01ms]
+✓ safe port passing propagates to native connect invoke call [0.18ms]
+✓ null bridge connect cannot report success [0.08ms]
+✓ initial state has idle discovery and empty discovered hosts [0.02ms]
+✓ startDiscovery transitions discoveryState to loading while snapshot is pending [0.06ms]
+✓ pending list_hosts completes after stop and does not repopulate list [0.03ms]
+✓ stop before native call begins prevents native list_hosts from being invoked [0.02ms]
+✓ stop then resume waits for native stop before new list_hosts [0.02ms]
+✓ old completion does not clear new pending request [0.03ms]
+✓ list_hosts resolution populates discoveredHosts and transitions discoveryState to idle [0.05ms]
+✓ empty discovery snapshot yields empty list without error [0.01ms]
+✓ disappearing hosts are pruned from discoveredHosts on subsequent snapshot [0.10ms]
+✓ discovery failure sets discoveryState to error while preserving direct connect [0.13ms]
+✓ discovery refresh scheduling stops when active session begins and resumes on disconnect [0.27ms]
+✓ session/background disconnect does not restart periodic timer [0.06ms]
+✓ lifecycle background transitions halt discovery refresh and foreground transitions resume [0.14ms]
+✓ findDiscoveredHostById returns latest updated record when IP or ports change [0.12ms]
+✓ findDiscoveredHostById returns null when host is removed or inputs invalid [0.01ms]
+✓ selecting a discovered host card populates target parameters without inferring paired state [0.03ms]
+✓ card-initiated connect requires PIN for unpaired host: asserts missing-PIN rejects and valid-PIN succeeds [0.05ms]
+✓ unpaired discovered host with identical name does not choose saved credential [0.03ms]
+
+clients/rust/ios-shell/ui/test/connection-state.test.mjs:
+✓ validateConnectRequest validates required host and optional 8-digit PIN [0.02ms]
+✓ createConnectionManager transitions state from idle to waiting-video to streaming [0.03ms]
+✓ createConnectionManager ignores stale frame tokens from prior generation [0.02ms]
+✓ createConnectionManager reports error when native bridge is missing [0.04ms]
+✓ saved-mode click passes explicit pairingId to native connect without PIN [0.05ms]
+✓ list_pairings populates savedPairings and excludes secret keys from state [0.03ms]
+✓ connect without PIN and without pairingId returns pairing-required error [0.05ms]
+✓ UI saved-mode click to actual invoke argument passes exact pairingId without PIN [0.04ms]
+✓ startup provisioning auto-connect dispatches connect with explicit pairingId [0.04ms]
+
+clients/rust/ios-shell/ui/test/input-queue.test.mjs:
+✓ preserves execution order for serialized input commands [0.08ms]
+✓ drops queued commands when generation changes before invocation [0.03ms]
+✓ captures generation at enqueue time rather than invocation time [0.03ms]
+✓ handles invoke rejection without breaking subsequent queue processing [0.04ms]
+
+clients/rust/ios-shell/ui/test/lifecycle.test.mjs:
+✓ hidden during streaming invokes input release, disconnect, and invalidates generation [0.11ms]
+✓ hidden during connecting invokes input release and disconnect [0.04ms]
+✓ pagehide during streaming invokes input release and disconnect [0.04ms]
+✓ blur while still visible releases held inputs but preserves polling and does not disconnect stream [0.03ms]
+✓ returning to foreground does not resurrect disconnected session or accept stale frame completions [0.03ms]
+
+clients/rust/ios-shell/ui/test/keyboard-mapper.test.mjs:
+✓ mapNamedKeyToCode maps known keys to wire key codes [0.04ms]
+✓ createModifierTracker toggles and clears modifier bitflags [0.03ms]
+✓ validateKeyPayload validates well-formed send_key payloads [0.01ms]
+✓ validateKeyPayload rejects invalid key payload types
+
+clients/rust/ios-shell/ui/test/touch-coords.test.mjs:
+✓ calculateAspectFit calculates correct pillarbox in wide container [0.02ms]
+✓ calculateAspectFit calculates correct letterbox in tall container
+✓ calculateAspectFit handles zero or invalid dimensions gracefully
+✓ normalizeTouchCoordinates normalizes coordinates accurately [0.01ms]
+✓ normalizeTouchCoordinates clamps out-of-bounds coordinates to 0..1
+✓ mapTouchPhase maps browser touch/pointer events to contract phases
+✓ createTouchTracker tracks and cancels touches [0.04ms]
+
+ 59 pass
+ 0 fail
+Ran 59 tests across 7 files. [235.00ms]

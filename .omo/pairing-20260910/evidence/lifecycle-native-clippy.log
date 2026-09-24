@@ -1,0 +1,11 @@
+=== Strict Clippy Check Execution ===
+Command: cargo clippy --manifest-path clients/rust/Cargo.toml -p erd-ios --tests --no-deps -- -D warnings
+Host: indo@100.91.254.71 (Omarchy Linux)
+Execution Date: 2026-09-10
+
+    Checking erd-app v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/erd-app)
+    Checking erd-mobile v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/erd-mobile)
+    Checking erd-ios v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/ios-shell)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.49s
+
+Outcome: 0 warnings, 0 errors. Fully compliant with -D warnings and zero disallowed suppressions.

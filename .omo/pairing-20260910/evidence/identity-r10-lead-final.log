@@ -1,0 +1,51 @@
+status: completed exit_code: 0
+1fadc1d893d9c77dd23e2f73815892951b7e82c4a77a19d7f17e9f147570b210  clients/rust/erd-net/src/discovery.rs
+53e9ce61916b59a6d4977b6d5c171cfeb33e4ca11003cf72713d0d0902930189  clients/rust/erd-net/src/discovery/endpoint.rs
+491c114691a3d6656ab13c47108f38440c3618137485c64ce8da045dc824fb5c  clients/rust/erd-net/src/discovery/apple.rs
+ea5925d2f4a130e1f2cf0d0866fc008486cd5d623c495af5a705050606c8bc89  clients/rust/erd-net/tests/discovery_scoped_ipv6.rs
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running
+running 18 tests
+ tests/discovery_metadata.rs (clients/rust/target/debug/deps/discovery_metadata-1c7355981dce07a4)
+test parse_service_metadata_rejects_missing_protocol ... ok
+test parse_service_metadata_accepts_valid_v3_records_and_prefers_ipv4 ... ok
+test parse_service_metadata_rejects_invalid_fullname ... ok
+test parse_service_metadata_rejects_oversized_metadata ... ok
+test parse_service_metadata_rejects_loopback_only_addresses ... ok
+test parse_service_metadata_accepts_publicly_numbered_ethernet_ip ... ok
+test parse_service_metadata_accepts_usable_ipv6_when_ipv4_absent ... ok
+test parse_service_metadata_rejects_empty_addresses ... ok
+test parse_service_metadata_rejects_multicast_only_addresses ... ok
+test parse_service_metadata_rejects_out_of_range_udp_port ... ok
+test parse_service_metadata_rejects_unscoped_ipv6_link_local_only ... ok
+test tracker_add_service_makes_host_visible_in_snapshot ... ok
+test parse_service_metadata_rejects_unspecified_only_addresses ... ok
+test tracker_address_replacement_updates_existing_entry ... ok
+test parse_service_metadata_rejects_zero_or_missing_ports ... ok
+test tracker_clear_resets_snapshot_to_empty ... ok
+test tracker_remove_service_removes_host_from_snapshot ... ok
+test parse_service_metadata_rejects_unsupported_protocol ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/discovery_scoped_ipv6.rs (clients/rust/target/debug/deps/discovery_scoped_ipv6-2c04201a1ca7c202)
+
+running 9 tests
+test test_ipv4_preferred_over_scoped_ipv6_link_local ... ok
+test test_scoped_ipv6_link_local_published ... ok
+test test_scoped_ipv6_published_string_and_resolver_retain_scope ... ok
+test test_unscoped_ipv6_link_local_retracted ... ok
+test test_parse_service_metadata_scoped_accepts_scoped_ipv6 ... ok
+test test_choose_preferred_endpoint_selects_scoped_ipv6_and_preserves_scope ... ok
+test test_resolver_rejects_invalid_interface_name_scope ... ok
+test test_scoped_ipv6_link_local_with_scope_zero_retracted ... ok
+test test_resolver_resolves_interface_name_scope ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Checking erd-proto v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/erd-proto)
+    Checking erd-net v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/erd-net)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.92s
+Coordinator compared all four hashes with current local sources: identical.
+Commit: 13e8577 fix(discovery): preserve scoped IPv6 endpoints through publication
+Only four erd-net production/test files were staged; unrelated working-tree changes preserved.

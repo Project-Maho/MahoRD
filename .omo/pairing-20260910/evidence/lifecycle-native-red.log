@@ -1,0 +1,16 @@
+=== RED Phase: Targeted Lifecycle Regression Suite Execution ===
+Command: cargo test --manifest-path clients/rust/Cargo.toml -p erd-ios --test lifecycle test_cancel_before_native_registration_race -- --nocapture
+Host: indo@100.91.254.71 (Omarchy Linux)
+Execution Date: 2026-09-10
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running tests/lifecycle.rs (clients/rust/target/debug/deps/lifecycle-816a88fb78cad660)
+
+running 1 test
+test test_cancel_before_native_registration_race ... [TIMED OUT after 10.0s, EXIT_CODE=124]
+
+Failure Diagnosis:
+1. `test_cancel_before_native_registration_race`: When cancellation is triggered before connect_async registration, no client ever connects to LoopbackServer. LoopbackServer's server thread blocks indefinitely on `listener.accept()`, causing `Drop::drop` -> `server_handle.join()` to hang forever.
+2. `test_canceled_connect_cannot_install_resources`: Previously used forbidden 5ms sleep and non-routable port. When replaced with an authentic ephemeral loopback server held at HandshakeAck, calling disconnect without a prompt interrupt socket deadlocks or blocks behind `self.tcp` mutex while `read_tcp_packet` is blocked in `read_frame`.
+3. `test_early_tcp_close_aborts_session_and_cleans_resources`: Relied on forbidden polling loop with `tokio::time::sleep(20ms)`.
+4. `test_audio_init_failure_triggers_clean_rollback`: Early audio activation failure bypassed completion notification, leaving uncompleted worker signals and detached handles.

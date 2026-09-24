@@ -1,0 +1,20 @@
+Exact staged tree: 5685dbf7354a4776df151757d464da6962bfb619
+Isolated source: /home/indo/projects/erd-ipc-snapshot-PTBpOq
+Command: cargo test --manifest-path clients/rust/Cargo.toml -p erd-app --lib error::tests
+Execution: Omarchy only; CARGO_TARGET_DIR reused the owned pairing workspace target cache.
+status: completed exit_code: 0
+   Compiling erd-proto v0.1.0 (/home/indo/projects/erd-ipc-snapshot-PTBpOq/clients/rust/erd-proto)
+   Compiling erd-render v0.1.0 (/home/indo/projects/erd-ipc-snapshot-PTBpOq/clients/rust/erd-render)
+   Compiling erd-decode v0.1.0 (/home/indo/projects/erd-ipc-snapshot-PTBpOq/clients/rust/erd-decode)
+   Compiling erd-net v0.1.0 (/home/indo/projects/erd-ipc-snapshot-PTBpOq/clients/rust/erd-net)
+   Compiling erd-app v0.1.0 (/home/indo/projects/erd-ipc-snapshot-PTBpOq/clients/rust/erd-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.71s
+     Running unittests src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_app-fa73e0a6b217a4ff)
+
+running 2 tests
+test error::tests::test_ipc_error_machine_fields_and_no_secret_leak ... ok
+test error::tests::test_ipc_error_code_and_stage_serialization ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 125 filtered out; finished in 0.00s
+Commit: 9e9d85f508f842f5ce1b9a2d223284444a108fad feat(ipc): share typed connection error contracts
+Staged tree rechecked unchanged immediately before commit; only error.rs and lib.rs included.

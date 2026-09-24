@@ -1,0 +1,23 @@
+bun test v1.4.0 (34cbb9a40)
+
+clients/rust/ios-shell/ui/test/page-lifecycle-order-a.test.mjs:
+(pass) real browser interaction Order A at 430x932: fill, submit, modal appearance, hit-test, focus trap, cancel click, connect settles before disconnect, cleanup progress visible until disconnect settles, focus restore, and no stale reconnect [507.91ms]
+(pass) real browser interaction Order A at 1280x800: fill, submit, modal appearance, hit-test, focus trap, cancel click, connect settles before disconnect, cleanup progress visible until disconnect settles, focus restore, and no stale reconnect [264.13ms]
+
+clients/rust/ios-shell/ui/test/page-modal.test.mjs:
+(pass) real browser interaction at 430x932: fill, submit, modal appearance, hit-test, focus trap, cancel click, cleanup progress, focus restore, and no stale reconnect [261.86ms]
+(pass) real browser interaction at 1280x800: fill, submit, modal appearance, hit-test, focus trap, cancel click, cleanup progress, focus restore, and no stale reconnect [227.88ms]
+(pass) actual-page video streaming pipeline: poll_frame NV12 frame transitions waiting-video to streaming, renders WebGL, dispatches presented, and hides modal [177.15ms]
+
+clients/rust/ios-shell/ui/test/dom-modal.test.mjs:
+(pass) connecting modal is child of body, not hidden session view [84.68ms]
+(pass) cancel button is clickable and dispatches disconnect while connecting [84.47ms]
+(pass) background views are marked inert and aria-hidden when modal is open [88.79ms]
+(pass) focus is trapped to modal and restored on close [85.43ms]
+(pass) pin input is cleared upon submission [91.80ms]
+(pass) cleanup progress visible and cancel button disabled during disconnecting [118.80ms]
+
+ 11 pass
+ 0 fail
+ 155 expect() calls
+Ran 11 tests across 3 files. [2.98s]

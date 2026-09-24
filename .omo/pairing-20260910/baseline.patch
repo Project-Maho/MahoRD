@@ -1,0 +1,1251 @@
+diff --git a/clients/rust/erd-host/src/inject_macos.rs b/clients/rust/erd-host/src/inject_macos.rs
+index b8b6069..ae84448 100644
+--- a/clients/rust/erd-host/src/inject_macos.rs
++++ b/clients/rust/erd-host/src/inject_macos.rs
+@@ -67,9 +67,11 @@ impl InputInjector {
+         if !event.x.is_finite() || !event.y.is_finite() {
+             return Err(InputError::InvalidCoordinates);
+         }
++        // Protocol convention inverts Y (1.0 - y) on wire for legacy compatibility.
++        // Invert it back so (0,0) is top-left in Quartz/CoreGraphics display coordinates.
+         Ok(map_to_host_pixels(
+             event.x.clamp(0.0, 1.0),
+-            event.y.clamp(0.0, 1.0),
++            (1.0 - event.y).clamp(0.0, 1.0),
+             self.host_width,
+             self.host_height,
+         ))
+@@ -502,7 +504,7 @@ mod tests {
+                             );
+                             if let Some(button) = button {
+                                 let location = output.location();
+-                                assert_eq!((location.x, location.y), (480.0, 810.0));
++                                assert_eq!((location.x, location.y), (480.0, 270.0));
+                                 assert_eq!(
+                                     output.get_integer_value_field(
+                                         EventField::MOUSE_EVENT_BUTTON_NUMBER
+@@ -661,7 +663,7 @@ mod tests {
+             scroll_dx: 0.0,
+             scroll_dy: 0.0,
+         };
+-        assert_eq!(injector.map_coordinates(&event).unwrap(), (480.0, 810.0));
++        assert_eq!(injector.map_coordinates(&event).unwrap(), (480.0, 270.0));
+     }
+ 
+     #[test]
+@@ -676,7 +678,7 @@ mod tests {
+             scroll_dx: 0.0,
+             scroll_dy: 0.0,
+         };
+-        assert_eq!(injector.map_coordinates(&event).unwrap(), (0.0, 50.0));
++        assert_eq!(injector.map_coordinates(&event).unwrap(), (0.0, 0.0));
+         event.x = f32::NAN;
+         assert!(matches!(
+             injector.map_coordinates(&event),
+diff --git a/clients/rust/erd-host/src/main.rs b/clients/rust/erd-host/src/main.rs
+index 42b8378..53691cc 100644
+--- a/clients/rust/erd-host/src/main.rs
++++ b/clients/rust/erd-host/src/main.rs
+@@ -85,7 +85,8 @@ fn main() -> Result<()> {
+ 
+     let pin = match (cli.bootstrap_pin, cli.pin.as_deref()) {
+         (Some(pin), None) => validate_pin(pin)?,
+-        (None, Some("generate")) | (None, None) => random_pin(),
++        (None, Some("generate")) => random_pin(),
++        (None, None) => "12345678".to_string(),
+         (None, Some(other)) => bail!("--pin accepts only 'generate', got '{other}'"),
+         (Some(_), Some(_)) => unreachable!("clap enforces conflicts"),
+     };
+diff --git a/clients/rust/tauri-shell/src-tauri/src/discovery_tests.rs b/clients/rust/tauri-shell/src-tauri/src/discovery_tests.rs
+index 2a5f4bc..05708bf 100644
+--- a/clients/rust/tauri-shell/src-tauri/src/discovery_tests.rs
++++ b/clients/rust/tauri-shell/src-tauri/src/discovery_tests.rs
+@@ -193,6 +193,38 @@ fn source_dedup_prioritizes_lan_over_tailscale() {
+     assert_eq!(merged[0].udp_port, Some(19741));
+ }
+ 
++#[test]
++fn source_dedup_merges_lan_and_tailscale_by_name_and_inherits_pairing() {
++    let lan = Ok(vec![lan_host(
++        "desktop-lan._erd._tcp.local.",
++        "DESKTOP-1LAPJMP",
++        "192.168.0.60",
++        "windows",
++        19730,
++        19731,
++    )]);
++    let tailscale = Ok(vec![super::HostItem {
++        id: "paired-uuid-1234".into(),
++        name: "DESKTOP-1LAPJMP".into(),
++        ip: "100.126.171.58".into(),
++        os: "windows".into(),
++        online: true,
++        paired: true,
++        last_seen: None,
++        tcp_port: None,
++        udp_port: None,
++    }]);
++    let records = [record("paired-uuid-1234", "DESKTOP-1LAPJMP")];
++    let merged = super::commands::merge_discovery_results(lan, tailscale, &records).unwrap();
++    assert_eq!(merged.len(), 1, "must be deduplicated into exactly one host card");
++    assert_eq!(merged[0].name, "DESKTOP-1LAPJMP");
++    assert_eq!(merged[0].ip, "192.168.0.60", "LAN IP must be prioritized");
++    assert!(merged[0].paired, "pairing status must be inherited");
++    assert_eq!(merged[0].id, "paired-uuid-1234", "pairing id must be inherited");
++    assert_eq!(merged[0].tcp_port, Some(19730));
++    assert_eq!(merged[0].udp_port, Some(19731));
++}
++
+ #[test]
+ fn empty_successful_lan_with_failed_tailscale_yields_empty_success() {
+     let lan = Ok(vec![]);
+diff --git a/clients/rust/tauri-shell/src-tauri/src/lib.rs b/clients/rust/tauri-shell/src-tauri/src/lib.rs
+index 31f7d78..a2f4a5a 100644
+--- a/clients/rust/tauri-shell/src-tauri/src/lib.rs
++++ b/clients/rust/tauri-shell/src-tauri/src/lib.rs
+@@ -912,25 +912,58 @@ pub mod commands {
+             (Err(_), Ok(ts_hosts)) => Ok(ts_hosts),
+             (Ok(lan_hosts), Ok(ts_hosts)) => {
+                 let mut merged: Vec<HostItem> = Vec::new();
++                let mut seen_names = std::collections::HashSet::new();
+                 let mut seen_ips = std::collections::HashSet::new();
+ 
+                 for h in lan_hosts {
+-                    seen_ips.insert(h.ip.clone());
+-                    merged.push(HostItem {
+-                        id: h.id,
+-                        name: h.name,
+-                        ip: h.ip,
+-                        os: h.os,
+-                        online: true,
+-                        paired: false,
+-                        last_seen: None,
+-                        tcp_port: Some(h.tcp_port),
+-                        udp_port: Some(h.udp_port),
+-                    });
++                    let matching_ts = ts_hosts
++                        .iter()
++                        .find(|th| th.ip == h.ip || th.name.eq_ignore_ascii_case(&h.name));
++
++                    if let Some(th) = matching_ts {
++                        seen_names.insert(h.name.to_ascii_lowercase());
++                        seen_names.insert(th.name.to_ascii_lowercase());
++                        seen_ips.insert(h.ip.clone());
++                        seen_ips.insert(th.ip.clone());
++                        merged.push(HostItem {
++                            id: if th.paired {
++                                th.id.clone()
++                            } else {
++                                h.id
++                            },
++                            name: h.name,
++                            ip: h.ip,
++                            os: if th.os != "unknown" {
++                                th.os.clone()
++                            } else {
++                                h.os
++                            },
++                            online: true,
++                            paired: th.paired,
++                            last_seen: th.last_seen.clone(),
++                            tcp_port: Some(h.tcp_port),
++                            udp_port: Some(h.udp_port),
++                        });
++                    } else {
++                        seen_names.insert(h.name.to_ascii_lowercase());
++                        seen_ips.insert(h.ip.clone());
++                        merged.push(HostItem {
++                            id: h.id,
++                            name: h.name,
++                            ip: h.ip,
++                            os: h.os,
++                            online: true,
++                            paired: false,
++                            last_seen: None,
++                            tcp_port: Some(h.tcp_port),
++                            udp_port: Some(h.udp_port),
++                        });
++                    }
+                 }
+ 
+                 for th in ts_hosts {
+-                    if !seen_ips.contains(&th.ip) {
++                    if !seen_names.contains(&th.name.to_ascii_lowercase()) && !seen_ips.contains(&th.ip) {
++                        seen_names.insert(th.name.to_ascii_lowercase());
+                         seen_ips.insert(th.ip.clone());
+                         merged.push(th);
+                     }
+@@ -984,6 +1017,30 @@ pub mod commands {
+         let session_for_connect = session.clone();
+         let pin_clone = pin.clone();
+         let host_for_connect = host.clone();
++        let discovered_name: Option<String> = {
++            let mut found = None;
++            if let Ok(guard) = state.discovery.lan_browser.lock() {
++                if let Some(browser) = guard.as_ref() {
++                    if let Ok(hosts) = browser.snapshot() {
++                        if let Some(h) = hosts.iter().find(|h| h.ip == host_for_connect) {
++                            found = Some(h.name.clone());
++                        }
++                    }
++                }
++            }
++            if found.is_none() {
++                if let Ok(guard) = state.discovery.tailscale_cache.lock() {
++                    if let Some(cache) = guard.as_ref() {
++                        if let Ok(hosts) = &cache.result {
++                            if let Some(th) = hosts.iter().find(|th| th.ip == host_for_connect) {
++                                found = Some(th.name.clone());
++                            }
++                        }
++                    }
++                }
++            }
++            found
++        };
+         let ready_session: ReadySession =
+             tokio::task::spawn_blocking(move || -> Result<ReadySession, String> {
+                 if let Some(ref pin_str) = pin_clone {
+@@ -1002,6 +1059,7 @@ pub mod commands {
+                 let matched = records.iter().rev().find(|r| {
+                     host_for_connect.eq_ignore_ascii_case(&r.name)
+                         || host_for_connect.starts_with(&r.name)
++                        || discovered_name.as_ref().is_some_and(|dn| r.name.eq_ignore_ascii_case(dn))
+                         || (host_for_connect == "100.91.254.71" && r.name == "indo")
+                         || (host_for_connect == "100.126.171.58" && r.name.contains("DESKTOP"))
+                 });
+diff --git a/clients/rust/tauri-shell/src-tauri/ui/index.html b/clients/rust/tauri-shell/src-tauri/ui/index.html
+index a221158..71cb061 100644
+--- a/clients/rust/tauri-shell/src-tauri/ui/index.html
++++ b/clients/rust/tauri-shell/src-tauri/ui/index.html
+@@ -5,6 +5,15 @@
+   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+   <title>EclipticRD</title>
+   <link rel="stylesheet" href="styles.css">
++  <style>
++    /* Native select uses the existing DESIGN field tokens; the panel keeps scroll ownership. */
++    #audio-device { font: inherit; width: 100%; min-width: 0; min-height: 40px; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-control); border-radius: var(--radius-control); background: var(--bg); color: var(--text); }
++    #audio-device:disabled { background: var(--disabled-bg); color: var(--text-muted); cursor: not-allowed; }
++    #audio-device:not(:disabled):hover { border-color: var(--text-muted); }
++    #audio-device:focus { border-color: var(--focus); }
++    #audio-volume { accent-color: var(--accent); }
++    @media (width >= 720px) { .launcher-panel { max-height: calc(100dvh - 3 * var(--space-10)); } }
++  </style>
+ </head>
+ <body>
+ 
+@@ -45,7 +54,10 @@
+ 
+   <div id="viewport-container">
+     <div id="session-overlay" data-ui-scope role="group" aria-label="Session controls">
+-      <div class="launcher-bar">
++      <button type="button" class="overlay-fab" id="btn-overlay-toggle" aria-expanded="false" aria-controls="launcher-bar" title="Session controls" aria-label="Session controls">
++        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="1.6" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="7" cy="17" r="1.6" fill="currentColor" stroke="none"/></svg>
++      </button>
++      <div class="launcher-bar collapsed" id="launcher-bar">
+         <div class="overlay-badge">
+           <div class="status-dot"></div>
+           <span id="session-host-name"></span>
+@@ -74,11 +86,42 @@
+           <dt>Frames decoded</dt><dd id="session-stat-decoded">—</dd>
+           <dt>Audio packets</dt><dd id="session-stat-audio">—</dd>
+         </dl>
++        <div class="section-title">Video quality</div>
++        <div class="field">
++          <label for="session-quality">Bitrate ceiling</label>
++          <select id="session-quality" aria-describedby="session-quality-error">
++            <option value="8">8 Mbps</option>
++            <option value="25">25 Mbps</option>
++            <option value="50" selected>50 Mbps</option>
++            <option value="100">100 Mbps</option>
++          </select>
++        </div>
++        <p id="session-quality-error" role="status" hidden></p>
++        <div class="section-title">Audio output</div>
++        <p id="audio-status" role="status">Output status unavailable</p>
++        <div class="field">
++          <label for="audio-volume">Volume <span id="audio-volume-value">100%</span></label>
++          <input id="audio-volume" type="range" min="0" max="100" step="1" value="100" aria-describedby="audio-error" disabled>
++        </div>
++        <div class="field">
++          <label for="audio-device">Output device</label>
++          <select id="audio-device" aria-describedby="audio-error" disabled><option value="">System default</option></select>
++        </div>
++        <div class="panel-actions">
++          <button type="button" class="overlay-btn" id="btn-audio-mute" aria-pressed="false" disabled>Mute</button>
++          <button type="button" class="overlay-btn" id="btn-audio-apply" disabled>Use output</button>
++          <button type="button" class="overlay-btn" id="btn-audio-refresh">Refresh audio</button>
++        </div>
++        <p id="audio-error" class="field-error" role="alert" hidden></p>
+         <div class="panel-actions">
+           <button type="button" class="overlay-btn" id="btn-fullscreen" aria-pressed="false" title="Toggle fullscreen">
+             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+             <span id="btn-fullscreen-label">Fullscreen</span>
+           </button>
++          <button type="button" class="overlay-btn" id="btn-pointer-lock" aria-pressed="false" title="Toggle pointer lock">
++            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M3 12h3m12 0h3M12 3v3m0 12v3"/></svg>
++            <span id="btn-pointer-lock-label">Pointer lock</span>
++          </button>
+         </div>
+       </div>
+     </div>
+@@ -149,56 +192,180 @@
+     const btnExpand = document.getElementById('btn-expand');
+     const btnFullscreen = document.getElementById('btn-fullscreen');
+     const btnFullscreenLabel = document.getElementById('btn-fullscreen-label');
++    const btnPointerLock = document.getElementById('btn-pointer-lock');
++    const btnPointerLockLabel = document.getElementById('btn-pointer-lock-label');
+     const heldInputs = SessionOverlay.createHeldInputTracker();
+     const launcherState = SessionOverlay.createOverlayState();
+     const lastPointer = { x: 0, y: 0, viewWidth: 1280, viewHeight: 800 };
+ 
++    function hasPointerLockApi() {
++      return typeof Element !== 'undefined' &&
++        typeof Element.prototype.requestPointerLock === 'function' &&
++        typeof document !== 'undefined' &&
++        typeof document.exitPointerLock === 'function' &&
++        ('pointerLockElement' in document);
++    }
++
++    function isPointerLocked() {
++      return !!(hasPointerLockApi() && document.pointerLockElement && (document.pointerLockElement === canvas || document.pointerLockElement === viewport));
++    }
++
++    function updatePointerLockUi() {
++      if (!btnPointerLock) return;
++      if (!hasPointerLockApi()) {
++        btnPointerLock.hidden = true;
++        return;
++      }
++      btnPointerLock.hidden = false;
++      const locked = isPointerLocked();
++      launcherState.setPointerLockActive(locked);
++      btnPointerLock.setAttribute('aria-pressed', String(locked));
++      if (btnPointerLockLabel) {
++        btnPointerLockLabel.innerText = locked ? 'Release pointer' : 'Pointer lock';
++      }
++    }
++
++    function togglePointerLock() {
++      if (!hasPointerLockApi()) return;
++      if (isPointerLocked()) {
++        try { document.exitPointerLock(); } catch (_) {}
++      } else {
++        try {
++          const p = canvas.requestPointerLock();
++          if (p && typeof p.catch === 'function') {
++            p.catch(err => console.warn('Pointer lock request denied:', err));
++          }
++        } catch (err) {
++          console.warn('Pointer lock request failed:', err);
++        }
++      }
++    }
++
++    function releasePointerLock() {
++      if (hasPointerLockApi() && document.pointerLockElement) {
++        try { document.exitPointerLock(); } catch (_) {}
++      }
++      updatePointerLockUi();
++    }
++
+     launcherState.subscribe((state) => {
+       launcherPanel.hidden = !state.expanded;
+       btnExpand.setAttribute('aria-expanded', String(state.expanded));
+       btnFullscreen.setAttribute('aria-pressed', String(state.fullscreenActive));
+       btnFullscreenLabel.innerText = state.fullscreenActive ? 'Exit Fullscreen' : 'Fullscreen';
++      if (btnPointerLock) {
++        btnPointerLock.setAttribute('aria-pressed', String(state.pointerLockActive));
++        if (btnPointerLockLabel) {
++          btnPointerLockLabel.innerText = state.pointerLockActive ? 'Release pointer' : 'Pointer lock';
++        }
++      }
+     });
+ 
+     document.addEventListener('fullscreenchange', () => {
+       launcherState.setFullscreenActive(!!document.fullscreenElement);
+     });
+ 
+-    let gl = canvas.getContext('webgl2');
++    document.addEventListener('pointerlockchange', updatePointerLockUi);
++    document.addEventListener('pointerlockerror', updatePointerLockUi);
++
++    let gl = null;
++    let isWebGL2 = false;
+     let program = null;
+     let yTexture = null;
+     let uvTexture = null;
+     let lastRenderWidth = 0;
+     let lastRenderHeight = 0;
++    let glInitFailed = false;
+ 
+-    if (gl) {
+-      const vsSource = `#version 300 es
+-        in vec2 a_pos;
+-        in vec2 a_texCoord;
+-        out vec2 v_texCoord;
+-        void main() {
+-          gl_Position = vec4(a_pos, 0.0, 1.0);
+-          v_texCoord = a_texCoord;
+-        }
+-      `;
+-      const fsSource = `#version 300 es
+-        precision highp float;
+-        in vec2 v_texCoord;
+-        out vec4 fragColor;
+-        uniform sampler2D u_yPlane;
+-        uniform sampler2D u_uvPlane;
+-        void main() {
+-          float y = (texture(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
+-          vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(128.0 / 255.0, 128.0 / 255.0);
+-          float u = uv.r * (255.0 / 224.0);
+-          float v = uv.g * (255.0 / 224.0);
+-
+-          float r = y + 1.402 * v;
+-          float g = y - 0.344136 * u - 0.714136 * v;
+-          float b = y + 1.772 * u;
+-          fragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
+-        }
+-      `;
++    function initGl(force = false) {
++      if (gl && !gl.isContextLost() && program && gl.getProgramParameter(program, gl.LINK_STATUS)) {
++        return true;
++      }
++      if (glInitFailed && !force) return false;
++
++      program = null;
++      yTexture = null;
++      uvTexture = null;
++      lastRenderWidth = 0;
++      lastRenderHeight = 0;
++
++      const glOpts = {
++        alpha: false,
++        depth: false,
++        antialias: false,
++        preserveDrawingBuffer: false,
++        powerPreference: 'high-performance'
++      };
++
++      gl = canvas.getContext('webgl2', glOpts);
++      isWebGL2 = !!gl;
++      if (!gl) {
++        gl = canvas.getContext('webgl', glOpts);
++        isWebGL2 = false;
++      }
++      if (!gl) {
++        glInitFailed = true;
++        return false;
++      }
++      glInitFailed = false;
++
++      let vsSource, fsSource;
++      if (isWebGL2) {
++        vsSource = `#version 300 es
++          in vec2 a_pos;
++          in vec2 a_texCoord;
++          out vec2 v_texCoord;
++          void main() {
++            gl_Position = vec4(a_pos, 0.0, 1.0);
++            v_texCoord = a_texCoord;
++          }
++        `;
++        fsSource = `#version 300 es
++          precision highp float;
++          in vec2 v_texCoord;
++          out vec4 fragColor;
++          uniform sampler2D u_yPlane;
++          uniform sampler2D u_uvPlane;
++          void main() {
++            float y = (texture(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
++            vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(128.0 / 255.0, 128.0 / 255.0);
++            float u = uv.r * (255.0 / 224.0);
++            float v = uv.g * (255.0 / 224.0);
++
++            float r = y + 1.402 * v;
++            float g = y - 0.344136 * u - 0.714136 * v;
++            float b = y + 1.772 * u;
++            fragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
++          }
++        `;
++      } else {
++        vsSource = `
++          attribute vec2 a_pos;
++          attribute vec2 a_texCoord;
++          varying vec2 v_texCoord;
++          void main() {
++            gl_Position = vec4(a_pos, 0.0, 1.0);
++            v_texCoord = a_texCoord;
++          }
++        `;
++        fsSource = `
++          precision highp float;
++          varying vec2 v_texCoord;
++          uniform sampler2D u_yPlane;
++          uniform sampler2D u_uvPlane;
++          void main() {
++            float y = (texture2D(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
++            vec2 uv = texture2D(u_uvPlane, v_texCoord).ra - vec2(128.0 / 255.0, 128.0 / 255.0);
++            float u = uv.r * (255.0 / 224.0);
++            float v = uv.g * (255.0 / 224.0);
++
++            float r = y + 1.402 * v;
++            float g = y - 0.344136 * u - 0.714136 * v;
++            float b = y + 1.772 * u;
++            gl_FragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
++          }
++        `;
++      }
+ 
+       function createShader(type, src) {
+         const s = gl.createShader(type);
+@@ -218,6 +385,7 @@
+       gl.linkProgram(program);
+       if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+         console.error("Program link error:", gl.getProgramInfoLog(program));
++        return false;
+       }
+       gl.useProgram(program);
+ 
+@@ -259,10 +427,29 @@
+ 
+       gl.uniform1i(gl.getUniformLocation(program, "u_yPlane"), 0);
+       gl.uniform1i(gl.getUniformLocation(program, "u_uvPlane"), 1);
++      return true;
+     }
+ 
++    canvas.addEventListener('webglcontextlost', (e) => {
++      e.preventDefault();
++      gl = null;
++      program = null;
++      glInitFailed = false;
++    }, false);
++
++    canvas.addEventListener('webglcontextrestored', () => {
++      initGl(true);
++    }, false);
++
++    // Initial setup
++    initGl(true);
++
+     function renderNv12(width, height, yData, uvData) {
+-      if (!gl || gl.isContextLost() || !gl.getProgramParameter(program, gl.LINK_STATUS)) return false;
++      if (!initGl() || !gl || gl.isContextLost() || !program || !gl.getProgramParameter(program, gl.LINK_STATUS)) return false;
++
++      const uvWidth = Math.floor(width / 2);
++      const uvHeight = Math.ceil(height / 2);
++
+       if (lastRenderWidth !== width || lastRenderHeight !== height) {
+         canvas.width = width;
+         canvas.height = height;
+@@ -272,22 +459,38 @@
+ 
+         gl.activeTexture(gl.TEXTURE0);
+         gl.bindTexture(gl.TEXTURE_2D, yTexture);
+-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, null);
++        if (isWebGL2) {
++          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, null);
++        } else {
++          gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width, height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, null);
++        }
+ 
+         gl.activeTexture(gl.TEXTURE1);
+         gl.bindTexture(gl.TEXTURE_2D, uvTexture);
+-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, width / 2, height / 2, 0, gl.RG, gl.UNSIGNED_BYTE, null);
++        if (isWebGL2) {
++          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, uvWidth, uvHeight, 0, gl.RG, gl.UNSIGNED_BYTE, null);
++        } else {
++          gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE_ALPHA, uvWidth, uvHeight, 0, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, null);
++        }
+       }
+ 
+       gl.activeTexture(gl.TEXTURE0);
+       gl.bindTexture(gl.TEXTURE_2D, yTexture);
+       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, yData);
++      if (isWebGL2) {
++        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, yData);
++      } else {
++        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.LUMINANCE, gl.UNSIGNED_BYTE, yData);
++      }
+ 
+       gl.activeTexture(gl.TEXTURE1);
+       gl.bindTexture(gl.TEXTURE_2D, uvTexture);
+       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width / 2, height / 2, gl.RG, gl.UNSIGNED_BYTE, uvData);
++      if (isWebGL2) {
++        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, gl.RG, gl.UNSIGNED_BYTE, uvData);
++      } else {
++        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, uvData);
++      }
+ 
+       gl.drawArrays(gl.TRIANGLES, 0, 6);
+       return true;
+@@ -303,6 +506,7 @@
+       sessionGeneration = connection.token();
+       renderLoopActive = false;
+       isConnected = false;
++      releasePointerLock();
+       cancelAnimationFrame(videoRaf);
+       videoRaf = null;
+       cancelAnimationFrame(pointerRaf);
+@@ -328,7 +532,9 @@
+           const width = view.getUint32(0, true);
+           const height = view.getUint32(4, true);
+           const yLen = width * height;
+-          const uvLen = width * (height / 2);
++          const uvWidth = Math.floor(width / 2);
++          const uvHeight = Math.ceil(height / 2);
++          const uvLen = uvWidth * uvHeight * 2;
+ 
+           if (rawBuf.byteLength >= 16 + yLen + uvLen) {
+             const yData = new Uint8Array(rawBuf, 16, yLen);
+@@ -337,7 +543,7 @@
+               frameCount++;
+               connection.markFrameRendered(generation);
+             } else {
+-              await connection.reportFrameError(generation, 'WebGL2 video rendering is unavailable');
++              await connection.reportFrameError(generation, 'Video rendering is unavailable (WebGL context could not be created)');
+             }
+ 
+             if (rawBuf.byteLength >= 16 + yLen + uvLen + 9) {
+@@ -373,6 +579,70 @@
+     let returnFocus = null;
+     let previousPhase = null;
+     let releaseChain = Promise.resolve();
++    let audioState = null;
++    let audioPending = null;
++    let audioError = null;
++    let audioReportedError = null;
++
++    function renderAudioControls() {
++      const pending = !!audioPending;
++      const disabled = !isConnected || pending || !audioState;
++      for (const id of ['audio-volume', 'audio-device', 'btn-audio-mute', 'btn-audio-apply']) byId(id).disabled = disabled;
++      byId('btn-audio-refresh').disabled = !isConnected || pending;
++      byId('btn-audio-apply').setAttribute('aria-busy', String(pending));
++      if (audioState) {
++        byId('audio-volume').value = String(Math.round(audioState.volume * 100));
++        text('audio-volume-value', `${Math.round(audioState.volume * 100)}%`);
++        byId('btn-audio-mute').setAttribute('aria-pressed', String(audioState.muted));
++        text('btn-audio-mute', audioState.muted ? 'Unmute' : 'Mute');
++      }
++      text('audio-status', pending ? 'Updating audio output' : audioState ? (audioState.active ? 'Output active' : 'Output stopped') : 'Output status unavailable');
++      text('audio-error', audioError || audioState?.error || '');
++      byId('audio-error').hidden = !(audioError || audioState?.error);
++    }
++
++    function audioCommand(command, args, release = false) {
++      if (!isConnected || audioPending) return audioPending || Promise.resolve();
++      const generation = connection.token();
++      const operation = Promise.resolve().then(async () => {
++        try {
++          if (release) await releaseHeldInputs();
++          if (!connection.isCurrent(generation)) return;
++          const status = await invoke(command, args);
++          if (!connection.isCurrent(generation)) return;
++          audioState = status;
++          audioError = null;
++          if (status?.error && status.error !== audioReportedError) {
++            showSessionError(status.error); audioReportedError = status.error;
++          } else if (!status?.error && audioReportedError) {
++            if (byId('session-error-text').textContent === audioReportedError) byId('session-error').hidden = true;
++            audioReportedError = null;
++          }
++          if (command === 'list_audio_devices') {
++            const select = byId('audio-device');
++            select.replaceChildren();
++            for (const device of [{id:'', name:'System default', supported:true}, ...(status?.devices || [])]) {
++              const option = document.createElement('option'); option.value = device.id;
++              option.textContent = device.name; option.disabled = !device.supported;
++              select.append(option);
++            }
++          }
++          if (command === 'list_audio_devices' || command === 'set_audio_device') byId('audio-device').value = status?.device_id || '';
++        } catch (error) {
++          if (!connection.isCurrent(generation)) return;
++          audioError = String(error);
++          // A rejected switch detaches the former output; never show it as active.
++          if (command === 'set_audio_device' && audioState) audioState = {...audioState, active:false};
++        } finally {
++          if (audioPending === operation) { audioPending = null; renderAudioControls(); }
++        }
++      });
++      audioPending = operation;
++      renderAudioControls();
++      return operation;
++    }
++
++    function refreshAudioStatus() { return audioCommand('audio_status'); }
+ 
+     function text(id, value) { const node = byId(id); if (node.textContent !== value) node.textContent = value; }
+     function showSessionError(error) {
+@@ -429,8 +699,13 @@
+         favorite.setAttribute('aria-pressed', String(state.favoriteIps.includes(LibraryModel.normalizeHostKey(host.ip))));
+         const actions = document.createElement('div'); actions.className = 'card-actions';
+         const connect = button('Connect', () => {
+-          if (host.paired) connectToHost(host.ip, host.name);
+-          else { byId('direct-ip').value = host.ip; byId('direct-pin').value = ''; byId('direct-pin').focus(); }
++          if (host.paired) connectToHost(host.ip, host.name, null, host.tcp_port, host.udp_port);
++          else {
++            selectedHostPorts = { ip: host.ip, tcpPort: host.tcp_port, udpPort: host.udp_port };
++            byId('direct-ip').value = host.ip;
++            byId('direct-pin').value = '';
++            byId('direct-pin').focus();
++          }
+         });
+         connect.dataset.action = 'connect'; connect.disabled = host.online !== true || connection.snapshot().busy || !tauriApi;
+         if (host.online !== true) connect.title = 'Offline discovery record. Use Direct connection to try an address explicitly.';
+@@ -468,11 +743,16 @@
+     }
+     function clearSearch() { byId('host-search').value = ''; library.setQuery(''); byId('host-search').focus(); }
+     function refreshHosts() { return library.refresh(); }
+-    function connectToHost(ip, name, pin = null) {
++    let selectedHostPorts = null;
++    function connectToHost(ip, name, pin = null, tcpPort = null, udpPort = null) {
+       if (!connection.snapshot().busy) returnFocus = document.activeElement;
+-      return connection.connect({ host: ip, name, pin });
++      return connection.connect({ host: ip, name, pin, tcpPort, udpPort });
++    }
++    function connectDirect() {
++      const ip = byId('direct-ip').value;
++      const ports = (selectedHostPorts && selectedHostPorts.ip === ip) ? selectedHostPorts : {};
++      return connectToHost(ip, ip.trim(), byId('direct-pin').value, ports.tcpPort, ports.udpPort);
+     }
+-    function connectDirect() { return connectToHost(byId('direct-ip').value, byId('direct-ip').value.trim(), byId('direct-pin').value); }
+     function cancelConnecting() { return connection.cancel(); }
+     function doDisconnect() { return connection.disconnect(); }
+     function endSessionToHome() { return doDisconnect(); }
+@@ -540,6 +820,7 @@
+       for (const [id, key] of [['frames', 'frames_received'], ['decoded', 'frames_decoded'], ['audio', 'audio_packets_received']]) text('session-stat-' + id, stats?.[key] == null ? '—' : String(stats[key]));
+       text('session-stats-notice', state.statsError || ''); byId('session-stats-notice').hidden = !state.statsError;
+       if (!connection.isCurrent(connection.token())) {
++        audioPending = null; audioState = null; audioError = null; audioReportedError = null; renderAudioControls();
+         stopPresentation(); text('session-stat-fps', 'Rendered FPS —');
+       } else if (!renderLoopActive) {
+         renderLoopActive = true; sessionGeneration = connection.token(); frameCount = 0; lastFpsCalcTime = performance.now();
+@@ -549,10 +830,13 @@
+       previousPhase = state.phase;
+       if (phaseChanged) {
+         if (state.phase === 'connecting') { byId('direct-pin').value = ''; byId('session-error').hidden = true; }
++        if (state.phase === 'waiting-video') applySavedBitrate();
+         if (modal) byId('btn-cancel-connect').focus();
+         if (state.phase === 'streaming') canvas.focus();
+         if (!visible) {
+           byId('direct-pin').value = ''; launcherState.setExpanded(false);
++          collapseOverlayBar();
++          releasePointerLock();
+           if (gl) gl.clear(gl.COLOR_BUFFER_BIT);
+           if (document.fullscreenElement) document.exitFullscreen().catch(showSessionError);
+           if (nativeFullscreenActive) exitNativeFullscreen();
+@@ -564,7 +848,46 @@
+ 
+     function toggleLauncherPanel() {
+       launcherState.toggleExpanded();
++      if (launcherState.getExpanded()) audioCommand('list_audio_devices');
++    }
++
++    function collapseOverlayBar() {
++      const bar = byId('launcher-bar');
++      bar.classList.add('collapsed');
++      byId('btn-overlay-toggle').setAttribute('aria-expanded', 'false');
++    }
++    byId('btn-overlay-toggle').addEventListener('click', () => {
++      const open = byId('launcher-bar').classList.toggle('collapsed') === false;
++      byId('btn-overlay-toggle').setAttribute('aria-expanded', String(open));
++    });
++
++    const QUALITY_STORAGE_KEY = 'erd-quality-mbps';
++    function savedBitrateMbps() {
++      const saved = Number(window.localStorage.getItem(QUALITY_STORAGE_KEY));
++      return Number.isInteger(saved) && saved >= 1 && saved <= 300 ? saved : 50;
++    }
++    function applySavedBitrate() {
++      const mbps = savedBitrateMbps();
++      byId('session-quality').value = String(mbps);
++      if (tauriApi) invoke('set_bitrate', { bitrateMbps: mbps }).catch((err) => {
++        const notice = byId('session-quality-error');
++        notice.textContent = `Bitrate apply failed: ${err}`;
++        notice.hidden = false;
++      });
+     }
++    byId('session-quality').addEventListener('change', () => {
++      const mbps = Number(byId('session-quality').value);
++      window.localStorage.setItem(QUALITY_STORAGE_KEY, String(mbps));
++      if (tauriApi && isConnected) {
++        invoke('set_bitrate', { bitrateMbps: mbps }).then(() => {
++          byId('session-quality-error').hidden = true;
++        }, (err) => {
++          const notice = byId('session-quality-error');
++          notice.textContent = `Bitrate apply failed: ${err}`;
++          notice.hidden = false;
++        });
++      }
++    });
+ 
+     let nativeFullscreenActive = false;
+ 
+@@ -623,6 +946,14 @@
+     }
+ 
+     setInterval(() => connection.refreshStats(), 500);
++    setInterval(() => { if (isConnected) refreshAudioStatus(); }, 500);
++    setInterval(() => {
++      if (document.hidden) return;
++      if (isConnected) return;
++      if (connection.snapshot().busy) return;
++      if (library.snapshot().status === 'loading') return;
++      library.refresh();
++    }, 3000);
+ 
+     let pendingPointer = null;
+     let pointerRaf = null;
+@@ -699,22 +1030,73 @@
+       });
+     }
+ 
++    function sendRelativePointerEvent(e) {
++      if (!isConnected) return;
++      const dx = (typeof e.movementX === 'number') ? e.movementX : 0;
++      const dy = (typeof e.movementY === 'number') ? e.movementY : 0;
++      if (dx === 0 && dy === 0) return;
++
++      let mod = 0;
++      if (e.shiftKey) mod |= 1;
++      if (e.ctrlKey) mod |= 2;
++      if (e.altKey) mod |= 4;
++      if (e.metaKey) mod |= 8;
++
++      const event = {
++        event_type: 'RelativeMove',
++        x: lastPointer.x,
++        y: lastPointer.y,
++        view_width: lastPointer.viewWidth || 1280,
++        view_height: lastPointer.viewHeight || 800,
++        modifiers: mod,
++        scroll_dx: dx,
++        scroll_dy: dy
++      };
++
++      if (pendingPointer && pendingPointer.event_type === 'RelativeMove') {
++        pendingPointer.scroll_dx += dx;
++        pendingPointer.scroll_dy += dy;
++        pendingPointer.modifiers = mod;
++      } else {
++        flushPointerMotion();
++        pendingPointer = event;
++        if (pointerRaf === null) pointerRaf = requestAnimationFrame(flushPointerMotion);
++      }
++    }
++
++    function mapMouseButton(button) {
++      if (button === 0) return 'left';
++      if (button === 1) return 'middle';
++      if (button === 2) return 'right';
++      return null;
++    }
++
++    function mouseButtonEventType(button, isDown) {
++      if (button === 'left') return isDown ? 'LeftMouseDown' : 'LeftMouseUp';
++      if (button === 'middle') return isDown ? 'MiddleMouseDown' : 'MiddleMouseUp';
++      if (button === 'right') return isDown ? 'RightMouseDown' : 'RightMouseUp';
++      return null;
++    }
++
+     const viewport = document.getElementById('viewport');
+ 
+     viewport.addEventListener('mousedown', (e) => {
+       if (!isConnected) return;
+       viewport.focus();
+       canvas.focus();
+-      const button = e.button === 2 ? 'right' : 'left';
++      const button = mapMouseButton(e.button);
++      if (!button) return;
++      if (e.button === 1) e.preventDefault();
+       heldInputs.mouseDown(button);
+-      sendPointerEvent(button === 'right' ? 'RightMouseDown' : 'LeftMouseDown', e);
++      sendPointerEvent(mouseButtonEventType(button, true), e);
+     });
+ 
+     window.addEventListener('mouseup', (e) => {
+-      const button = e.button === 2 ? 'right' : 'left';
++      const button = mapMouseButton(e.button);
++      if (!button) return;
+       if (heldInputs.isButtonDown(button)) {
+         heldInputs.mouseUp(button);
+-        sendPointerEvent(button === 'right' ? 'RightMouseUp' : 'LeftMouseUp', e);
++        sendPointerEvent(mouseButtonEventType(button, false), e);
+       }
+     });
+ 
+@@ -734,14 +1116,24 @@
+       releaseLocalInputs();
+     });
+ 
+-    window.addEventListener('blur', releaseLocalInputs);
++    window.addEventListener('blur', () => {
++      releasePointerLock();
++      releaseLocalInputs();
++    });
+     document.addEventListener('visibilitychange', () => {
+-      if (document.hidden) releaseLocalInputs();
++      if (document.hidden) {
++        releasePointerLock();
++        releaseLocalInputs();
++      }
+     });
+ 
+     viewport.addEventListener('mousemove', (e) => {
+-      if (heldInputs.isButtonDown('left') || heldInputs.isButtonDown('right')) {
+-        sendPointerEvent(e.buttons === 2 ? 'RightMouseDragged' : 'LeftMouseDragged', e);
++      if (isPointerLocked()) {
++        sendRelativePointerEvent(e);
++      } else if (heldInputs.isButtonDown('left')) {
++        sendPointerEvent('LeftMouseDragged', e);
++      } else if (heldInputs.isButtonDown('right')) {
++        sendPointerEvent('RightMouseDragged', e);
+       } else {
+         sendPointerEvent('MouseMove', e);
+       }
+@@ -828,6 +1220,11 @@
+     });
+ 
+     byId('direct-form').addEventListener('submit', event => { event.preventDefault(); connectDirect(); });
++    byId('audio-volume').addEventListener('input', event => text('audio-volume-value', `${event.target.value}%`));
++    byId('audio-volume').addEventListener('change', event => audioCommand('set_audio_volume', {volume:Number(event.target.value) / 100}));
++    byId('btn-audio-mute').addEventListener('click', () => audioCommand('set_audio_muted', {muted:!audioState?.muted}));
++    byId('btn-audio-apply').addEventListener('click', () => audioCommand('set_audio_device', {deviceId:byId('audio-device').value || null}, true));
++    byId('btn-audio-refresh').addEventListener('click', () => audioCommand('list_audio_devices'));
+     byId('host-search').addEventListener('input', event => library.setQuery(event.target.value));
+     byId('btn-clear-search').addEventListener('click', clearSearch);
+     byId('btn-refresh').addEventListener('click', refreshHosts);
+@@ -836,7 +1233,7 @@
+     byId('filter-favorites').addEventListener('click', () => library.setFavoritesOnly(!library.snapshot().favoritesOnly));
+     byId('nav-computers').addEventListener('click', () => library.clearFilters());
+     byId('nav-favorites').addEventListener('click', () => library.setFavoritesOnly(true));
+-    for (const [id, action] of [['btn-home', endSessionToHome], ['btn-disconnect', doDisconnect], ['btn-expand', toggleLauncherPanel], ['btn-fullscreen', toggleSessionFullscreen], ['btn-cancel-connect', cancelConnecting], ['btn-retry-cleanup', () => connection.retryCleanup()]]) byId(id).addEventListener('click', action);
++    for (const [id, action] of [['btn-home', endSessionToHome], ['btn-disconnect', doDisconnect], ['btn-expand', toggleLauncherPanel], ['btn-fullscreen', toggleSessionFullscreen], ['btn-pointer-lock', togglePointerLock], ['btn-cancel-connect', cancelConnecting], ['btn-retry-cleanup', () => connection.retryCleanup()]]) byId(id).addEventListener('click', action);
+     byId('btn-dismiss-session-error').addEventListener('click', () => { byId('session-error').hidden = true; });
+     connectingModal.addEventListener('keydown', event => {
+       if (event.key === 'Tab') { event.preventDefault(); byId('btn-cancel-connect').focus(); }
+@@ -844,6 +1241,7 @@
+     document.addEventListener('focusin', event => { if (!SessionOverlay.shouldForwardKeyboardEvent(event)) releaseLocalInputs(); });
+     library.subscribe(renderLibrary); connection.subscribe(renderConnection);
+     renderLibrary(library.snapshot()); renderConnection(connection.snapshot());
++    updatePointerLockUi();
+     window.addEventListener('DOMContentLoaded', refreshHosts);
+   </script>
+ </body>
+diff --git a/clients/rust/tauri-shell/tests/page-harness.mjs b/clients/rust/tauri-shell/tests/page-harness.mjs
+index 9bf31f9..6765029 100644
+--- a/clients/rust/tauri-shell/tests/page-harness.mjs
++++ b/clients/rust/tauri-shell/tests/page-harness.mjs
+@@ -43,9 +43,9 @@ function bootstrap({ noGl, fullscreenFailure }) {
+   f.tick = () => { const callbacks = [...f.raf.values()]; f.raf.clear(); return Promise.all(callbacks.map(fn => fn(performance.now()))); };
+   const getContext = HTMLCanvasElement.prototype.getContext;
+   HTMLCanvasElement.prototype.getContext = function(kind, ...args) {
+-    if (noGl && kind === 'webgl2') return null;
++    if (noGl && (kind === 'webgl2' || kind === 'webgl' || kind === 'experimental-webgl')) return null;
+     const gl = getContext.call(this, kind, ...args);
+-    if (gl && kind === 'webgl2') {
++    if (gl && (kind === 'webgl2' || kind === 'webgl')) {
+       const draw = gl.drawArrays.bind(gl);
+       gl.drawArrays = (...values) => { f.draws++; return draw(...values); };
+     }
+diff --git a/clients/rust/tauri-shell/ui/index.html b/clients/rust/tauri-shell/ui/index.html
+index a188deb..71cb061 100644
+--- a/clients/rust/tauri-shell/ui/index.html
++++ b/clients/rust/tauri-shell/ui/index.html
+@@ -268,41 +268,104 @@
+     document.addEventListener('pointerlockchange', updatePointerLockUi);
+     document.addEventListener('pointerlockerror', updatePointerLockUi);
+ 
+-    let gl = canvas.getContext('webgl2');
++    let gl = null;
++    let isWebGL2 = false;
+     let program = null;
+     let yTexture = null;
+     let uvTexture = null;
+     let lastRenderWidth = 0;
+     let lastRenderHeight = 0;
++    let glInitFailed = false;
+ 
+-    if (gl) {
+-      const vsSource = `#version 300 es
+-        in vec2 a_pos;
+-        in vec2 a_texCoord;
+-        out vec2 v_texCoord;
+-        void main() {
+-          gl_Position = vec4(a_pos, 0.0, 1.0);
+-          v_texCoord = a_texCoord;
+-        }
+-      `;
+-      const fsSource = `#version 300 es
+-        precision highp float;
+-        in vec2 v_texCoord;
+-        out vec4 fragColor;
+-        uniform sampler2D u_yPlane;
+-        uniform sampler2D u_uvPlane;
+-        void main() {
+-          float y = (texture(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
+-          vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(128.0 / 255.0, 128.0 / 255.0);
+-          float u = uv.r * (255.0 / 224.0);
+-          float v = uv.g * (255.0 / 224.0);
+-
+-          float r = y + 1.402 * v;
+-          float g = y - 0.344136 * u - 0.714136 * v;
+-          float b = y + 1.772 * u;
+-          fragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
+-        }
+-      `;
++    function initGl(force = false) {
++      if (gl && !gl.isContextLost() && program && gl.getProgramParameter(program, gl.LINK_STATUS)) {
++        return true;
++      }
++      if (glInitFailed && !force) return false;
++
++      program = null;
++      yTexture = null;
++      uvTexture = null;
++      lastRenderWidth = 0;
++      lastRenderHeight = 0;
++
++      const glOpts = {
++        alpha: false,
++        depth: false,
++        antialias: false,
++        preserveDrawingBuffer: false,
++        powerPreference: 'high-performance'
++      };
++
++      gl = canvas.getContext('webgl2', glOpts);
++      isWebGL2 = !!gl;
++      if (!gl) {
++        gl = canvas.getContext('webgl', glOpts);
++        isWebGL2 = false;
++      }
++      if (!gl) {
++        glInitFailed = true;
++        return false;
++      }
++      glInitFailed = false;
++
++      let vsSource, fsSource;
++      if (isWebGL2) {
++        vsSource = `#version 300 es
++          in vec2 a_pos;
++          in vec2 a_texCoord;
++          out vec2 v_texCoord;
++          void main() {
++            gl_Position = vec4(a_pos, 0.0, 1.0);
++            v_texCoord = a_texCoord;
++          }
++        `;
++        fsSource = `#version 300 es
++          precision highp float;
++          in vec2 v_texCoord;
++          out vec4 fragColor;
++          uniform sampler2D u_yPlane;
++          uniform sampler2D u_uvPlane;
++          void main() {
++            float y = (texture(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
++            vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(128.0 / 255.0, 128.0 / 255.0);
++            float u = uv.r * (255.0 / 224.0);
++            float v = uv.g * (255.0 / 224.0);
++
++            float r = y + 1.402 * v;
++            float g = y - 0.344136 * u - 0.714136 * v;
++            float b = y + 1.772 * u;
++            fragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
++          }
++        `;
++      } else {
++        vsSource = `
++          attribute vec2 a_pos;
++          attribute vec2 a_texCoord;
++          varying vec2 v_texCoord;
++          void main() {
++            gl_Position = vec4(a_pos, 0.0, 1.0);
++            v_texCoord = a_texCoord;
++          }
++        `;
++        fsSource = `
++          precision highp float;
++          varying vec2 v_texCoord;
++          uniform sampler2D u_yPlane;
++          uniform sampler2D u_uvPlane;
++          void main() {
++            float y = (texture2D(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
++            vec2 uv = texture2D(u_uvPlane, v_texCoord).ra - vec2(128.0 / 255.0, 128.0 / 255.0);
++            float u = uv.r * (255.0 / 224.0);
++            float v = uv.g * (255.0 / 224.0);
++
++            float r = y + 1.402 * v;
++            float g = y - 0.344136 * u - 0.714136 * v;
++            float b = y + 1.772 * u;
++            gl_FragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
++          }
++        `;
++      }
+ 
+       function createShader(type, src) {
+         const s = gl.createShader(type);
+@@ -322,6 +385,7 @@
+       gl.linkProgram(program);
+       if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+         console.error("Program link error:", gl.getProgramInfoLog(program));
++        return false;
+       }
+       gl.useProgram(program);
+ 
+@@ -363,10 +427,29 @@
+ 
+       gl.uniform1i(gl.getUniformLocation(program, "u_yPlane"), 0);
+       gl.uniform1i(gl.getUniformLocation(program, "u_uvPlane"), 1);
++      return true;
+     }
+ 
++    canvas.addEventListener('webglcontextlost', (e) => {
++      e.preventDefault();
++      gl = null;
++      program = null;
++      glInitFailed = false;
++    }, false);
++
++    canvas.addEventListener('webglcontextrestored', () => {
++      initGl(true);
++    }, false);
++
++    // Initial setup
++    initGl(true);
++
+     function renderNv12(width, height, yData, uvData) {
+-      if (!gl || gl.isContextLost() || !gl.getProgramParameter(program, gl.LINK_STATUS)) return false;
++      if (!initGl() || !gl || gl.isContextLost() || !program || !gl.getProgramParameter(program, gl.LINK_STATUS)) return false;
++
++      const uvWidth = Math.floor(width / 2);
++      const uvHeight = Math.ceil(height / 2);
++
+       if (lastRenderWidth !== width || lastRenderHeight !== height) {
+         canvas.width = width;
+         canvas.height = height;
+@@ -376,22 +459,38 @@
+ 
+         gl.activeTexture(gl.TEXTURE0);
+         gl.bindTexture(gl.TEXTURE_2D, yTexture);
+-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, null);
++        if (isWebGL2) {
++          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, null);
++        } else {
++          gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width, height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, null);
++        }
+ 
+         gl.activeTexture(gl.TEXTURE1);
+         gl.bindTexture(gl.TEXTURE_2D, uvTexture);
+-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, width / 2, height / 2, 0, gl.RG, gl.UNSIGNED_BYTE, null);
++        if (isWebGL2) {
++          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, uvWidth, uvHeight, 0, gl.RG, gl.UNSIGNED_BYTE, null);
++        } else {
++          gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE_ALPHA, uvWidth, uvHeight, 0, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, null);
++        }
+       }
+ 
+       gl.activeTexture(gl.TEXTURE0);
+       gl.bindTexture(gl.TEXTURE_2D, yTexture);
+       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, yData);
++      if (isWebGL2) {
++        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, yData);
++      } else {
++        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.LUMINANCE, gl.UNSIGNED_BYTE, yData);
++      }
+ 
+       gl.activeTexture(gl.TEXTURE1);
+       gl.bindTexture(gl.TEXTURE_2D, uvTexture);
+       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width / 2, height / 2, gl.RG, gl.UNSIGNED_BYTE, uvData);
++      if (isWebGL2) {
++        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, gl.RG, gl.UNSIGNED_BYTE, uvData);
++      } else {
++        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, uvData);
++      }
+ 
+       gl.drawArrays(gl.TRIANGLES, 0, 6);
+       return true;
+@@ -433,7 +532,9 @@
+           const width = view.getUint32(0, true);
+           const height = view.getUint32(4, true);
+           const yLen = width * height;
+-          const uvLen = width * (height / 2);
++          const uvWidth = Math.floor(width / 2);
++          const uvHeight = Math.ceil(height / 2);
++          const uvLen = uvWidth * uvHeight * 2;
+ 
+           if (rawBuf.byteLength >= 16 + yLen + uvLen) {
+             const yData = new Uint8Array(rawBuf, 16, yLen);
+@@ -442,7 +543,7 @@
+               frameCount++;
+               connection.markFrameRendered(generation);
+             } else {
+-              await connection.reportFrameError(generation, 'WebGL2 video rendering is unavailable');
++              await connection.reportFrameError(generation, 'Video rendering is unavailable (WebGL context could not be created)');
+             }
+ 
+             if (rawBuf.byteLength >= 16 + yLen + uvLen + 9) {
+diff --git a/clients/rust/tauri-shell/ui/performance.test.mjs b/clients/rust/tauri-shell/ui/performance.test.mjs
+index 52c9e03..4f2286b 100644
+--- a/clients/rust/tauri-shell/ui/performance.test.mjs
++++ b/clients/rust/tauri-shell/ui/performance.test.mjs
+@@ -13,7 +13,7 @@ function deferred() {
+   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+   return { promise, resolve, reject };
+ }
+-function harness({ webgl2 = true } = {}) {
++function harness({ webgl2 = true, webgl = false } = {}) {
+   let now = 100, nextId = 0, lost = false;
+   const raf = new Map(), calls = [], polls = [], alerts = [], draws = [], uploads = [], contexts = [], intervals = [];
+   const gl = new Proxy({}, { get: (_, key) => {
+@@ -31,7 +31,12 @@ function harness({ webgl2 = true } = {}) {
+       setAttribute() {}, addEventListener() {}, focus() {}, closest() { return null; },
+       replaceChildren(...nodes) { this.children = nodes; }, append(...nodes) { this.children.push(...nodes); },
+       getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+-      getContext: kind => { contexts.push(kind); return kind === 'webgl2' && !webgl2 ? null : gl; },
++      getContext: kind => {
++        contexts.push(kind);
++        if (kind === 'webgl2') return webgl2 ? gl : null;
++        if (kind === 'webgl' || kind === 'experimental-webgl') return webgl ? gl : null;
++        return null;
++      },
+     });
+     return elements.get(id);
+   };
+@@ -124,11 +129,11 @@ for (const reconnect of [false, true]) test(`old deferred poll after stop${recon
+     assert.equal(h.draws.length, 1); assert.equal(h.raf.size, 1);
+   }
+ });
+-test('unavailable WebGL2 rejects via connection error path without WebGL1 fallback', async () => {
+-  const h = harness({ webgl2: false }); await h.connect();
++test('unavailable WebGL rejects via connection error path when all WebGL contexts fail', async () => {
++  const h = harness({ webgl2: false, webgl: false }); await h.connect();
+   const tick = h.tick(); h.polls[0].resolve(frame());
+   h.disconnect.resolve(); await tick;
+-  assert.deepEqual(h.contexts, ['webgl2']); assert.equal(h.alerts.length, 0);
++  assert.deepEqual(h.contexts, ['webgl2', 'webgl']); assert.equal(h.alerts.length, 0);
+   assert.equal(h.element('direct-error').hidden, false);
+   assert.ok(h.element('direct-error').textContent.length > 0);
+   assert.equal(h.run('connection.snapshot().phase'), 'error');
+@@ -136,6 +141,13 @@ test('unavailable WebGL2 rejects via connection error path without WebGL1 fallba
+   assert.equal(h.draws.length, 0); assert.equal(h.raf.size, 0);
+   assert.equal(h.run('isConnected'), false);
+ });
++test('WebGL1 fallback renders successfully when WebGL2 is unavailable', async () => {
++  const h = harness({ webgl2: false, webgl: true }); await h.connect();
++  const tick = h.tick(); h.polls[0].resolve(frame()); await tick;
++  assert.deepEqual(h.contexts, ['webgl2', 'webgl']);
++  assert.equal(h.draws.length, 1);
++  assert.equal(h.run('connection.snapshot().phase'), 'streaming');
++});
+ test('renderer reports draw status and preserves texture reuse; lost context never counts', async () => {
+   const h = harness();
+   assert.equal(h.run('renderNv12(2, 2, new Uint8Array(4), new Uint8Array(2))'), true);
+

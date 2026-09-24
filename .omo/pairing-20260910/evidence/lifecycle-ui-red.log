@@ -1,0 +1,67 @@
+=== Phase D (R6) RED Test Execution Log ===
+Timestamp: 2026-09-10
+Task IDs: st_01a08a4b, st_01a08d7a
+Command: bun test clients/rust/ios-shell/ui/test/connection-state.test.mjs clients/rust/ios-shell/ui/test/discovery.test.mjs
+Runner: bun test v1.4.0 (34cbb9a40)
+
+Lead Blockers & Comprehensive Lifecycle Mutation Targets Verified RED:
+
+1. "lead_disconnect_waits_for_pending_connect"
+   Expected: Cleanup must not settle and state remains 'disconnecting' with busy=true until connect settles.
+   Actual: AssertionError: true !== false (Cleanup settled prematurely because of Promise.race([connectToSettle, Promise.resolve()]) bypass)
+
+2. "lead_disconnected_stats_end_ui_session"
+   Expected: Upon pollStats returning { state: "disconnected", last_error: "remote-closed" }, manager leaves waiting-video, retains error, executes native disconnect, and settles to 'error' with busy=false and hasOwnedSession=false.
+   Actual: Timed out waiting for disconnect invoke because unpatched pollStats only checked state === 'error' and ignored native 'disconnected' terminal state.
+
+3. "disconnect during pending connect: order B where disconnect settles before connect"
+   Expected: When disconnect resolves first, cleanup does not complete while connect is still pending.
+   Actual: AssertionError: true !== false (Cleanup finished prematurely before connect settled)
+
+4. "final subscription snapshot reports busy=false when ownership and connect truly ended"
+   Expected: Final snapshot emitted to subscribers reports busy=false.
+   Actual: AssertionError: true !== false (Last emitted snapshot reported busy=true because emit() was called before pendingCleanup was cleared in finally)
+
+5. Target 1 RED (Resource ownership in-flight retention):
+   Test: "resource ownership: disconnect during streaming maintains owned session and busy until native invoke completes"
+   Command: bun test clients/rust/ios-shell/ui/test/connection-state.test.mjs --test-name-pattern "resource ownership: disconnect during streaming maintains owned session and busy until native invoke completes"
+   Mutation: Temporarily clear `hasOwnedSession = false` before native disconnect resolves in `disconnectInternal`.
+   Actual Output:
+     AssertionError: hasOwnedSession must remain true during in-flight disconnect
+     false !== true
+     (fail) resource ownership: disconnect during streaming maintains owned session and busy until native invoke completes [2.66ms]
+     Exit code 1.
+
+6. Target 2 RED (Concurrent cleanup promise sharing):
+   Test: "concurrent disconnect, cancel, dismissError, and retryCleanup share identical in-flight cleanup promise"
+   Command: bun test clients/rust/ios-shell/ui/test/connection-state.test.mjs --test-name-pattern "concurrent disconnect, cancel, dismissError, and retryCleanup share identical in-flight cleanup promise"
+   Mutation: Temporarily bypass `pendingCleanup` cache in `disconnectInternal`.
+   Actual Output:
+     AssertionError: All concurrent cleanup callers must receive identical promise reference
+     Promise { <pending> } !== Promise { <pending> }
+     (fail) concurrent disconnect, cancel, dismissError, and retryCleanup share identical in-flight cleanup promise [4.69ms]
+     Exit code 1.
+
+7. Target 3 RED (Stale generation rejection isolation):
+   Test: "stale connect rejection after disconnect cannot transition state to error or overwrite lastError"
+   Command: bun test clients/rust/ios-shell/ui/test/connection-state.test.mjs --test-name-pattern "stale connect rejection after disconnect cannot transition state to error or overwrite lastError"
+   Mutation: Temporarily bypass `currentGen !== generation` check in `connect` catch block.
+   Actual Output:
+     AssertionError: Stale connect rejection must not set lastError
+     + actual - expected
+     + 'late connection timeout'
+     - null
+     (fail) stale connect rejection after disconnect cannot transition state to error or overwrite lastError [2.30ms]
+     Exit code 1.
+
+8. Target 4 RED (Zero PIN fallback on saved pairing rejection):
+   Test: "saved pairing connection rejection preserves exact failure reason without PIN fallback or duplicate retry"
+   Command: bun test clients/rust/ios-shell/ui/test/connection-state.test.mjs --test-name-pattern "saved pairing connection rejection preserves exact failure reason without PIN fallback or duplicate retry"
+   Mutation: Temporarily inject automatic fallback to PIN "12345678" upon saved pairing connect failure.
+   Actual Output:
+     AssertionError: Saved pairing failure must never trigger second connect attempt with PIN
+     2 !== 1
+     (fail) saved pairing connection rejection preserves exact failure reason without PIN fallback or duplicate retry [2.09ms]
+     Exit code 1.
+
+All regression targets confirmed failing RED against unpatched / mutated behavior.

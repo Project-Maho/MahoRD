@@ -1,0 +1,62 @@
+=== R10 Interface-Name Resolver Hardened Positive Evidence ===
+Date: 2026-09-10
+Task ID: st_01a08a59 (Follow-Up)
+Target: indo@100.91.254.71 (/home/indo/projects/erd-pairing-20260910)
+Description: Demonstrates that the strengthened test suite (with explicit POSIX platform cfg guards for Linux/macOS/iOS, libc::if_nametoindex / libc_compat querying, SAFETY documentation, positive index assertion, exact resolver equality assertion, and negative invalid interface rejection) passes reliably on the supported runner.
+
+Command:
+ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:\$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p erd-net --test discovery_scoped_ipv6 --test discovery_metadata"
+
+Exit code: 0
+
+Output:
+   Compiling erd-net v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/erd-net)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.80s
+     Running tests/discovery_metadata.rs (clients/rust/target/debug/deps/discovery_metadata-1c7355981dce07a4)
+
+running 18 tests
+test parse_service_metadata_accepts_publicly_numbered_ethernet_ip ... ok
+test parse_service_metadata_accepts_valid_v3_records_and_prefers_ipv4 ... ok
+test parse_service_metadata_rejects_invalid_fullname ... ok
+test parse_service_metadata_rejects_missing_protocol ... ok
+test parse_service_metadata_rejects_oversized_metadata ... ok
+test parse_service_metadata_rejects_unscoped_ipv6_link_local_only ... ok
+test parse_service_metadata_rejects_unspecified_only_addresses ... ok
+test parse_service_metadata_rejects_loopback_only_addresses ... ok
+test parse_service_metadata_rejects_empty_addresses ... ok
+test parse_service_metadata_rejects_unsupported_protocol ... ok
+test parse_service_metadata_rejects_zero_or_missing_ports ... ok
+test tracker_add_service_makes_host_visible_in_snapshot ... ok
+test tracker_address_replacement_updates_existing_entry ... ok
+test tracker_clear_resets_snapshot_to_empty ... ok
+test tracker_remove_service_removes_host_from_snapshot ... ok
+test parse_service_metadata_rejects_multicast_only_addresses ... ok
+test parse_service_metadata_accepts_usable_ipv6_when_ipv4_absent ... ok
+test parse_service_metadata_rejects_out_of_range_udp_port ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/discovery_scoped_ipv6.rs (clients/rust/target/debug/deps/discovery_scoped_ipv6-2c04201a1ca7c202)
+
+running 9 tests
+test test_ipv4_preferred_over_scoped_ipv6_link_local ... ok
+test test_choose_preferred_endpoint_selects_scoped_ipv6_and_preserves_scope ... ok
+test test_parse_service_metadata_scoped_accepts_scoped_ipv6 ... ok
+test test_unscoped_ipv6_link_local_retracted ... ok
+test test_resolver_rejects_invalid_interface_name_scope ... ok
+test test_scoped_ipv6_link_local_with_scope_zero_retracted ... ok
+test test_resolver_resolves_interface_name_scope ... ok
+test test_scoped_ipv6_link_local_published ... ok
+test test_scoped_ipv6_published_string_and_resolver_retain_scope ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Clippy Verification:
+Command:
+ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:\$LD_LIBRARY_PATH cargo clippy --manifest-path clients/rust/Cargo.toml -p erd-net --tests -- -D warnings"
+
+Exit code: 0
+
+Output:
+    Checking erd-net v0.1.0 (/home/indo/projects/erd-pairing-20260910/clients/rust/erd-net)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.12s
