@@ -11,10 +11,14 @@ clients/rust/
 ├── Cargo.toml            # Workspace manifest declaring member crates
 ├── maho-proto/            # Wire protocol v3 serialization, packet definitions, crypto handshakes
 ├── maho-net/              # Tokio network transport (TLS-PSK TCP, UDP-GCM, STUN, signaling)
+├── maho-relay/            # WebSocket relay server (HMAC host registration, frame forwarding)
 ├── maho-decode/           # Video and audio decoding engines (FFmpeg / hardware)
 ├── maho-render/           # Cross-platform GPU rendering (wgpu / Metal / DirectX / Vulkan)
+├── maho-app/              # Client session, pairing store, headless CLI, MCP & HTTP automation
 ├── maho-host/             # Cross-platform host streaming daemon (macOS, Windows, Linux)
-└── tauri-shell/          # Tauri v2 desktop client application GUI
+├── maho-mobile/           # Shared mobile input, lifecycle and storage abstractions
+├── tauri-shell/           # Tauri v2 desktop client application GUI (React/Vite under `src/`)
+└── ios-shell/             # iOS Tauri application (VideoToolbox, Keychain)
 ```
 
 ## WHERE TO LOOK
@@ -22,10 +26,12 @@ clients/rust/
 |------|----------|-------------------|
 | Wire Protocol & Codecs | `clients/rust/maho-proto` | `WireCodec`, `PacketHeader`, `CryptoSession` |
 | Network Transport & NAT | `clients/rust/maho-net` | `TlsPskStream`, `DatagramCipher`, `StunClient` |
+| Relay & Cross-Network | `clients/rust/maho-relay` | `main.rs`, `lib.rs` (relay token / HMAC) |
+| Client Session & Automation | `clients/rust/maho-app` | `ClientSession`, `mcp_server.rs`, `agent_server.rs`, `relay.rs` |
 | Video Decompression | `clients/rust/maho-decode` | `VideoDecoder`, `FfmpegDecoder` |
 | GPU Surface Rendering | `clients/rust/maho-render` | `Renderer`, `WgpuRenderer` |
 | Host Capture & Streaming | `clients/rust/maho-host` | `HostServer`, `ScreenCapture`, `VideoEncoder` |
-| Client Desktop Application | `clients/rust/tauri-shell` | `src-tauri/src/main.rs`, `ui/` |
+| Client Desktop Application | `clients/rust/tauri-shell` | `src-tauri/src/lib.rs`, `src/lib/`, `src/features/` |
 
 ## CONVENTIONS
 - Build and test commands run with `--manifest-path clients/rust/Cargo.toml`.

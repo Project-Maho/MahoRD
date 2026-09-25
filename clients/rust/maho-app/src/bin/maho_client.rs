@@ -29,7 +29,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 #[derive(Parser)]
 #[command(
     name = "maho-client",
-    about = "MahoRD headless testing client for VM E2E driving",
+    about = "MahoRD headless client: frame smoke tests plus MCP and HTTP automation",
     version
 )]
 struct Cli {

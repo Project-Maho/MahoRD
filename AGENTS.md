@@ -12,11 +12,14 @@ Ultra-low latency Remote Desktop system built 100% in Rust with a Tauri v2 deskt
 └── clients/rust/     # Cross-platform Rust workspace
     ├── maho-proto/    # Pure v3 wire codec, packet envelopes, ChaCha20-Poly1305 handshakes
     ├── maho-net/      # Tokio async networking (TLS-PSK TCP, UDP-GCM, STUN, signaling)
+    ├── maho-relay/    # WebSocket relay server: HMAC host registration, pre-encrypted frame forwarding
     ├── maho-decode/   # Video/audio decoding pipeline (FFmpeg / hardware)
     ├── maho-render/   # GPU renderer (wgpu / Metal / Vulkan / DirectX)
     ├── maho-app/      # Client session coordinator, pairing store, input & latency tracking
     ├── maho-host/     # Multi-platform host daemon (DXGI, Hyprland, SCK capture; MF, VAAPI, VT encode)
-    └── tauri-shell/  # Tauri v2 desktop GUI client
+    ├── maho-mobile/   # Shared mobile input, lifecycle and storage abstractions
+    ├── tauri-shell/   # Tauri v2 desktop GUI client (React/Vite under `src/`)
+    └── ios-shell/     # iOS Tauri application (VideoToolbox, Keychain)
 ```
 
 ## WHERE TO LOOK
@@ -25,8 +28,9 @@ Ultra-low latency Remote Desktop system built 100% in Rust with a Tauri v2 deskt
 | Rust Multiplatform Host | `clients/rust/maho-host/` | `session.rs`, `capture_macos.rs`, `capture_windows.rs`, `capture_linux.rs` |
 | Rust Protocol & Framing | `clients/rust/maho-proto/` | `packet.rs`, `framing.rs`, `handshake.rs`, `control.rs` |
 | Rust Async Network Layer | `clients/rust/maho-net/` | `tls_psk.rs`, `udp_gcm.rs`, `stun.rs`, `signaling.rs` |
-| Rust Client Session & Pairing | `clients/rust/maho-app/` | `session.rs`, `pairing.rs`, `input.rs` |
-| Rust Tauri Desktop Client | `clients/rust/tauri-shell/` | `src-tauri/src/main.rs`, `src-tauri/src/lib.rs`, `ui/` |
+| Rust Relay Server | `clients/rust/maho-relay/` | `main.rs` (HTTP health + WS bridge), `lib.rs` (token/HMAC) |
+| Rust Client Session & Pairing | `clients/rust/maho-app/` | `session.rs`, `pairing.rs`, `input.rs`, `relay.rs` |
+| Rust Tauri Desktop Client | `clients/rust/tauri-shell/` | `src-tauri/src/lib.rs`, `src/lib/`, `src/features/`, `tests/` |
 
 ## CODE MAP
 | Symbol | Type | Location | Role |

@@ -12,8 +12,8 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "maho-host",
     version,
-    about = "MahoRD v3 screen streaming host",
-    long_about = "MahoRD v3 macOS screen streaming host.\n\nFirst run: macOS prompts for Screen Recording and Accessibility. Grant both in System Settings > Privacy & Security, then relaunch the host. Screen Recording is required for capture; Accessibility is required for remote input injection."
+    about = "MahoRD screen streaming host for Windows, macOS, and Linux",
+    long_about = "MahoRD host daemon: captures, encodes, and streams this computer's screen to paired clients over an encrypted transport, with remote input injection and optional relay fallback.\n\nFirst run on macOS: the system prompts for Screen Recording and Accessibility. Grant both in System Settings > Privacy & Security, then relaunch the host. Screen Recording is required for capture; Accessibility is required for remote input injection."
 )]
 struct Cli {
     /// Use this exact 8-digit bootstrap PIN.

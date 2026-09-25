@@ -63,8 +63,9 @@ into your project's `.claude/skills/mahord-remote-control/` (Claude Code) or
 loader can receive that file as task context; tools must still be registered.
 
 Ask the agent to **inspect a screenshot, move the pointer, inspect again, and
-release input**. Ten MCP tools cover screenshots, screen geometry, pointer
-movement/click/drag/scroll, keys, hotkeys, text, and release. MCP uses
+release input**. Eleven MCP tools cover screenshots, screen geometry, waiting
+for a screen change, pointer movement/click/drag/scroll, keys, hotkeys, text,
+and release. MCP uses
 newline-delimited JSON-RPC on stdin/stdout; diagnostic logs go to stderr.
 Closing stdin ends the session.
 
@@ -96,6 +97,12 @@ Claude Desktop JSON, Codex TOML, exact HTTP requests, pairing, and limitations.
   Linux/Windows, PIN bootstrap, and persisted pairing records.
 - **Transport:** TLS-PSK control connections and authenticated UDP media with
   replay protection.
+- **Relay:** a standalone WebSocket relay that forwards pre-encrypted frames when
+  no direct route exists, with HMAC-authenticated host registration and automatic
+  client fallback.
+- **Windows secure desktop:** the `MahoRDHost` LocalSystem service spawns a
+  console session worker so the login/lock screen and the UAC secure desktop can
+  be streamed and driven remotely.
 - **Automation:** a headless client, loopback HTTP/WebSocket API, and stdio MCP
   interface for screen capture and input.
 - **Mobile:** shared Rust lifecycle/input code and an iOS Tauri application with
@@ -106,11 +113,11 @@ Claude Desktop JSON, Codex TOML, exact HTTP requests, pairing, and limitations.
 
 | Platform | Host | Client / verification |
 | --- | --- | --- |
-| Windows | DXGI capture, Media Foundation H.264 encoding, input and audio paths | Host streaming verified; desktop client code exists, but native Windows GUI QA is not complete |
+| Windows | DXGI capture, Media Foundation H.264 encoding, input and audio paths | Host streaming verified, including the login screen and UAC secure desktop through the `MahoRDHost` service; desktop client code exists, but native Windows GUI QA is not complete |
 | Linux / Hyprland | wlr-screencopy, FFmpeg encoding, uinput, PipeWire/PulseAudio | Host streaming verified; Linux desktop GUI QA is not complete |
 | Other Wayland compositors | Requires `zwlr_screencopy_v1`; verify compositor support | Not covered by the Hyprland test results |
 | KDE/GNOME Wayland and X11 | Capture backends are planned, not implemented | Do not infer host support from uinput support |
-| macOS | ScreenCaptureKit, VideoToolbox, native input paths | Desktop app launch and release CLI/API streaming verified; native GUI session QA remains incomplete |
+| macOS | ScreenCaptureKit, VideoToolbox, native input paths | Host daemon deployed and streaming verified; desktop app launch and release CLI/API streaming verified; native GUI session QA remains incomplete |
 | iOS | Not a host | App built and installed on a physical iPhone; full on-device stream/audio/input QA remains incomplete |
 | Android | Not a host | Shared Rust support code only; no runnable Android application yet |
 
@@ -123,7 +130,7 @@ The active workspace is **`clients/rust/Cargo.toml`**. The root Cargo workspace
 contains an earlier ScreenCaptureKit experiment, not the desktop application.
 
 ```sh
-git clone https://github.com/Indosaram/MahoRD.git
+git clone https://github.com/Project-Maho/MahoRD.git
 cd MahoRD
 rustup toolchain install stable
 ```
@@ -226,6 +233,7 @@ prevent discovery; a directly reachable address can still be used.
 | UDP 19731 | Encrypted media and related packets |
 | UDP 5353 | Local mDNS discovery |
 | TCP 19735 on loopback | Optional local automation API |
+| Outbound WSS (443) to a relay | Optional fallback when no direct route exists |
 
 ### 3. Run a headless smoke test
 
@@ -247,6 +255,40 @@ Discovery can also be inspected independently:
 cargo run --manifest-path clients/rust/Cargo.toml --locked \
   -p maho-net --bin maho-discover -- --timeout-secs 3
 ```
+
+## Reach a host on any network (relay)
+
+Direct connections need a reachable address: the same LAN, a tailnet, or port
+forwarding. When no direct route exists, both ends fall back to the WebSocket
+relay. The host registers on it, and the client and host then exchange the same
+pre-encrypted session frames over one outbound WSS connection; the relay only
+forwards bytes and cannot read the stream.
+
+Start the host with a relay and a stable host id. `MAHO_RELAY_URL` and
+`MAHO_RELAY_HOST_ID` provide the same values as environment variables:
+
+```sh
+export RELAY_AUTH_SECRET="$(openssl rand -hex 32)"  # shared with the client
+maho-host --relay wss://maho-relay.fly.dev --relay-host-id my-desktop
+```
+
+Pairings persist the relay URL and host id, so an established client retries the
+relay automatically after a direct-connect failure. A headless client can also
+request it explicitly:
+
+```sh
+maho-client --host HOST --pairing-id PAIRING-ID \
+  --pairing-store /absolute/path/to/pairings.json \
+  --relay-url wss://maho-relay.fly.dev --relay-host-id my-desktop
+```
+
+`RELAY_AUTH_SECRET` is required to register a host: it becomes an HMAC-SHA256
+token over the host id, so a third party cannot squat it. A client without the
+environment variable reads the same secret from `~/.maho-relay-secret`. Each
+relay frame carries a 17-byte `[session id][channel]` header, and payloads over
+2 MB are rejected. A public relay runs at `wss://maho-relay.fly.dev`; the
+`maho-relay` crate can also be self-hosted. See the
+[relay server plan](docs/relay-server-plan.md).
 
 ## Performance and verification limits
 
@@ -300,6 +342,7 @@ Client                        v
 | --- | --- |
 | `maho-proto` | Wire types, framing, handshake and protocol limits |
 | `maho-net` | TCP/UDP transport, replay protection, discovery, signaling and STUN |
+| `maho-relay` | Standalone WebSocket relay: HMAC host registration and pre-encrypted frame forwarding |
 | `maho-decode` | FFmpeg and iOS VideoToolbox decoding |
 | `maho-render` | Presentation and audio infrastructure |
 | `maho-app` | Sessions, pairing, frame queues, statistics, CLI and automation |
@@ -310,21 +353,28 @@ Client                        v
 
 ## Build and test
 
+CI enforces these gates for every change under `clients/rust/`
+([workflow](.github/workflows/rust-client.yml)):
+
 ```sh
-cargo test --manifest-path clients/rust/Cargo.toml --locked \
-  --workspace --exclude maho-ios
+cd clients/rust
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --exclude maho-ios
 
-bun test clients/rust/tauri-shell/ui/connection-state.test.mjs \
-  clients/rust/tauri-shell/ui/library.test.mjs \
-  clients/rust/tauri-shell/tests/app-icon.test.mjs
-
-node --test clients/rust/tauri-shell/ui/performance.test.mjs \
-  clients/rust/tauri-shell/ui/session-overlay.test.mjs
+cd tauri-shell
+bun install --frozen-lockfile
+bun test src
+bun test tests
+bunx tsc -b --noEmit
 ```
 
-The September 9 deployment passed Rust workspace tests and desktop UI checks.
-The macOS release CLI decoded frames from Linux and Windows hosts with screenshot,
-input and disconnect API verification. See [deployment evidence](docs/release-deployment-20260909.md).
+Frontend tests run with `bun test`; `node --test` is not part of the workflow.
+The workflow additionally builds and tests the workspace on macOS, Ubuntu, and
+Windows. Earlier live streaming evidence — the macOS release CLI decoding frames
+from Linux and Windows hosts with screenshot, input, and disconnect API
+verification — is recorded in
+[deployment evidence](docs/release-deployment-20260909.md).
 
 ## License
 
