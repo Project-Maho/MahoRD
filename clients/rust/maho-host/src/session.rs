@@ -805,7 +805,7 @@ fn hyprland_instance_candidates() -> Vec<String> {
             Some((modified.unwrap_or(std::time::UNIX_EPOCH), name))
         })
         .collect();
-    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    candidates.sort_by_key(|left| std::cmp::Reverse(left.0));
     candidates.into_iter().map(|(_, name)| name).collect()
 }
 
@@ -1031,10 +1031,36 @@ pub fn focused_output_name() -> Option<String> {
     resolve_output_target(None, std::env::var("MAHO_OUTPUT").ok(), monitors.as_ref())
 }
 
-trait MediaHandle {
+trait MediaHandle: Send {
     fn force_key_frame(&self) -> Result<(), SessionError>;
     fn update_bitrate(&self, bitrate: u32) -> Result<(), SessionError>;
     fn stop(&mut self);
+}
+
+/// Supervisor-visible handle to a session's media pipeline.
+///
+/// A session thread can block in a syscall that never returns, in which case
+/// its stack never unwinds and nothing it owns is ever dropped. The capture and
+/// encode workers would then keep running at full cost with no client attached.
+/// Publishing the pipeline here lets the watchdog stop it from outside, which
+/// is the only cleanup available once the owning thread is wedged.
+type PipelineSlot = Arc<Mutex<Option<Box<dyn MediaHandle>>>>;
+
+/// Stops a session's media pipeline from outside its own thread.
+///
+/// Returns true when a pipeline was still registered and has been stopped. The
+/// handle is taken out of the slot before `stop()` runs, so the join it performs
+/// never happens while the slot is locked.
+fn stop_pipeline(slot: &PipelineSlot) -> bool {
+    let handle = slot.lock().ok().and_then(|mut slot| slot.take());
+    match handle {
+        Some(mut handle) => {
+            warn!("stopping a media pipeline whose session thread did not unwind");
+            handle.stop();
+            true
+        }
+        None => false,
+    }
 }
 
 trait MediaSource: Send + Sync {
@@ -2761,8 +2787,10 @@ impl HostServer {
                 let finished = Arc::new(AtomicBool::new(false));
                 let _finished_guard = FinishedGuard(Arc::clone(&finished));
                 let watch = Arc::new(SessionWatch::new(self.session_stall_timeout));
+                let pipeline = PipelineSlot::default();
                 let watchdog_finished = Arc::clone(&finished);
                 let watchdog_watch = Arc::clone(&watch);
+                let watchdog_pipeline = Arc::clone(&pipeline);
                 let cloned_tcp = stream.ssl_stream().get_ref().try_clone()?;
                 let timeout = watch.timeout();
                 let poll = (timeout / 4).clamp(Duration::from_millis(50), Duration::from_secs(1));
@@ -2780,6 +2808,11 @@ impl HostServer {
                             );
                             let _ = cloned_tcp.shutdown(std::net::Shutdown::Both);
                             watchdog_watch.abort();
+                            // Shutting down the socket cannot interrupt a thread
+                            // parked in an unrelated syscall, so its pipeline is
+                            // stopped here instead of waiting for that thread to
+                            // unwind and drop it.
+                            stop_pipeline(&watchdog_pipeline);
                             break;
                         }
                         if is_fin {
@@ -2789,9 +2822,14 @@ impl HostServer {
                 if let Err(error) = watchdog_spawn {
                     warn!(%peer, %error, "server: failed to spawn watchdog thread");
                 }
-                if let Err(error) =
-                    self.handle_connection(stream, peer, admission_deadline, stop, &watch)
-                {
+                if let Err(error) = self.handle_connection(
+                    stream,
+                    peer,
+                    admission_deadline,
+                    stop,
+                    &watch,
+                    &pipeline,
+                ) {
                     crate::host_log(&format!(
                         "server: connection ended {peer} after {:?}: {error}",
                         accept_started.elapsed()
@@ -2832,7 +2870,8 @@ impl HostServer {
         match tls_server.accept_stream_until(tcp, admission_deadline) {
             Ok(stream) => {
                 let watch = SessionWatch::new(self.session_stall_timeout);
-                self.handle_connection(stream, peer, admission_deadline, None, &watch)
+                let pipeline = PipelineSlot::default();
+                self.handle_connection(stream, peer, admission_deadline, None, &watch, &pipeline)
             }
             Err(error) => {
                 let locked = self
@@ -2894,6 +2933,7 @@ impl HostServer {
         admission_deadline: Instant,
         stop: Option<&std::sync::atomic::AtomicBool>,
         watch: &SessionWatch,
+        pipeline: &PipelineSlot,
     ) -> Result<(), SessionError> {
         stream
             .ssl_stream_mut()
@@ -2910,7 +2950,6 @@ impl HostServer {
         let mut h2c_cipher = None;
         let mut udp_peer = None;
         let mut media_receiver: Option<Receiver<MediaEvent>> = None;
-        let mut media_handle: Option<Box<dyn MediaHandle>> = None;
         #[cfg(target_os = "macos")]
         let input = InputInjector::new(
             self.config.display.logical_width as f32,
@@ -3317,7 +3356,8 @@ impl HostServer {
                             session_salt: [0_u8; 16],
                         };
                         let (media_tx, media_rx) = mpsc::sync_channel(16);
-                        media_handle = Some(self.media_source.start(media_tx)?);
+                        let started = self.media_source.start(media_tx)?;
+                        *pipeline.lock().expect("pipeline slot poisoned") = Some(started);
                         media_receiver = Some(media_rx);
                         send_tcp_packet(&mut stream, PacketType::HandshakeAck, &ack.encode()?)?;
                         last_pong = Instant::now();
@@ -3351,14 +3391,16 @@ impl HostServer {
                         }
                         match ControlMessage::decode(payload)? {
                             ControlMessage::RequestKeyFrame => {
-                                if let Some(media) = &media_handle {
+                                let slot = pipeline.lock().expect("pipeline slot poisoned");
+                                if let Some(media) = slot.as_ref() {
                                     media.force_key_frame()?;
                                 }
                             }
                             ControlMessage::BitrateAdjust(BitrateAdjust { target_bitrate })
                                 if target_bitrate > 0 =>
                             {
-                                if let Some(media) = &media_handle {
+                                let slot = pipeline.lock().expect("pipeline slot poisoned");
+                                if let Some(media) = slot.as_ref() {
                                     if let Err(error) = media.update_bitrate(target_bitrate as u32)
                                     {
                                         // A rejected quality change must not end the
@@ -3412,11 +3454,15 @@ impl HostServer {
                                     None => {
                                         // A submission that failed must never be reported
                                         // back to the client as the active configuration.
-                                        let applied = match &media_handle {
-                                            Some(media) => media
-                                                .update_bitrate(req.desired.bitrate)
-                                                .map(|()| req.desired.bitrate),
-                                            None => Ok(active_bitrate),
+                                        let applied = {
+                                            let slot =
+                                                pipeline.lock().expect("pipeline slot poisoned");
+                                            match slot.as_ref() {
+                                                Some(media) => media
+                                                    .update_bitrate(req.desired.bitrate)
+                                                    .map(|()| req.desired.bitrate),
+                                                None => Ok(active_bitrate),
+                                            }
                                         };
                                         match applied {
                                             Ok(bitrate) => {
@@ -3510,7 +3556,7 @@ impl HostServer {
         if let Some(tx) = stop_sender_tx {
             let _ = tx.send(());
         }
-        if let Some(mut media) = media_handle.take() {
+        if let Some(mut media) = pipeline.lock().expect("pipeline slot poisoned").take() {
             media.stop();
         }
         if let Some(handle) = sender_thread.take() {
@@ -4311,7 +4357,14 @@ mod tests {
                 .map_err(SessionError::Tls)
                 .and_then(|stream| {
                     let watch = SessionWatch::new(server.session_stall_timeout);
-                    server.handle_connection(stream, peer, deadline, None, &watch)
+                    server.handle_connection(
+                        stream,
+                        peer,
+                        deadline,
+                        None,
+                        &watch,
+                        &PipelineSlot::default(),
+                    )
                 });
             done_tx.send((result, Instant::now())).unwrap();
         });
@@ -4680,6 +4733,7 @@ mod tests {
                 Instant::now() + server.preauth_timeout,
                 None,
                 &SessionWatch::new(server.session_stall_timeout),
+                &PipelineSlot::default(),
             );
             done_tx.send(result).unwrap();
         });
@@ -6487,6 +6541,38 @@ mod tests {
     }
 
     #[test]
+    fn stop_pipeline_stops_a_registered_pipeline_exactly_once() {
+        // The watchdog's only lever on a wedged session. The owning thread never
+        // unwinds, so nothing it owns is dropped and the pipeline has to be
+        // stopped from outside or its workers run forever.
+        struct CountingHandle(Arc<AtomicUsize>);
+        impl MediaHandle for CountingHandle {
+            fn force_key_frame(&self) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn update_bitrate(&self, _bitrate: u32) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn stop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let stops = Arc::new(AtomicUsize::new(0));
+        let slot: PipelineSlot = Arc::new(Mutex::new(None));
+        assert!(!stop_pipeline(&slot), "an empty slot has nothing to stop");
+
+        *slot.lock().unwrap() = Some(Box::new(CountingHandle(Arc::clone(&stops))));
+        assert!(stop_pipeline(&slot));
+        assert_eq!(stops.load(Ordering::Relaxed), 1);
+
+        // Taking the handle out is what keeps the session thread from stopping
+        // it a second time as its own teardown unwinds.
+        assert!(!stop_pipeline(&slot));
+        assert_eq!(stops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn test_session_watch_lifecycle() {
         let timeout = Duration::from_secs(10);
         let watch = SessionWatch::new(timeout);
@@ -6684,7 +6770,14 @@ mod tests {
             let handler_watch = Arc::clone(&watch);
             let (result_tx, result_rx) = mpsc::channel();
             let handler = thread::spawn(move || {
-                let result = server.handle_connection(stream, peer, deadline, None, &handler_watch);
+                let result = server.handle_connection(
+                    stream,
+                    peer,
+                    deadline,
+                    None,
+                    &handler_watch,
+                    &PipelineSlot::default(),
+                );
                 let _ = result_tx.send(result);
             });
             session_tx.send((watch, result_rx, handler)).unwrap();

@@ -29,6 +29,14 @@ pub const DEFAULT_ECHO_PERIOD: Duration = Duration::from_secs(2);
 /// `wl-paste`/`xclip` block until the selection owner answers. A frozen owner
 /// must not hold the host session thread, so every read is bounded.
 const READ_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
+/// `wl-copy` forks a daemon that serves the selection and inherits the stderr
+/// pipe, so that pipe never reaches EOF. Waiting for it would park the session
+/// thread forever, so a write is bounded the same way a read is.
+const WRITE_COMMAND_TIMEOUT: Duration = Duration::from_millis(1000);
+/// Longest single poll while draining a child's stderr.
+const DRAIN_SLICE: Duration = Duration::from_millis(25);
+/// Cap on retained stderr text, which only ever feeds an error message.
+const MAX_COMMAND_STDERR_BYTES: usize = 4 * 1024;
 const MAX_TYPE_LIST_BYTES: usize = 64 * 1024;
 const CONCEALED_TYPES: [&str; 2] = [
     "org.nspasteboard.ConcealedType",
@@ -205,22 +213,7 @@ impl LinuxClipboard {
                 command
             }
         };
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn()?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| ClipboardError::Command("clipboard stdin was unavailable".into()))?
-            .write_all(text.as_bytes())?;
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            return Err(ClipboardError::Command(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            ));
-        }
+        write_command_bounded(&mut command, text.as_bytes(), WRITE_COMMAND_TIMEOUT)?;
         self.suppressor.record_remote_write(text, now);
         Ok(())
     }
@@ -234,6 +227,113 @@ impl LinuxClipboard {
         Ok(types
             .lines()
             .any(|mime| CONCEALED_TYPES.contains(&mime.trim())))
+    }
+}
+
+/// Writes `input` to a clipboard owner's stdin and reaps the child within `timeout`.
+///
+/// `wait_with_output()` is unusable here. On Wayland `wl-copy` forks a daemon
+/// that keeps serving the selection, that daemon inherits the stderr pipe, and
+/// the pipe therefore never reaches EOF. Waiting for it parked the session
+/// thread in `read(2)` forever, which no watchdog can break: shutting down the
+/// TCP socket does not interrupt an unrelated pipe read. The thread then never
+/// unwound, so its media pipeline was never dropped and the capture and encode
+/// workers kept burning the GPU with no client attached.
+///
+/// The child's own exit is the completion signal instead, and stderr is only
+/// read while it is already available, so an inherited write end cannot stall
+/// the caller.
+fn write_command_bounded(
+    command: &mut Command,
+    input: &[u8],
+    timeout: Duration,
+) -> Result<(), ClipboardError> {
+    use rustix::event::{poll, PollFd, PollFlags, Timespec};
+
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ClipboardError::Command(
+                "clipboard stdin was unavailable".into(),
+            ));
+        }
+    };
+    let mut stderr = child.stderr.take();
+
+    let outcome: Result<(std::process::ExitStatus, Vec<u8>), ClipboardError> = (|| {
+        stdin.write_all(input)?;
+        // Closing stdin marks end-of-input; otherwise the owner waits for more.
+        drop(stdin);
+
+        let deadline = Instant::now() + timeout;
+        let mut collected = Vec::new();
+        loop {
+            let exited = child.try_wait()?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if exited.is_none() && remaining.is_zero() {
+                return Err(ClipboardError::Timeout);
+            }
+            // Read only what is already available. Once the child has exited an
+            // immediate poll is enough to pick up any error text, and while it
+            // runs the slice is short so the deadline stays responsive.
+            let slice = if exited.is_some() {
+                Duration::ZERO
+            } else {
+                remaining.min(DRAIN_SLICE)
+            };
+            let slice = Timespec::try_from(slice).expect("bounded duration");
+            // An empty poll is a sleep: with the pipe at EOF there is nothing to
+            // watch, and polling it would spin on HUP.
+            let ready = {
+                let mut fds: Vec<PollFd> = match stderr.as_ref() {
+                    Some(pipe) => vec![PollFd::new(pipe, PollFlags::IN)],
+                    None => Vec::new(),
+                };
+                match poll(&mut fds, Some(&slice)) {
+                    Ok(count) => count > 0,
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(error) => return Err(io::Error::from(error).into()),
+                }
+            };
+            if ready {
+                if let Some(pipe) = stderr.as_mut() {
+                    let mut chunk = [0; 512];
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => stderr = None,
+                        Ok(count) => {
+                            if collected.len() < MAX_COMMAND_STDERR_BYTES {
+                                collected.extend_from_slice(&chunk[..count]);
+                            }
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            if let Some(status) = exited {
+                return Ok((status, collected));
+            }
+        }
+    })();
+
+    match outcome {
+        Ok((status, _)) if status.success() => Ok(()),
+        Ok((_, collected)) => Err(ClipboardError::Command(
+            String::from_utf8_lossy(&collected).trim().to_owned(),
+        )),
+        Err(error) => {
+            // Reap on the failure path too, or a killed child stays a zombie.
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(error)
+        }
     }
 }
 
@@ -388,5 +488,84 @@ mod tests {
             read_command_bounded_within(&mut command, 16, Duration::from_secs(5)),
             Err(ClipboardError::TooLarge)
         ));
+    }
+
+    #[test]
+    fn a_forked_grandchild_keeps_the_stderr_pipe_open() {
+        // The shape `wait_with_output()` used to hang on: the clipboard owner
+        // forks a daemon, that daemon inherits the stderr pipe, and the pipe
+        // never reaches EOF even though the owner itself has already exited.
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5 & exit 0"]);
+        command.stdout(Stdio::null()).stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+        let slice = Timespec::try_from(Duration::from_millis(300)).unwrap();
+        let mut fds = [PollFd::new(&stderr, PollFlags::IN)];
+        assert_eq!(
+            poll(&mut fds, Some(&slice)).unwrap(),
+            0,
+            "an inherited write end must leave the pipe open and unreadable"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn write_returns_once_the_owner_exits_even_if_a_grandchild_holds_the_pipe() {
+        // Regression: this is the exact clipboard shape that wedged the host
+        // session thread, leaking the capture and encode workers for 13 hours.
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5 & exit 0"]);
+        let started = Instant::now();
+        write_command_bounded(&mut command, b"payload", Duration::from_secs(10))
+            .expect("a forked grandchild must not stall the write");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the write waited on the inherited pipe instead of the child's exit"
+        );
+    }
+
+    #[test]
+    fn write_times_out_and_reaps_a_hung_owner() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        let timeout = Duration::from_millis(150);
+        let started = Instant::now();
+        assert!(matches!(
+            write_command_bounded(&mut command, b"payload", timeout),
+            Err(ClipboardError::Timeout)
+        ));
+        assert!(
+            started.elapsed() >= timeout,
+            "a hung owner must not be reported as a failure before the deadline"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the deadline must bound the write"
+        );
+    }
+
+    #[test]
+    fn write_delivers_stdin_and_reports_the_owner_status() {
+        let mut matching = Command::new("sh");
+        matching.args(["-c", "read value; [ \"$value\" = clipboard-probe ]"]);
+        assert!(
+            write_command_bounded(&mut matching, b"clipboard-probe\n", Duration::from_secs(5))
+                .is_ok(),
+            "the owner must receive the payload on stdin"
+        );
+
+        let mut failing = Command::new("sh");
+        failing.args(["-c", "echo clipboard refused >&2; exit 3"]);
+        match write_command_bounded(&mut failing, b"payload", Duration::from_secs(5)) {
+            Err(ClipboardError::Command(message)) => {
+                assert!(message.contains("clipboard refused"));
+            }
+            other => panic!("expected the owner's stderr, got {other:?}"),
+        }
     }
 }
