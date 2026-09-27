@@ -149,14 +149,14 @@ pub enum EncodeError {
     IncompleteDrain(usize),
 }
 
-struct MediaFoundationRuntime {
+pub(crate) struct MediaFoundationRuntime {
     com_initialized: bool,
     // COM initialization/uninitialization must remain on the creating thread.
     _thread_affinity: PhantomData<Rc<()>>,
 }
 
 impl MediaFoundationRuntime {
-    fn start() -> Result<Self, EncodeError> {
+    pub(crate) fn start() -> Result<Self, EncodeError> {
         let status = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         let com_initialized = status.is_ok();
         // RPC_E_CHANGED_MODE means COM was initialized differently on this
@@ -792,7 +792,10 @@ fn enumerate_transform(
     Ok(selected)
 }
 
-fn video_type(subtype: GUID, config: EncoderConfig) -> Result<IMFMediaType, EncodeError> {
+pub(crate) fn video_type(
+    subtype: GUID,
+    config: EncoderConfig,
+) -> Result<IMFMediaType, EncodeError> {
     let media_type = unsafe { MFCreateMediaType()? };
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -812,7 +815,7 @@ fn video_type(subtype: GUID, config: EncoderConfig) -> Result<IMFMediaType, Enco
     Ok(media_type)
 }
 
-fn apply_codec_properties(api: &ICodecAPI, config: EncoderConfig) {
+pub(crate) fn apply_codec_properties(api: &ICodecAPI, config: EncoderConfig) {
     set_codec_bool(api, &CODECAPI_AVEncCommonLowLatency, true);
     set_codec_u32(
         api,
@@ -880,7 +883,7 @@ fn sample_from_bytes(
     }
 }
 
-fn sample_bytes(sample: &IMFSample) -> Result<Vec<u8>, EncodeError> {
+pub(crate) fn sample_bytes(sample: &IMFSample) -> Result<Vec<u8>, EncodeError> {
     let buffer = unsafe { sample.ConvertToContiguousBuffer()? };
     copy_media_buffer(&buffer)
 }
@@ -896,7 +899,10 @@ fn copy_media_buffer(buffer: &IMFMediaBuffer) -> Result<Vec<u8>, EncodeError> {
     }
 }
 
-fn media_type_parameter_sets(media_type: &IMFMediaType, codec: VideoCodec) -> Vec<Vec<u8>> {
+pub(crate) fn media_type_parameter_sets(
+    media_type: &IMFMediaType,
+    codec: VideoCodec,
+) -> Vec<Vec<u8>> {
     let Ok(size) = (unsafe { media_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) }) else {
         return Vec::new();
     };
@@ -977,7 +983,7 @@ fn is_start_code_at(bytes: &[u8], index: usize) -> Option<usize> {
     }
 }
 
-fn write_avcc(nalus: &[impl AsRef<[u8]>]) -> Result<Vec<u8>, EncodeError> {
+pub(crate) fn write_avcc(nalus: &[impl AsRef<[u8]>]) -> Result<Vec<u8>, EncodeError> {
     let capacity = nalus
         .iter()
         .try_fold(0_usize, |size, nalu| {
@@ -997,7 +1003,7 @@ fn write_avcc(nalus: &[impl AsRef<[u8]>]) -> Result<Vec<u8>, EncodeError> {
     Ok(output)
 }
 
-fn parameter_sets(nalus: &[impl AsRef<[u8]>], codec: VideoCodec) -> Vec<Vec<u8>> {
+pub(crate) fn parameter_sets(nalus: &[impl AsRef<[u8]>], codec: VideoCodec) -> Vec<Vec<u8>> {
     nalus
         .iter()
         .filter(|nalu| {
@@ -1009,7 +1015,7 @@ fn parameter_sets(nalus: &[impl AsRef<[u8]>], codec: VideoCodec) -> Vec<Vec<u8>>
         .collect()
 }
 
-fn nalu_type(nalu: &[u8], codec: VideoCodec) -> Option<u8> {
+pub(crate) fn nalu_type(nalu: &[u8], codec: VideoCodec) -> Option<u8> {
     let first = *nalu.first()?;
     Some(match codec {
         VideoCodec::Hevc => (first >> 1) & 0x3f,
@@ -1316,7 +1322,7 @@ mod tests {
         assert_eq!(encoder.dimensions(), (64, 64));
         // Then the next frame at the new size encodes instead of failing with
         // InvalidFrameLength, and is a keyframe carrying parameter sets.
-        let frames = encoder
+        let mut frames = encoder
             .encode_nv12(&vec![128; encoder.frame_bytes()], origin)
             .unwrap();
         frames.extend(encoder.flush().unwrap());

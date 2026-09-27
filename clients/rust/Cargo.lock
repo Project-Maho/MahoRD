@@ -2374,6 +2374,7 @@ dependencies = [
  "futures-util",
  "hostname",
  "libc",
+ "libloading",
  "maho-app",
  "maho-net",
  "maho-proto",
@@ -2399,6 +2400,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wayland-client",
+ "wayland-protocols",
  "wayland-protocols-wlr",
  "windows 0.62.2",
 ]

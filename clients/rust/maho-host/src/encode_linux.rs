@@ -243,6 +243,10 @@ impl LinuxVideoEncoder {
         self.force_keyframe = true;
     }
 
+    pub fn current_pts(&self) -> i64 {
+        self.next_pts
+    }
+
     pub fn update_bitrate(&mut self, bitrate: usize) -> Result<Vec<EncodedFrame>, EncodeError> {
         let config = EncoderConfig {
             bitrate,
@@ -301,8 +305,7 @@ impl LinuxVideoEncoder {
                     let b = s_row[p] as i32;
                     let g = s_row[p + 1] as i32;
                     let r = s_row[p + 2] as i32;
-                    *dst_pixel =
-                        (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+                    *dst_pixel = ((77 * r + 150 * g + 29 * b + 128) >> 8).clamp(0, 255) as u8;
                 }
             }
 
@@ -318,9 +321,9 @@ impl LinuxVideoEncoder {
                     let r_avg = (s_row[p0 + 2] as i32 + s_row[p1 + 2] as i32) >> 1;
                     let g_avg = (s_row[p0 + 1] as i32 + s_row[p1 + 1] as i32) >> 1;
                     let b_avg = (s_row[p0] as i32 + s_row[p1] as i32) >> 1;
-                    duv_row[x] = (((-38 * r_avg - 74 * g_avg + 112 * b_avg + 128) >> 8) + 128)
+                    duv_row[x] = (128 + ((-43 * r_avg - 85 * g_avg + 128 * b_avg + 128) >> 8))
                         .clamp(0, 255) as u8;
-                    duv_row[x + 1] = (((112 * r_avg - 94 * g_avg - 18 * b_avg + 128) >> 8) + 128)
+                    duv_row[x + 1] = (128 + ((128 * r_avg - 107 * g_avg - 21 * b_avg + 128) >> 8))
                         .clamp(0, 255) as u8;
                 }
             }
@@ -382,6 +385,42 @@ impl LinuxVideoEncoder {
         self.force_keyframe = false;
         output.extend(self.receive_packets()?);
         Ok(output)
+    }
+
+    /// Encodes a hardware VAAPI surface frame (e.g. from VPP or external HW frame context).
+    pub fn encode_vaapi_frame(
+        &mut self,
+        mut frame: frame::Video,
+    ) -> Result<Vec<EncodedFrame>, EncodeError> {
+        let pts = self.next_pts;
+        self.next_pts += 1;
+        frame.set_pts(Some(pts));
+        if self.force_keyframe {
+            frame.set_kind(ffmpeg::picture::Type::I);
+        } else {
+            frame.set_kind(ffmpeg::picture::Type::None);
+        }
+
+        let mut output = Vec::new();
+        match self.submit_frame(Some(&frame)) {
+            Ok(()) => {}
+            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::ffi::EAGAIN => {
+                output = self.receive_packets()?;
+                self.submit_frame(Some(&frame))?;
+            }
+            Err(error) => return Err(EncodeError::Ffmpeg(error)),
+        }
+
+        self.force_keyframe = false;
+        output.extend(self.receive_packets()?);
+        Ok(output)
+    }
+
+    /// Exposes the underlying VAAPI device and frames AVBufferRef pointers if VAAPI is active.
+    pub fn vaapi_hwctx(
+        &self,
+    ) -> Option<(*mut ffmpeg::ffi::AVBufferRef, *mut ffmpeg::ffi::AVBufferRef)> {
+        self.open.vaapi.as_ref().map(|v| (v.device, v.frames))
     }
 
     /// Submits either the VAAPI surface or the software conversion frame.
@@ -457,6 +496,14 @@ fn base_video_context(
     encoder.set_gop(config.keyframe_interval.max(1));
     encoder.set_max_b_frames(0);
     encoder.set_threading(codec::threading::Config::count(1));
+    // SAFETY: encoder owns a valid live AVCodecContext pointer; color properties are populated prior to open.
+    unsafe {
+        let ptr = encoder.as_mut_ptr();
+        (*ptr).color_range = ffmpeg::ffi::AVColorRange::AVCOL_RANGE_JPEG;
+        (*ptr).colorspace = ffmpeg::ffi::AVColorSpace::AVCOL_SPC_SMPTE170M;
+        (*ptr).color_primaries = ffmpeg::ffi::AVColorPrimaries::AVCOL_PRI_SMPTE170M;
+        (*ptr).color_trc = ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE170M;
+    }
     Ok(encoder)
 }
 
@@ -920,6 +967,36 @@ mod tests {
             .any(|n| n[0] & 31 == 5));
         assert!(encoder.update_bitrate(0).is_err());
         assert_eq!(encoder.config.bitrate, 200_000);
+    }
+
+    #[test]
+    fn full_range_bt601_coefficients() {
+        // Pure black: R=0, G=0, B=0
+        let (r, g, b) = (0, 0, 0);
+        let y_black = ((77 * r + 150 * g + 29 * b + 128) >> 8).clamp(0, 255) as u8;
+        let u_black = (128 + ((-43 * r - 85 * g + 128 * b + 128) >> 8)).clamp(0, 255) as u8;
+        let v_black = (128 + ((128 * r - 107 * g - 21 * b + 128) >> 8)).clamp(0, 255) as u8;
+        assert_eq!(y_black, 0, "black must map to Y=0 in full range BT.601");
+        assert_eq!(u_black, 128, "black chroma U must be 128");
+        assert_eq!(v_black, 128, "black chroma V must be 128");
+
+        // Pure white: R=255, G=255, B=255
+        let (r, g, b) = (255, 255, 255);
+        let y_white = ((77 * r + 150 * g + 29 * b + 128) >> 8).clamp(0, 255) as u8;
+        let u_white = (128 + ((-43 * r - 85 * g + 128 * b + 128) >> 8)).clamp(0, 255) as u8;
+        let v_white = (128 + ((128 * r - 107 * g - 21 * b + 128) >> 8)).clamp(0, 255) as u8;
+        assert_eq!(y_white, 255, "white must map to Y=255 in full range BT.601");
+        assert_eq!(u_white, 128, "white chroma U must be 128");
+        assert_eq!(v_white, 128, "white chroma V must be 128");
+
+        // Neutral gray: R=128, G=128, B=128
+        let (r, g, b) = (128, 128, 128);
+        let y_gray = ((77 * r + 150 * g + 29 * b + 128) >> 8).clamp(0, 255) as u8;
+        let u_gray = (128 + ((-43 * r - 85 * g + 128 * b + 128) >> 8)).clamp(0, 255) as u8;
+        let v_gray = (128 + ((128 * r - 107 * g - 21 * b + 128) >> 8)).clamp(0, 255) as u8;
+        assert_eq!(y_gray, 128);
+        assert_eq!(u_gray, 128);
+        assert_eq!(v_gray, 128);
     }
 
     #[test]

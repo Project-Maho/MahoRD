@@ -120,9 +120,44 @@ impl<T> Handoff<T> {
         }
     }
 
+    #[cfg(any(target_os = "windows", test))]
+    pub fn next_timeout(&self, timeout: std::time::Duration) -> Option<Work<T>> {
+        let mut state = self.state.lock().expect("native handoff poisoned");
+        if state.stopped {
+            return None;
+        }
+        if state.frame.is_some() || state.controls != Controls::default() {
+            return Some(Work {
+                frame: state.frame.take(),
+                controls: std::mem::take(&mut state.controls),
+            });
+        }
+        let deadline = Instant::now() + timeout;
+        while !state.stopped {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            let (next_state, _) = self
+                .wake
+                .wait_timeout(state, remaining)
+                .expect("native handoff poisoned");
+            state = next_state;
+            if state.stopped {
+                return None;
+            }
+            if state.frame.is_some() || state.controls != Controls::default() {
+                return Some(Work {
+                    frame: state.frame.take(),
+                    controls: std::mem::take(&mut state.controls),
+                });
+            }
+        }
+        None
+    }
+
     /// Linearization point before submission: replace raw work only, and merge
     /// controls without losing keyframe intent across a bitrate reopen.
-    fn reselect(&self, work: &mut Work<T>) -> bool {
+    pub fn reselect(&self, work: &mut Work<T>) -> bool {
         let mut state = self.state.lock().expect("native handoff poisoned");
         if state.stopped {
             return false;
@@ -710,5 +745,21 @@ mod tests {
         let keepalive = Arc::clone(&pixels);
         assert!(Arc::ptr_eq(&pixels, &keepalive));
         assert_eq!(pixels.as_ptr(), keepalive.as_ptr());
+    }
+
+    #[test]
+    fn handoff_next_timeout_returns_none_on_expiry_and_some_on_publish() {
+        let handoff = Arc::new(Handoff::<u32>::new());
+        handoff.activate();
+
+        // Expire with None
+        let work = handoff.next_timeout(Duration::from_millis(5));
+        assert!(work.is_none());
+
+        // Publish and get Some
+        handoff.publish(42);
+        let work = handoff.next_timeout(Duration::from_millis(50));
+        assert!(work.is_some());
+        assert_eq!(work.unwrap().frame, Some(42));
     }
 }

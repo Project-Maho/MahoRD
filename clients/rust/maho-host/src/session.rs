@@ -1586,7 +1586,24 @@ fn native_media_error<T>(
     }
 }
 
+/// `MAHO_PIPELINE=cpu` forces the CPU capture/convert/encode path; anything
+/// else (including unset) selects the GPU zero-copy pipeline, which itself
+/// falls back to the CPU path when GPU initialization fails.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn gpu_pipeline_requested() -> bool {
+    !std::env::var("MAHO_PIPELINE").is_ok_and(|value| value.trim().eq_ignore_ascii_case("cpu"))
+}
+
 #[cfg(target_os = "windows")]
+#[path = "media_gpu_windows.rs"]
+mod media_gpu_windows;
+
+#[cfg(target_os = "linux")]
+#[path = "media_gpu_linux.rs"]
+mod media_gpu_linux;
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
 struct WindowsMediaSource {
     display_index: usize,
     fps: u32,
@@ -1606,7 +1623,7 @@ struct WindowsMediaSource {
 use crate::windows_logic::freshness::RawFrame as WindowsRawFrame;
 
 #[cfg(target_os = "windows")]
-mod display_power {
+pub(super) mod display_power {
     const ES_CONTINUOUS: u32 = 0x8000_0000;
     const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
     const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
@@ -1632,7 +1649,7 @@ mod display_power {
 }
 
 #[cfg(target_os = "windows")]
-mod cursor_jiggle {
+pub(super) mod cursor_jiggle {
     #[repr(C)]
     #[derive(Default)]
     pub struct Point {
@@ -1661,9 +1678,6 @@ mod cursor_jiggle {
         }
     }
 }
-
-#[cfg(target_os = "windows")]
-use std::sync::atomic::AtomicU64;
 
 #[cfg(target_os = "windows")]
 struct WindowsSessionEncoder {
@@ -1897,12 +1911,10 @@ impl MediaSource for WindowsMediaSource {
                                     ..Default::default()
                                 });
                             }
-                            if frame.pointer_visible
-                                && frame.pointer_position.is_some()
-                                && frame.width > 0
-                                && frame.height > 0
+                            if let Some((px, py)) = frame
+                                .pointer_position
+                                .filter(|_| frame.pointer_visible && frame.width > 0 && frame.height > 0)
                             {
-                                let (px, py) = frame.pointer_position.unwrap();
                                 let cx = (px as f32) / (frame.width as f32);
                                 let cy = (py as f32) / (frame.height as f32);
                                 send_cursor(
@@ -2173,6 +2185,7 @@ impl MediaHandle for WindowsMediaHandle {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone)]
 struct LinuxMediaSource {
     fps: u32,
     width: u32,
@@ -2541,14 +2554,19 @@ impl HostServer {
         config: &HostConfig,
         fps: u32,
     ) -> Result<Arc<dyn MediaSource>, SessionError> {
-        Ok(Arc::new(LinuxMediaSource {
+        let cpu = LinuxMediaSource {
             fps,
             width: config.display.pixel_width,
             height: config.display.pixel_height,
             bitrate: config.bitrate,
             capture_audio: config.capture_audio,
             output_name: config.output_name.clone(),
-        }))
+        };
+        if gpu_pipeline_requested() {
+            return Ok(media_gpu_linux::gpu_source(cpu));
+        }
+        crate::host_log("media pipeline: cpu (MAHO_PIPELINE=cpu)");
+        Ok(Arc::new(cpu))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -2566,7 +2584,7 @@ impl HostServer {
         config: &HostConfig,
         fps: u32,
     ) -> Result<Arc<dyn MediaSource>, SessionError> {
-        Ok(Arc::new(WindowsMediaSource {
+        let cpu = WindowsMediaSource {
             display_index: 0,
             fps,
             width: config.display.pixel_width,
@@ -2576,7 +2594,12 @@ impl HostServer {
             capture_audio: config.capture_audio,
             desktop_x: config.display.desktop_x,
             desktop_y: config.display.desktop_y,
-        }))
+        };
+        if gpu_pipeline_requested() {
+            return Ok(media_gpu_windows::gpu_source(cpu));
+        }
+        crate::host_log("media pipeline: cpu (MAHO_PIPELINE=cpu)");
+        Ok(Arc::new(cpu))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
