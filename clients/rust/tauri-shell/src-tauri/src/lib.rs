@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -76,6 +76,108 @@ pub struct VideoFramePayload {
     pub height: u32,
     pub timestamp_ms: i64,
     pub jpeg_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamActiveStateDto {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u16,
+    pub codec: String,
+    pub display_index: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDisplayDto {
+    pub index: u8,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamPolicyStateDto {
+    pub allow_input: bool,
+    pub allow_clipboard: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamStateDto {
+    pub active: Option<StreamActiveStateDto>,
+    pub displays: Vec<StreamDisplayDto>,
+    pub policy: Option<StreamPolicyStateDto>,
+    pub last_reject: Option<String>,
+    pub supported: bool,
+}
+
+impl Default for StreamStateDto {
+    fn default() -> Self {
+        Self {
+            active: None,
+            displays: Vec::new(),
+            policy: None,
+            last_reject: None,
+            supported: true,
+        }
+    }
+}
+
+pub fn parse_stream_codec_preference(
+    codec: &str,
+) -> Result<maho_proto::StreamCodecPreference, String> {
+    match codec {
+        "auto" | "Auto" => Ok(maho_proto::StreamCodecPreference::Auto),
+        "h264" | "H264" => Ok(maho_proto::StreamCodecPreference::H264),
+        "hevc" | "Hevc" => Ok(maho_proto::StreamCodecPreference::Hevc),
+        other => Err(format!(
+            "Invalid stream codec '{other}': expected 'auto', 'h264', or 'hevc'"
+        )),
+    }
+}
+
+pub fn stream_codec_to_str(codec: maho_proto::StreamCodecPreference) -> &'static str {
+    match codec {
+        maho_proto::StreamCodecPreference::Auto => "auto",
+        maho_proto::StreamCodecPreference::H264 => "h264",
+        maho_proto::StreamCodecPreference::Hevc => "hevc",
+    }
+}
+
+pub fn map_stream_state_to_dto(state: maho_app::StreamState) -> StreamStateDto {
+    StreamStateDto {
+        active: state.active.map(|a| StreamActiveStateDto {
+            width: a.width,
+            height: a.height,
+            fps: a.fps,
+            codec: stream_codec_to_str(a.codec).to_string(),
+            display_index: a.display_index,
+            bitrate: if a.bitrate > 0 { Some(a.bitrate) } else { None },
+        }),
+        displays: state
+            .displays
+            .into_iter()
+            .map(|d| StreamDisplayDto {
+                index: d.index,
+                name: d.name,
+                width: d.width,
+                height: d.height,
+                primary: d.primary,
+            })
+            .collect(),
+        policy: state.policy.map(|p| StreamPolicyStateDto {
+            allow_input: p.allow_input,
+            allow_clipboard: p.allow_clipboard,
+        }),
+        last_reject: state.last_reject,
+        supported: state.host_supports_stream_options,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -172,6 +274,8 @@ pub struct HostStatus {
     pub port: u16,
     pub pin: String,
     pub auto_approve: bool,
+    pub allow_input: bool,
+    pub allow_clipboard: bool,
     /// Name of the bootstrap client waiting for an explicit approval, if any.
     pub pending_client: Option<String>,
 }
@@ -187,6 +291,8 @@ pub struct HostRuntime {
     pub stop_flag: Arc<AtomicBool>,
     pub thread_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub auto_approve: Arc<AtomicBool>,
+    pub allow_input: Arc<AtomicBool>,
+    pub allow_clipboard: Arc<AtomicBool>,
     /// A bootstrap request parked for the operator's decision. The host side
     /// bounds its own wait, so a never-answered prompt expires there.
     pub pending_consent: Arc<Mutex<Option<maho_host::ConsentPrompt>>>,
@@ -201,6 +307,8 @@ impl Default for HostRuntime {
             stop_flag: Arc::new(AtomicBool::new(false)),
             thread_handle: Mutex::new(None),
             auto_approve: Arc::new(AtomicBool::new(false)),
+            allow_input: Arc::new(AtomicBool::new(true)),
+            allow_clipboard: Arc::new(AtomicBool::new(true)),
             pending_consent: Arc::new(Mutex::new(None)),
         }
     }
@@ -702,6 +810,8 @@ impl AppState {
             port: self.host_runtime.port,
             pin,
             auto_approve: self.host_runtime.auto_approve.load(Ordering::SeqCst),
+            allow_input: self.host_runtime.allow_input.load(Ordering::SeqCst),
+            allow_clipboard: self.host_runtime.allow_clipboard.load(Ordering::SeqCst),
             pending_client: self
                 .host_runtime
                 .pending_consent
@@ -782,6 +892,8 @@ impl AppState {
             });
         config.consent_sender = Some(consent_tx);
         config.tcp_addr = std::net::SocketAddr::from(([0, 0, 0, 0], self.host_runtime.port));
+        config.allow_input = self.host_runtime.allow_input.clone();
+        config.allow_clipboard = self.host_runtime.allow_clipboard.clone();
 
         let server = maho_host::HostServer::bind(config).map_err(|e| e.to_string())?;
 
@@ -813,6 +925,20 @@ impl AppState {
         self.host_runtime
             .auto_approve
             .store(enabled, Ordering::SeqCst);
+        self.get_host_status()
+    }
+
+    pub fn set_host_policy(
+        &self,
+        allow_input: bool,
+        allow_clipboard: bool,
+    ) -> Result<HostStatus, String> {
+        self.host_runtime
+            .allow_input
+            .store(allow_input, Ordering::SeqCst);
+        self.host_runtime
+            .allow_clipboard
+            .store(allow_clipboard, Ordering::SeqCst);
         self.get_host_status()
     }
 
@@ -2131,9 +2257,71 @@ pub mod commands {
     pub fn stop_host(state: State<'_, AppState>) -> Result<HostStatus, String> {
         state.stop_host()
     }
+
+    #[tauri::command]
+    pub fn set_host_policy(
+        state: State<'_, AppState>,
+        allow_input: bool,
+        allow_clipboard: bool,
+    ) -> Result<HostStatus, String> {
+        state.set_host_policy(allow_input, allow_clipboard)
+    }
+
+    static STREAM_OPTIONS_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
+
+    #[tauri::command]
+    pub fn set_stream_options(
+        state: State<'_, AppState>,
+        scale: f32,
+        fps: u16,
+        codec: String,
+        display_index: u8,
+    ) -> Result<(), String> {
+        let codec_pref = parse_stream_codec_preference(&codec)?;
+        if !(0.1..=1.0).contains(&scale) {
+            return Err(format!("Invalid scale factor {scale}: expected 0.1 to 1.0"));
+        }
+        let scale_permille = (scale * 1000.0).round() as u16;
+
+        let sess_opt = state.session.lock().map_err(|e| e.to_string())?;
+        let session = match sess_opt.as_ref() {
+            Some(s) => s,
+            None => return Err("not connected".to_string()),
+        };
+
+        let request_id = STREAM_OPTIONS_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let req = maho_proto::StreamOptionsRequest {
+            request_id,
+            scale_permille,
+            fps,
+            codec: codec_pref,
+            display_index,
+            bitrate: 0,
+        };
+        session
+            .request_stream_options(req)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub fn get_stream_state(state: State<'_, AppState>) -> Result<StreamStateDto, String> {
+        let sess_opt = state.session.lock().map_err(|e| e.to_string())?;
+        let session = match sess_opt.as_ref() {
+            Some(s) => s,
+            None => return Ok(StreamStateDto::default()),
+        };
+
+        match session.stream_state() {
+            Ok(s) => Ok(map_stream_state_to_dto(s)),
+            Err(_) => Ok(StreamStateDto::default()),
+        }
+    }
 }
 
-pub use commands::{get_host_status, set_auto_approve, start_host, stop_host};
+pub use commands::{
+    get_host_status, get_stream_state, set_auto_approve, set_host_policy, set_stream_options,
+    start_host, stop_host,
+};
 
 // Shared by the actual connect worker and media integration tests.
 fn dispatch_media_event(
@@ -2404,7 +2592,10 @@ pub fn run() {
             commands::get_host_status,
             commands::start_host,
             commands::stop_host,
-            commands::set_auto_approve
+            commands::set_auto_approve,
+            commands::set_host_policy,
+            commands::set_stream_options,
+            commands::get_stream_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2673,6 +2864,8 @@ mod tests {
         assert_ne!(status.pin, "12345678");
         assert_eq!(status.port, maho_host::session::DEFAULT_TCP_PORT);
         assert!(!status.auto_approve);
+        assert!(status.allow_input);
+        assert!(status.allow_clipboard);
         assert!(!status.ip.is_empty());
     }
 
@@ -2686,6 +2879,132 @@ mod tests {
         let stopped_status = state.stop_host().unwrap();
         assert!(!stopped_status.running);
         assert!(!state.host_runtime.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_set_host_policy() {
+        let state = AppState::default();
+        let status = state.set_host_policy(false, false).unwrap();
+        assert!(!status.allow_input);
+        assert!(!status.allow_clipboard);
+
+        let status2 = state.set_host_policy(true, false).unwrap();
+        assert!(status2.allow_input);
+        assert!(!status2.allow_clipboard);
+    }
+
+    #[test]
+    fn test_parse_stream_codec_preference() {
+        assert_eq!(
+            parse_stream_codec_preference("auto").unwrap(),
+            maho_proto::StreamCodecPreference::Auto
+        );
+        assert_eq!(
+            parse_stream_codec_preference("h264").unwrap(),
+            maho_proto::StreamCodecPreference::H264
+        );
+        assert_eq!(
+            parse_stream_codec_preference("hevc").unwrap(),
+            maho_proto::StreamCodecPreference::Hevc
+        );
+        assert_eq!(
+            parse_stream_codec_preference("Auto").unwrap(),
+            maho_proto::StreamCodecPreference::Auto
+        );
+        assert_eq!(
+            parse_stream_codec_preference("H264").unwrap(),
+            maho_proto::StreamCodecPreference::H264
+        );
+        assert_eq!(
+            parse_stream_codec_preference("Hevc").unwrap(),
+            maho_proto::StreamCodecPreference::Hevc
+        );
+        assert!(parse_stream_codec_preference("vp9").is_err());
+        assert!(parse_stream_codec_preference("av1").is_err());
+    }
+
+    #[test]
+    fn test_stream_state_to_dto_mapping_and_json_serialization() {
+        let state = maho_app::StreamState {
+            host_supports_stream_options: true,
+            active: Some(maho_proto::StreamOptionsActive {
+                request_id: 42,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                codec: maho_proto::StreamCodecPreference::Hevc,
+                display_index: 1,
+                bitrate: 20_000_000,
+            }),
+            displays: vec![
+                maho_proto::HostDisplay {
+                    index: 0,
+                    name: "DP-1".to_string(),
+                    width: 2560,
+                    height: 1440,
+                    primary: true,
+                },
+                maho_proto::HostDisplay {
+                    index: 1,
+                    name: "HDMI-1".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    primary: false,
+                },
+            ],
+            policy: Some(maho_proto::HostPolicy {
+                allow_input: true,
+                allow_clipboard: false,
+            }),
+            last_reject: Some("test reject".to_string()),
+        };
+
+        let dto = map_stream_state_to_dto(state);
+        assert!(dto.supported);
+        assert_eq!(dto.last_reject.as_deref(), Some("test reject"));
+
+        let active = dto.active.as_ref().unwrap();
+        assert_eq!(active.width, 1920);
+        assert_eq!(active.height, 1080);
+        assert_eq!(active.fps, 60);
+        assert_eq!(active.codec, "hevc");
+        assert_eq!(active.display_index, 1);
+        assert_eq!(active.bitrate, Some(20_000_000));
+
+        assert_eq!(dto.displays.len(), 2);
+        assert_eq!(dto.displays[0].name, "DP-1");
+        assert!(dto.displays[0].primary);
+        assert_eq!(dto.displays[1].name, "HDMI-1");
+        assert!(!dto.displays[1].primary);
+
+        let policy = dto.policy.as_ref().unwrap();
+        assert!(policy.allow_input);
+        assert!(!policy.allow_clipboard);
+
+        // Serialize to JSON and verify exact camelCase contract matching ipc.ts
+        let json_value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json_value["supported"], true);
+        assert_eq!(json_value["lastReject"], "test reject");
+        assert_eq!(json_value["active"]["displayIndex"], 1);
+        assert_eq!(json_value["active"]["fps"], 60);
+        assert_eq!(json_value["active"]["codec"], "hevc");
+        assert_eq!(json_value["active"]["width"], 1920);
+        assert_eq!(json_value["active"]["height"], 1080);
+        assert_eq!(json_value["active"]["bitrate"], 20_000_000);
+        assert_eq!(json_value["displays"][0]["primary"], true);
+        assert_eq!(json_value["displays"][0]["index"], 0);
+        assert_eq!(json_value["displays"][0]["name"], "DP-1");
+        assert_eq!(json_value["policy"]["allowInput"], true);
+        assert_eq!(json_value["policy"]["allowClipboard"], false);
+
+        // Test default DTO
+        let default_dto = StreamStateDto::default();
+        let default_json = serde_json::to_value(&default_dto).unwrap();
+        assert_eq!(default_json["supported"], true);
+        assert_eq!(default_json["active"], serde_json::Value::Null);
+        assert_eq!(default_json["displays"], serde_json::json!([]));
+        assert_eq!(default_json["policy"], serde_json::Value::Null);
+        assert_eq!(default_json["lastReject"], serde_json::Value::Null);
     }
 
     #[test]

@@ -7,6 +7,29 @@ let setAudioMutedCalls: boolean[] = [];
 let setAudioDeviceCalls: (string | null)[] = [];
 let listAudioDevicesCalls = 0;
 let audioStatusCalls = 0;
+let setStreamOptionsCalls: any[] = [];
+let getStreamStateCalls = 0;
+
+let currentStreamState = {
+  active: {
+    width: 1920,
+    height: 1080,
+    fps: 60,
+    codec: "h264",
+    displayIndex: 0,
+    bitrate: 50,
+  } as any,
+  displays: [
+    { index: 0, name: "Display 1", width: 1920, height: 1080, primary: true },
+    { index: 1, name: "Display 2", width: 2560, height: 1440, primary: false },
+  ],
+  policy: {
+    allowInput: true,
+    allowClipboard: true,
+  },
+  lastReject: null as string | null,
+  supported: true,
+};
 
 let currentAudioStatus = {
   active: true,
@@ -48,6 +71,13 @@ mock.module("@/lib/ipc", () => {
       setAudioDeviceCalls.push(deviceId);
       currentAudioStatus = { ...currentAudioStatus, device_id: deviceId };
       return { ...currentAudioStatus };
+    },
+    setStreamOptions: async (args: any) => {
+      setStreamOptionsCalls.push(args);
+    },
+    getStreamState: async () => {
+      getStreamStateCalls++;
+      return { ...currentStreamState };
     },
     isNativeAvailable: () => true,
     invokeCommand: async () => {},
@@ -202,6 +232,28 @@ describe("SessionSettingsPanel", () => {
     setAudioDeviceCalls = [];
     listAudioDevicesCalls = 0;
     audioStatusCalls = 0;
+    setStreamOptionsCalls = [];
+    getStreamStateCalls = 0;
+    currentStreamState = {
+      active: {
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        codec: "h264",
+        displayIndex: 0,
+        bitrate: 50,
+      },
+      displays: [
+        { index: 0, name: "Display 1", width: 1920, height: 1080, primary: true },
+        { index: 1, name: "Display 2", width: 2560, height: 1440, primary: false },
+      ],
+      policy: {
+        allowInput: true,
+        allowClipboard: true,
+      },
+      lastReject: null,
+      supported: true,
+    };
     currentAudioStatus = {
       active: true,
       volume: 1.0,
@@ -336,6 +388,119 @@ describe("SessionSettingsPanel", () => {
       });
 
       expect(audioStatusCalls).toBeGreaterThanOrEqual(1);
+      expect(getStreamStateCalls).toBeGreaterThanOrEqual(1);
+
+      act(() => {
+        root.unmount();
+      });
+    }
+  });
+
+  it("renders host-confirmed active state and applies stream options", async () => {
+    if (typeof document !== "undefined" && typeof document.createElement === "function") {
+      const container = document.createElement("div");
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(React.createElement(SessionSettingsPanel, { isConnected: true }));
+      });
+
+      const activeEl = container.querySelector("#stream-active");
+      expect(activeEl).not.toBeNull();
+      expect(activeEl?.textContent).toContain("Host: 1920x1080 · 60 fps · H.264 · display 0");
+
+      // Click 50% scale
+      const scale50Btn = container.querySelector("#stream-scale-50") as HTMLButtonElement | null;
+      expect(scale50Btn).not.toBeNull();
+      await act(async () => {
+        scale50Btn?.click();
+      });
+
+      // Click 120 fps
+      const fps120Btn = container.querySelector("#stream-fps-120") as HTMLButtonElement | null;
+      expect(fps120Btn).not.toBeNull();
+      await act(async () => {
+        fps120Btn?.click();
+      });
+
+      // Click HEVC codec
+      const codecHevcBtn = container.querySelector("#stream-codec-hevc") as HTMLButtonElement | null;
+      expect(codecHevcBtn).not.toBeNull();
+      await act(async () => {
+        codecHevcBtn?.click();
+      });
+
+      // Click Display 1
+      const display1Btn = container.querySelector("#stream-display-1") as HTMLButtonElement | null;
+      expect(display1Btn).not.toBeNull();
+      await act(async () => {
+        display1Btn?.click();
+      });
+
+      // Click Apply button
+      const applyBtn = container.querySelector("#btn-stream-apply") as HTMLButtonElement | null;
+      expect(applyBtn).not.toBeNull();
+      await act(async () => {
+        applyBtn?.click();
+      });
+
+      expect(setStreamOptionsCalls.length).toBe(1);
+      expect(setStreamOptionsCalls[0]).toEqual({
+        scale: 0.5,
+        fps: 120,
+        codec: "hevc",
+        displayIndex: 1,
+      });
+
+      act(() => {
+        root.unmount();
+      });
+    }
+  });
+
+  it("renders rejection alert when lastReject is present and displays waiting text when active is null", async () => {
+    currentStreamState.active = null;
+    currentStreamState.lastReject = "Encoder does not support 120 fps";
+
+    if (typeof document !== "undefined" && typeof document.createElement === "function") {
+      const container = document.createElement("div");
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(React.createElement(SessionSettingsPanel, { isConnected: true }));
+      });
+
+      const activeEl = container.querySelector("#stream-active");
+      expect(activeEl?.textContent).toBe("Waiting for host confirmation");
+
+      const rejectEl = container.querySelector("#stream-reject");
+      expect(rejectEl).not.toBeNull();
+      expect(rejectEl?.textContent).toBe("Encoder does not support 120 fps");
+
+      act(() => {
+        root.unmount();
+      });
+    }
+  });
+
+  it("renders unsupported message and disables controls when supported is false", async () => {
+    currentStreamState.supported = false;
+
+    if (typeof document !== "undefined" && typeof document.createElement === "function") {
+      const container = document.createElement("div");
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(React.createElement(SessionSettingsPanel, { isConnected: true }));
+      });
+
+      expect(container.textContent).toContain("This host does not support stream options");
+
+      const scale100Btn = container.querySelector("#stream-scale-100") as HTMLButtonElement | null;
+      expect(scale100Btn?.disabled).toBe(true);
+
+      const applyBtn = container.querySelector("#btn-stream-apply") as HTMLButtonElement | null;
+      expect(applyBtn?.disabled).toBe(true);
 
       act(() => {
         root.unmount();

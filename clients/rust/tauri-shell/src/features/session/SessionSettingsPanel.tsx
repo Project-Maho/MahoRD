@@ -6,8 +6,12 @@ import {
   setAudioVolume,
   setAudioMuted,
   setAudioDevice,
+  setStreamOptions,
+  getStreamState,
   type DesktopAudioStatus,
   type DesktopAudioDevice,
+  type StreamState,
+  type StreamCodec,
 } from "@/lib/ipc";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -109,6 +113,20 @@ export interface SessionSettingsPanelProps {
   onError?: (error: string) => void;
 }
 
+export const STREAM_SCALE_OPTIONS = [
+  { label: "100%", value: 1.0 },
+  { label: "75%", value: 0.75 },
+  { label: "50%", value: 0.5 },
+] as const;
+
+export const STREAM_FPS_OPTIONS = [30, 60, 120] as const;
+
+export const STREAM_CODEC_OPTIONS: { label: string; value: StreamCodec }[] = [
+  { label: "Auto", value: "auto" },
+  { label: "H.264", value: "h264" },
+  { label: "HEVC", value: "hevc" },
+];
+
 export function SessionSettingsPanel({
   isConnected = true,
   onReleaseInputs,
@@ -117,6 +135,15 @@ export function SessionSettingsPanel({
   // Quality / Bitrate state
   const [bitrate, setBitrateState] = useState<number>(savedBitrateMbps);
   const [qualityError, setQualityError] = useState<string | null>(null);
+
+  // Stream state
+  const [streamState, setStreamState] = useState<StreamState | null>(null);
+  const [streamScale, setStreamScale] = useState<number>(1.0);
+  const [streamFps, setStreamFps] = useState<number>(60);
+  const [streamCodec, setStreamCodec] = useState<StreamCodec>("auto");
+  const [selectedDisplayIndex, setSelectedDisplayIndex] = useState<number>(0);
+  const [streamApplying, setStreamApplying] = useState(false);
+  const [streamApplyError, setStreamApplyError] = useState<string | null>(null);
 
   // Audio state
   const [audioState, setAudioState] = useState<DesktopAudioStatus | null>(null);
@@ -131,6 +158,54 @@ export function SessionSettingsPanel({
 
   const isConnectedRef = useRef(isConnected);
   isConnectedRef.current = isConnected;
+
+  // Poll stream state every 1s while mounted
+  useEffect(() => {
+    let mounted = true;
+    const fetchStream = async () => {
+      if (typeof getStreamState !== "function") return;
+      try {
+        const state = await getStreamState();
+        if (!mounted || !state) return;
+        setStreamState(state);
+      } catch (err: any) {
+        if (!mounted) return;
+      }
+    };
+
+    fetchStream();
+    const interval = setInterval(fetchStream, 1000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleApplyStreamOptions = useCallback(async () => {
+    setStreamApplying(true);
+    setStreamApplyError(null);
+    try {
+      if (typeof setStreamOptions === "function") {
+        await setStreamOptions({
+          scale: streamScale,
+          fps: streamFps,
+          codec: streamCodec,
+          displayIndex: selectedDisplayIndex,
+        });
+      }
+      // Re-fetch stream state immediately after applying
+      if (typeof getStreamState === "function") {
+        const state = await getStreamState();
+        if (state) setStreamState(state);
+      }
+    } catch (err: any) {
+      const errStr = String(err?.message ?? err ?? "Failed to apply stream options");
+      setStreamApplyError(errStr);
+      onError?.(errStr);
+    } finally {
+      setStreamApplying(false);
+    }
+  }, [streamScale, streamFps, streamCodec, selectedDisplayIndex, onError]);
 
   // Handle bitrate change: persists to localStorage and calls setBitrate when connected
   const handleBitrateChange = useCallback(
@@ -310,8 +385,201 @@ export function SessionSettingsPanel({
 
   const devices: DesktopAudioDevice[] = audioState?.devices ?? [];
 
+  // Stream controls enabled condition
+  const streamSupported = streamState ? streamState.supported : true;
+  const streamControlsDisabled = !isConnected || streamApplying || !streamSupported;
+
+  // Active status description
+  const activeStream = streamState?.active;
+  const activeCodecLabel = activeStream
+    ? ({ auto: "Auto", h264: "H.264", hevc: "HEVC" } as Record<string, string>)[activeStream.codec] ?? activeStream.codec
+    : "";
+  const activeStatusText = activeStream
+    ? `Host: ${activeStream.width}x${activeStream.height} · ${activeStream.fps} fps · ${activeCodecLabel} · display ${activeStream.displayIndex}`
+    : "Waiting for host confirmation";
+
+  const displays = streamState?.displays ?? [];
+  const showDisplaySelector = displays.length >= 2;
+
   return (
     <div className="flex flex-col gap-3">
+      {/* Stream Options Section */}
+      <Separator />
+
+      <div className="text-[11px] font-medium text-muted-foreground">
+        Stream
+      </div>
+
+      {!streamSupported && (
+        <p className="text-xs text-muted-foreground">
+          This host does not support stream options
+        </p>
+      )}
+
+      {/* Resolution / Scale */}
+      <div className="flex flex-col gap-1.5">
+        <span id="stream-scale-label" className="text-[12.5px] font-medium text-muted-foreground">
+          Resolution
+        </span>
+        <div
+          id="stream-scale-group"
+          role="group"
+          aria-labelledby="stream-scale-label"
+          className="grid h-9 grid-cols-3 gap-1 rounded-[10px] surface-well p-1"
+        >
+          {STREAM_SCALE_OPTIONS.map((opt) => {
+            const pressed = streamScale === opt.value;
+            const idSuffix = String(Math.round(opt.value * 100));
+            return (
+              <button
+                key={opt.value}
+                id={`stream-scale-${idSuffix}`}
+                type="button"
+                aria-pressed={pressed}
+                disabled={streamControlsDisabled}
+                onClick={() => setStreamScale(opt.value)}
+                className={`rounded-lg text-[12.5px] font-medium tabular-nums transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring disabled:opacity-50 ${
+                  pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Frame Rate / FPS */}
+      <div className="flex flex-col gap-1.5">
+        <span id="stream-fps-label" className="text-[12.5px] font-medium text-muted-foreground">
+          FPS
+        </span>
+        <div
+          id="stream-fps-group"
+          role="group"
+          aria-labelledby="stream-fps-label"
+          className="grid h-9 grid-cols-3 gap-1 rounded-[10px] surface-well p-1"
+        >
+          {STREAM_FPS_OPTIONS.map((fpsVal) => {
+            const pressed = streamFps === fpsVal;
+            return (
+              <button
+                key={fpsVal}
+                id={`stream-fps-${fpsVal}`}
+                type="button"
+                aria-pressed={pressed}
+                disabled={streamControlsDisabled}
+                onClick={() => setStreamFps(fpsVal)}
+                className={`rounded-lg text-[12.5px] font-medium tabular-nums transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring disabled:opacity-50 ${
+                  pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {fpsVal}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Video Codec */}
+      <div className="flex flex-col gap-1.5">
+        <span id="stream-codec-label" className="text-[12.5px] font-medium text-muted-foreground">
+          Codec
+        </span>
+        <div
+          id="stream-codec-group"
+          role="group"
+          aria-labelledby="stream-codec-label"
+          className="grid h-9 grid-cols-3 gap-1 rounded-[10px] surface-well p-1"
+        >
+          {STREAM_CODEC_OPTIONS.map((codecOpt) => {
+            const pressed = streamCodec === codecOpt.value;
+            return (
+              <button
+                key={codecOpt.value}
+                id={`stream-codec-${codecOpt.value}`}
+                type="button"
+                aria-pressed={pressed}
+                disabled={streamControlsDisabled}
+                onClick={() => setStreamCodec(codecOpt.value)}
+                className={`rounded-lg text-[12.5px] font-medium transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring disabled:opacity-50 ${
+                  pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {codecOpt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Display Selector (hidden when <2 displays) */}
+      {showDisplaySelector && (
+        <div className="flex flex-col gap-1.5">
+          <span id="stream-display-label" className="text-[12.5px] font-medium text-muted-foreground">
+            Display
+          </span>
+          <div
+            id="stream-display-group"
+            role="group"
+            aria-labelledby="stream-display-label"
+            className="flex flex-col gap-1 rounded-[10px] surface-well p-1"
+          >
+            {displays.map((disp) => {
+              const pressed = selectedDisplayIndex === disp.index;
+              return (
+                <button
+                  key={disp.index}
+                  id={`stream-display-${disp.index}`}
+                  type="button"
+                  aria-pressed={pressed}
+                  disabled={streamControlsDisabled}
+                  onClick={() => setSelectedDisplayIndex(disp.index)}
+                  className={`h-8 truncate rounded-lg px-2.5 text-left text-[12.5px] font-medium transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring disabled:opacity-50 ${
+                    pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {`${disp.name} · ${disp.width}x${disp.height}`}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Apply Button */}
+      <div className="pt-1">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          id="btn-stream-apply"
+          disabled={streamControlsDisabled}
+          aria-busy={streamApplying}
+          onClick={handleApplyStreamOptions}
+        >
+          Apply stream options
+        </Button>
+      </div>
+
+      {/* Host-confirmed active state */}
+      <p id="stream-active" role="status" className="text-xs text-muted-foreground">
+        {activeStatusText}
+      </p>
+
+      {/* Stream rejection alert */}
+      {streamState?.lastReject && (
+        <p id="stream-reject" role="alert" className="text-xs text-destructive">
+          {streamState.lastReject}
+        </p>
+      )}
+
+      {streamApplyError && (
+        <p role="alert" className="text-xs text-destructive">
+          {streamApplyError}
+        </p>
+      )}
+
       <Separator />
 
       {/* Video Quality Section */}

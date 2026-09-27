@@ -12,6 +12,7 @@ import {
   startHost,
   stopHost,
   setAutoApprove,
+  setHostPolicy,
   type PairingSummary,
   type HostStatus,
 } from "@/lib/ipc"
@@ -60,6 +61,8 @@ export function SettingsPage({ connection }: SettingsPageProps) {
   })
   const [autoApproveBusy, setAutoApproveBusy] = useState(false)
   const [autoApproveError, setAutoApproveError] = useState<string | null>(null)
+  const [policyBusy, setPolicyBusy] = useState(false)
+  const [policyError, setPolicyError] = useState<string | null>(null)
 
   useEffect(() => connection.subscribe((s) => setConnBusy(s.busy)), [connection])
 
@@ -114,6 +117,58 @@ export function SettingsPage({ connection }: SettingsPageProps) {
       setAutoApproveError(String(err?.message ?? err ?? "Failed to toggle auto-approve"))
     } finally {
       setAutoApproveBusy(false)
+    }
+  }
+
+  const handleToggleAllowInput = async () => {
+    if (!native || policyBusy || hostBusy) return
+    const currentInput = hostStatus?.allow_input ?? true
+    const currentClipboard = hostStatus?.allow_clipboard ?? true
+    const nextInput = !currentInput
+    setPolicyBusy(true)
+    setPolicyError(null)
+    try {
+      const updated = await setHostPolicy({
+        allowInput: nextInput,
+        allowClipboard: currentClipboard,
+      })
+      if (updated) {
+        setHostStatus(updated)
+      } else {
+        const refreshed = await getHostStatus()
+        if (refreshed) setHostStatus(refreshed)
+      }
+    } catch (err: any) {
+      console.error("Failed to update host policy:", err)
+      setPolicyError(String(err?.message ?? err ?? "Failed to update host policy"))
+    } finally {
+      setPolicyBusy(false)
+    }
+  }
+
+  const handleToggleAllowClipboard = async () => {
+    if (!native || policyBusy || hostBusy) return
+    const currentInput = hostStatus?.allow_input ?? true
+    const currentClipboard = hostStatus?.allow_clipboard ?? true
+    const nextClipboard = !currentClipboard
+    setPolicyBusy(true)
+    setPolicyError(null)
+    try {
+      const updated = await setHostPolicy({
+        allowInput: currentInput,
+        allowClipboard: nextClipboard,
+      })
+      if (updated) {
+        setHostStatus(updated)
+      } else {
+        const refreshed = await getHostStatus()
+        if (refreshed) setHostStatus(refreshed)
+      }
+    } catch (err: any) {
+      console.error("Failed to update host policy:", err)
+      setPolicyError(String(err?.message ?? err ?? "Failed to update host policy"))
+    } finally {
+      setPolicyBusy(false)
     }
   }
 
@@ -215,6 +270,82 @@ export function SettingsPage({ connection }: SettingsPageProps) {
             >
               <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
               <span>{autoApproveError}</span>
+            </div>
+          )}
+
+          <div className="border-t border-white/5 pt-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-0.5">
+                <label
+                  htmlFor="toggle-allow-input"
+                  className="text-[13px] font-medium text-foreground cursor-pointer"
+                >
+                  Allow remote keyboard &amp; mouse
+                </label>
+                <p className="text-xs text-subtle-foreground">
+                  Let connected clients control this computer's keyboard and mouse.
+                </p>
+              </div>
+              <button
+                id="toggle-allow-input"
+                type="button"
+                role="switch"
+                aria-checked={hostStatus?.allow_input ?? true}
+                disabled={!native || hostBusy || policyBusy}
+                onClick={handleToggleAllowInput}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-50 ${
+                  (hostStatus?.allow_input ?? true) ? "bg-primary" : "bg-white/10"
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block size-4 transform rounded-full bg-white shadow-sm transition-transform duration-150 ${
+                    (hostStatus?.allow_input ?? true) ? "translate-x-4" : "translate-x-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+
+          <div className="border-t border-white/5 pt-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-0.5">
+                <label
+                  htmlFor="toggle-allow-clipboard"
+                  className="text-[13px] font-medium text-foreground cursor-pointer"
+                >
+                  Allow clipboard sync
+                </label>
+                <p className="text-xs text-subtle-foreground">
+                  Synchronize text clipboard content between this host and connected clients.
+                </p>
+              </div>
+              <button
+                id="toggle-allow-clipboard"
+                type="button"
+                role="switch"
+                aria-checked={hostStatus?.allow_clipboard ?? true}
+                disabled={!native || hostBusy || policyBusy}
+                onClick={handleToggleAllowClipboard}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-50 ${
+                  (hostStatus?.allow_clipboard ?? true) ? "bg-primary" : "bg-white/10"
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block size-4 transform rounded-full bg-white shadow-sm transition-transform duration-150 ${
+                    (hostStatus?.allow_clipboard ?? true) ? "translate-x-4" : "translate-x-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+
+          {policyError && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-[13px] text-destructive"
+            >
+              <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+              <span>{policyError}</span>
             </div>
           )}
         </div>

@@ -124,6 +124,73 @@ export interface HostStatus {
   port: number;
   pin: string;
   auto_approve: boolean;
+  allow_input?: boolean;
+  allow_clipboard?: boolean;
+}
+
+/**
+ * Parameters for setting host input and clipboard policy.
+ */
+export interface SetHostPolicyArgs {
+  allowInput: boolean;
+  allowClipboard: boolean;
+}
+
+/**
+ * Codec selection for stream options.
+ */
+export type StreamCodec = "auto" | "h264" | "hevc";
+
+/**
+ * Parameters for setting stream options.
+ */
+export interface SetStreamOptionsArgs {
+  scale: number;
+  fps: number;
+  codec: StreamCodec;
+  displayIndex: number;
+}
+
+/**
+ * Display output description from host stream state.
+ */
+export interface StreamDisplay {
+  index: number;
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+}
+
+/**
+ * Host stream active settings confirmed by host.
+ */
+export interface StreamActiveState {
+  width: number;
+  height: number;
+  fps: number;
+  codec: string;
+  displayIndex: number;
+  bitrate?: number;
+}
+
+/**
+ * Stream policy settings returned by host stream state.
+ */
+export interface StreamPolicyState {
+  allowInput: boolean;
+  allowClipboard: boolean;
+}
+
+/**
+ * Current stream state including active settings, displays, policy, and rejection.
+ */
+export interface StreamState {
+  active: StreamActiveState | null;
+  displays: StreamDisplay[];
+  policy: StreamPolicyState | null;
+  lastReject: string | null;
+  supported: boolean;
 }
 
 /**
@@ -367,4 +434,20 @@ export const stopHost = () => invokeCommand<HostStatus>("stop_host");
 // MAHO_COMMANDS, whose exact 22-entry contract is pinned by ipc.test.ts.
 export const setAutoApprove = (enabled: boolean) =>
   invokeCommand<HostStatus>("set_auto_approve" as MahoCommand, { enabled });
+
+export const setHostPolicy = (args: SetHostPolicyArgs) =>
+  invokeCommand<HostStatus>(
+    "set_host_policy" as MahoCommand,
+    args as unknown as Record<string, unknown>
+  );
+
+export const setStreamOptions = (args: SetStreamOptionsArgs) =>
+  invokeCommand<void>(
+    "set_stream_options" as MahoCommand,
+    args as unknown as Record<string, unknown>
+  );
+
+export const getStreamState = () =>
+  invokeCommand<StreamState>("get_stream_state" as MahoCommand);
+
 
