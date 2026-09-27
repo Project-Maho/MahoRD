@@ -200,6 +200,7 @@ mod ffmpeg_impl {
     pub struct HevcDecoder {
         decoder: codec::decoder::Video,
         scaler: Option<scaling::Context>,
+        scaler_full_range: bool,
         acceleration: HardwareAcceleration,
         hw_device: *mut ffmpeg::ffi::AVBufferRef,
     }
@@ -261,6 +262,7 @@ mod ffmpeg_impl {
             Ok(Self {
                 decoder,
                 scaler: None,
+                scaler_full_range: false,
                 acceleration,
                 hw_device,
             })
@@ -361,24 +363,22 @@ mod ffmpeg_impl {
             let source = if decoded.format() == Pixel::NV12 {
                 decoded
             } else {
+                let full_range = is_full_range(decoded);
+
                 let needs_scaler = self.scaler.as_ref().map_or(true, |scaler| {
                     scaler.input().format != decoded.format()
                         || scaler.input().width != decoded.width()
                         || scaler.input().height != decoded.height()
+                        || self.scaler_full_range != full_range
                 });
                 if needs_scaler {
-                    self.scaler = Some(
-                        scaling::Context::get(
-                            decoded.format(),
-                            decoded.width(),
-                            decoded.height(),
-                            Pixel::NV12,
-                            decoded.width(),
-                            decoded.height(),
-                            scaling::Flags::FAST_BILINEAR,
-                        )
-                        .map_err(|error| DecodeError::Ffmpeg(error.to_string()))?,
-                    );
+                    self.scaler = Some(nv12_scaler(
+                        decoded.format(),
+                        decoded.width(),
+                        decoded.height(),
+                        full_range,
+                    )?);
+                    self.scaler_full_range = full_range;
                 }
                 converted = {
                     let mut converted = frame::Video::empty();
@@ -393,6 +393,66 @@ mod ffmpeg_impl {
             };
             copy_nv12(source, timestamp_ms)
         }
+    }
+
+    pub(super) fn is_full_range(frame: &frame::Video) -> bool {
+        matches!(
+            frame.format(),
+            Pixel::YUVJ420P | Pixel::YUVJ422P | Pixel::YUVJ444P
+        ) || frame.color_range() == ffmpeg::util::color::Range::JPEG
+    }
+
+    pub(super) fn nv12_scaler(
+        format: Pixel,
+        width: u32,
+        height: u32,
+        full_range: bool,
+    ) -> Result<scaling::Context, DecodeError> {
+        let mut context = scaling::Context::get(
+            format,
+            width,
+            height,
+            Pixel::NV12,
+            width,
+            height,
+            scaling::Flags::FAST_BILINEAR,
+        )
+        .map_err(|error| DecodeError::Ffmpeg(error.to_string()))?;
+
+        if full_range {
+            // SAFETY: `context.as_mut_ptr()` yields the valid, initialized SwsContext.
+            // We query the current colorspace details, then re-apply them setting both
+            // srcRange and dstRange to 1 (full range) so swscale does not compress luma
+            // from 0..255 into 16..235 when converting full-range YUV to NV12.
+            unsafe {
+                let sws_ctx = context.as_mut_ptr();
+                let mut inv_table: *mut std::ffi::c_int = ptr::null_mut();
+                let mut table: *mut std::ffi::c_int = ptr::null_mut();
+                let mut src_range: std::ffi::c_int = 0;
+                let mut dst_range: std::ffi::c_int = 0;
+                let mut brightness: std::ffi::c_int = 0;
+                let mut contrast: std::ffi::c_int = 0;
+                let mut saturation: std::ffi::c_int = 0;
+
+                let ret = ffmpeg::ffi::sws_getColorspaceDetails(
+                    sws_ctx,
+                    &mut inv_table,
+                    &mut src_range,
+                    &mut table,
+                    &mut dst_range,
+                    &mut brightness,
+                    &mut contrast,
+                    &mut saturation,
+                );
+                if ret >= 0 {
+                    ffmpeg::ffi::sws_setColorspaceDetails(
+                        sws_ctx, inv_table, 1, table, 1, brightness, contrast, saturation,
+                    );
+                }
+            }
+        }
+
+        Ok(context)
     }
 
     impl Drop for HevcDecoder {
@@ -617,6 +677,73 @@ mod tests {
         let result = crate::ffmpeg_impl::copy_nv12(&frame, 0);
         // Then the frame is rejected instead of panicking the decode thread.
         assert!(matches!(result, Err(DecodeError::UnsupportedFrame)));
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn full_range_yuvj420p_conversion_preserves_full_luma_range() {
+        use ffmpeg_next::{format::Pixel, frame};
+
+        // Given a 16x16 YUVJ420P frame with left half = 0 and right half = 255
+        let width = 16;
+        let height = 16;
+        let mut frame = frame::Video::new(Pixel::YUVJ420P, width, height);
+
+        let y_stride = frame.stride(0);
+        let y_data = frame.data_mut(0);
+        for y in 0..height as usize {
+            let row_start = y * y_stride;
+            for x in 0..width as usize {
+                y_data[row_start + x] = if x < 8 { 0 } else { 255 };
+            }
+        }
+
+        // Fill chroma U and V planes with 128 (neutral gray)
+        let u_stride = frame.stride(1);
+        let u_data = frame.data_mut(1);
+        for y in 0..(height / 2) as usize {
+            let row_start = y * u_stride;
+            for x in 0..(width / 2) as usize {
+                u_data[row_start + x] = 128;
+            }
+        }
+        let v_stride = frame.stride(2);
+        let v_data = frame.data_mut(2);
+        for y in 0..(height / 2) as usize {
+            let row_start = y * v_stride;
+            for x in 0..(width / 2) as usize {
+                v_data[row_start + x] = 128;
+            }
+        }
+
+        let is_full = crate::ffmpeg_impl::is_full_range(&frame);
+        assert!(is_full, "YUVJ420P must be detected as full range");
+
+        let mut scaler =
+            crate::ffmpeg_impl::nv12_scaler(frame.format(), width, height, is_full).unwrap();
+        let mut converted = frame::Video::empty();
+        scaler.run(&frame, &mut converted).unwrap();
+
+        let nv12 = crate::ffmpeg_impl::copy_nv12(&converted, 0).unwrap();
+        assert_eq!(nv12.width, width);
+        assert_eq!(nv12.height, height);
+
+        for y in 0..height as usize {
+            let row = &nv12.y_plane[y * nv12.y_stride..y * nv12.y_stride + width as usize];
+            for (x, &val) in row.iter().enumerate() {
+                if x < 8 {
+                    assert!(
+                        val <= 1,
+                        "left half luma must stay near 0 (got {val} at x={x}, y={y})"
+                    );
+                } else {
+                    assert!(
+                        val >= 254,
+                        "right half luma must stay near 255 (got {val} at x={x}, y={y})"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(feature = "ffmpeg")]

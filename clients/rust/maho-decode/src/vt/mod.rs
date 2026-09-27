@@ -200,8 +200,9 @@ impl HevcDecoder {
         };
 
         unsafe {
+            // Clients render NV12 as full range, so VideoToolbox must output full range.
             let pixel_format: i32 =
-                ffi::K_CVPIXEL_FORMAT_TYPE_420_YP_CB_CR8_BI_PLANAR_VIDEO_RANGE as i32;
+                ffi::K_CVPIXEL_FORMAT_TYPE_420_YP_CB_CR8_BI_PLANAR_FULL_RANGE as i32;
             let pixel_format_num = ffi::CFNumberCreate(
                 std::ptr::null(),
                 ffi::K_CFNUMBER_SINT32_TYPE,
