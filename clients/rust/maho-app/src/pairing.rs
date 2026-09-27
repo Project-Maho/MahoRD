@@ -343,7 +343,7 @@ impl PairingStore {
             let app_data = std::env::var_os("APPDATA")
                 .map(PathBuf::from)
                 .ok_or(PairingStoreError::NoApplicationDataDirectory)?;
-            return Ok(app_data.join("MahoRD").join("client-pairings.json"));
+            Ok(app_data.join("MahoRD").join("client-pairings.json"))
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -663,7 +663,8 @@ fn write_private_and_swap(
 }
 
 pub(crate) struct StoreFileLock {
-    file: fs::File,
+    // Held only to keep the lock until drop.
+    _file: fs::File,
 }
 
 #[cfg(unix)]
@@ -702,14 +703,14 @@ impl StoreFileLock {
         };
         rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
             .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
-        Ok(Self { file })
+        Ok(Self { _file: file })
     }
 }
 
 #[cfg(unix)]
 impl Drop for StoreFileLock {
     fn drop(&mut self) {
-        let _ = rustix::fs::flock(&self.file, rustix::fs::FlockOperation::Unlock);
+        let _ = rustix::fs::flock(&self._file, rustix::fs::FlockOperation::Unlock);
     }
 }
 
@@ -734,7 +735,7 @@ impl StoreFileLock {
                 .truncate(false)
                 .open(&lock_path)
             {
-                Ok(file) => return Ok(Self { file }),
+                Ok(file) => return Ok(Self { _file: file }),
                 Err(_) if start.elapsed() < std::time::Duration::from_secs(5) => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
