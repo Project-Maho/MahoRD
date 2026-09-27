@@ -2447,6 +2447,7 @@ impl MediaSource for LinuxMediaSource {
         {
             let sender = sender.clone();
             let fps = self.fps.max(1);
+            let scale_permille = self.scale_permille;
             let effective = reprobe_output_name(self.output_name.as_deref());
             let output_name = effective;
             workers.spawn("maho-linux-capture", true, move |handoff| {
@@ -2475,14 +2476,12 @@ impl MediaSource for LinuxMediaSource {
                         Duration::from_millis(50),
                     ) {
                         Ok(Some(frame)) => {
-                            let (bgra, stride, width, height) = if self.scale_permille < 1000 {
+                            let (bgra, stride, width, height) = if scale_permille < 1000 {
                                 let target_w =
-                                    (((frame.width as u64) * (self.scale_permille as u64) / 1000)
-                                        & !1)
+                                    (((frame.width as u64) * (scale_permille as u64) / 1000) & !1)
                                         .max(2) as u32;
                                 let target_h =
-                                    (((frame.height as u64) * (self.scale_permille as u64) / 1000)
-                                        & !1)
+                                    (((frame.height as u64) * (scale_permille as u64) / 1000) & !1)
                                         .max(2) as u32;
                                 let scaled = downscale_bgra_nearest(
                                     &frame.bgra,
@@ -2675,15 +2674,15 @@ fn bgra_to_nv12(
 }
 
 /// Requested pipeline configuration passed to the restart factory. Only the
-/// Linux CPU source reads every field; other platforms reject restarts.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Linux CPU source reads every field (the test factory ignores them), and
+/// other platforms reject restarts.
+#[cfg_attr(any(not(target_os = "linux"), test), allow(dead_code))]
 struct StreamRestart {
     width: u32,
     height: u32,
     scale_permille: u16,
     fps: u32,
     codec: StreamCodecPreference,
-    display_index: u8,
     output_name: Option<String>,
     bitrate: u32,
 }
@@ -3926,7 +3925,6 @@ impl HostServer {
                                             scale_permille: request.scale_permille,
                                             fps: request.fps as u32,
                                             codec: resolved_codec,
-                                            display_index: request.display_index,
                                             output_name,
                                             bitrate,
                                         };
