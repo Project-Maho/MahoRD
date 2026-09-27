@@ -7609,6 +7609,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_stream_options_rejects_display_index_out_of_range() {
+        let displays = vec![HostDisplay {
+            index: 0,
+            width: 1920,
+            height: 1080,
+            primary: true,
+            name: "Display 1".to_string(),
+        }];
+        let request = StreamOptionsRequest {
+            request_id: 1,
+            scale_permille: 1000,
+            fps: 60,
+            codec: StreamCodecPreference::Auto,
+            display_index: 1,
+            bitrate: 10_000_000,
+        };
+        let err = validate_stream_options(&request, &displays).unwrap_err();
+        assert_eq!(err.0, StreamConfigurationErrorCode::InvalidRequest);
+        assert!(validate_stream_options(&request, &[]).is_err());
+    }
+
+    #[test]
     fn downscale_bgra_nearest_halves_dimensions() {
         let sw = 4;
         let sh = 4;
