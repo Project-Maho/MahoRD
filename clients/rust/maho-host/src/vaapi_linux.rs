@@ -130,7 +130,10 @@ pub struct VaProcPipelineParameterBuffer {
     pub rotation_state: u32,
     pub blend_state: *const std::ffi::c_void,
     pub mirror_state: u32,
-    pub additional_flags: u32,
+    pub additional_outputs: *mut *mut std::ffi::c_void,
+    pub num_additional_outputs: u32,
+    pub input_surface_flag: u32,
+    pub output_surface_flag: u32,
     pub input_color_properties: VaProcColorProperties,
     pub output_color_properties: VaProcColorProperties,
     pub processing_mode: u32,
@@ -596,5 +599,41 @@ impl Drop for VaapiPipeline {
                 (self.va.destroy_config)(self.display, self.config_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn vpp_param_buffer_matches_libva_layout() {
+        assert_eq!(std::mem::size_of::<VaProcPipelineParameterBuffer>(), 224);
+        assert_eq!(
+            std::mem::offset_of!(VaProcPipelineParameterBuffer, mirror_state),
+            104
+        );
+        assert_eq!(
+            std::mem::offset_of!(VaProcPipelineParameterBuffer, additional_outputs),
+            112
+        );
+        assert_eq!(
+            std::mem::offset_of!(VaProcPipelineParameterBuffer, input_color_properties),
+            132
+        );
+        assert_eq!(
+            std::mem::offset_of!(VaProcPipelineParameterBuffer, output_color_properties),
+            140
+        );
+        assert_eq!(
+            std::mem::offset_of!(VaProcPipelineParameterBuffer, processing_mode),
+            148
+        );
+        assert_eq!(
+            std::mem::offset_of!(VaProcPipelineParameterBuffer, output_hdr_metadata),
+            152
+        );
+        assert_eq!(std::mem::size_of::<VaProcColorProperties>(), 8);
     }
 }
