@@ -70,6 +70,32 @@ impl MediaSource for WindowsGpuMediaSource {
                 display_power::set_keep_awake(true);
                 let _awake = KeepAwake;
 
+                struct TimerResolution {
+                    active: bool,
+                }
+                impl TimerResolution {
+                    fn new() -> Self {
+                        // SAFETY: timeBeginPeriod requests a minimum timer resolution of 1 ms
+                        // for the duration of the capture loop and has no pointer invariants.
+                        let ret = unsafe { windows::Win32::Media::timeBeginPeriod(1) };
+                        Self {
+                            active: ret == windows::Win32::Media::TIMERR_NOERROR,
+                        }
+                    }
+                }
+                impl Drop for TimerResolution {
+                    fn drop(&mut self) {
+                        if self.active {
+                            // SAFETY: timeEndPeriod clears the matching 1 ms period requested
+                            // during initialization when timeBeginPeriod returned TIMERR_NOERROR.
+                            unsafe {
+                                windows::Win32::Media::timeEndPeriod(1);
+                            }
+                        }
+                    }
+                }
+                let _timer_res = TimerResolution::new();
+
                 // Wait until the encoder finishes initialization before starting capture blits.
                 while !encoder_ready.load(Ordering::Acquire) {
                     if handoff.is_stopped() {
@@ -146,6 +172,7 @@ impl MediaSource for WindowsGpuMediaSource {
                     }
                 };
 
+                let mut next_deadline = Instant::now() + interval;
                 while !handoff.is_stopped() {
                     let started = Instant::now();
                     if let Some(trace) = host_trace::enabled() {
@@ -323,7 +350,11 @@ impl MediaSource for WindowsGpuMediaSource {
                         }
                     }
 
-                    handoff.pace_until(started + interval);
+                    handoff.pace_until(next_deadline);
+                    next_deadline += interval;
+                    if Instant::now() > next_deadline + interval {
+                        next_deadline = Instant::now() + interval;
+                    }
                 }
             })?;
         }
@@ -491,7 +522,7 @@ impl MediaSource for WindowsGpuMediaSource {
                     if pump_res.is_err() {
                         break;
                     }
-                    if encoder.scheduler.has_output {
+                    if encoder.scheduler.has_output > 0 {
                         match encoder.take_output() {
                             Ok(Some(encoded)) => {
                                 let video_frame = VideoFrame {

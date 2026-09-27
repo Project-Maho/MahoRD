@@ -44,8 +44,8 @@ pub enum SchedulerAction {
 
 #[derive(Default)]
 pub struct MftScheduler {
-    pub need_input: bool,
-    pub has_output: bool,
+    pub need_input: u32,
+    pub has_output: u32,
     pub draining: bool,
     pub drain_complete: bool,
     pub frame_duration_hns: i64,
@@ -56,8 +56,8 @@ pub struct MftScheduler {
 impl MftScheduler {
     pub fn new(frame_duration_hns: i64) -> Self {
         Self {
-            need_input: false,
-            has_output: false,
+            need_input: 0,
+            has_output: 0,
             draining: false,
             drain_complete: false,
             frame_duration_hns,
@@ -67,11 +67,11 @@ impl MftScheduler {
     }
 
     pub fn on_need_input(&mut self) {
-        self.need_input = true;
+        self.need_input = self.need_input.saturating_add(1);
     }
 
     pub fn on_have_output(&mut self) {
-        self.has_output = true;
+        self.has_output = self.has_output.saturating_add(1);
     }
 
     pub fn on_drain_complete(&mut self) {
@@ -90,13 +90,12 @@ impl MftScheduler {
         capture_at: Instant,
         encode_started_at: Instant,
     ) {
-        self.need_input = false;
+        self.need_input = self.need_input.saturating_sub(1);
         self.in_flight
             .insert(timestamp, (capture_at, encode_started_at));
     }
 
     pub fn take_output_timing(&mut self, timestamp: i64) -> Option<(Instant, Instant)> {
-        self.has_output = false;
         self.in_flight.remove(&timestamp).or_else(|| {
             let oldest_key = self.in_flight.keys().next().copied()?;
             self.in_flight.remove(&oldest_key)
@@ -104,9 +103,9 @@ impl MftScheduler {
     }
 
     pub fn decide(&self, has_pending_frame: bool) -> SchedulerAction {
-        if self.has_output {
+        if self.has_output > 0 {
             SchedulerAction::ProcessOutput
-        } else if self.need_input && has_pending_frame && !self.draining {
+        } else if self.need_input > 0 && has_pending_frame && !self.draining {
             SchedulerAction::SubmitInput
         } else if self.draining && self.drain_complete {
             SchedulerAction::Drained
@@ -118,6 +117,8 @@ impl MftScheduler {
 
 pub struct HwMftEncoder {
     transform: IMFTransform,
+    activate: IMFActivate,
+    _dxgi_manager: IMFDXGIDeviceManager,
     event_generator: IMFMediaEventGenerator,
     codec_api: Option<ICodecAPI>,
     config: EncoderConfig,
@@ -137,7 +138,7 @@ impl HwMftEncoder {
         let runtime = MediaFoundationRuntime::start()?;
         let duration_hns = 10_000_000_i64 / i64::from(config.fps.max(1));
 
-        let transform = enumerate_hw_mft(adapter_luid)?;
+        let (transform, activate) = enumerate_hw_mft(adapter_luid)?;
 
         // SAFETY: GetAttributes returns the MFT attribute store.
         let attributes: IMFAttributes = unsafe { transform.GetAttributes()? };
@@ -224,6 +225,8 @@ impl HwMftEncoder {
 
         Ok(Self {
             transform,
+            activate,
+            _dxgi_manager: dxgi_manager,
             event_generator,
             codec_api,
             config,
@@ -311,6 +314,7 @@ impl HwMftEncoder {
             self.transform
                 .ProcessOutput(0, &mut output_buffer, &mut status)
         };
+        self.scheduler.has_output = self.scheduler.has_output.saturating_sub(1);
 
         // SAFETY: ManuallyDrop::take extracts owned COM pointers from the output struct.
         let sample = unsafe { ManuallyDrop::take(&mut output_buffer[0].pSample) };
@@ -455,17 +459,22 @@ impl HwMftEncoder {
 
 impl Drop for HwMftEncoder {
     fn drop(&mut self) {
-        // SAFETY: Flushes transform and cleanly shuts down MFT via IMFShutdown.
+        // SAFETY: Flushes transform, cleanly shuts down MFT via IMFShutdown, detaches
+        // DXGI device manager, and shuts down the activation object to release driver worker threads.
         unsafe {
             let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
             if let Ok(shutdown) = self.transform.cast::<IMFShutdown>() {
                 let _ = shutdown.Shutdown();
             }
+            let _ = self
+                .transform
+                .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, 0);
+            let _ = self.activate.ShutdownObject();
         }
     }
 }
 
-fn enumerate_hw_mft(adapter_luid: LUID) -> Result<IMFTransform, EncodeError> {
+fn enumerate_hw_mft(adapter_luid: LUID) -> Result<(IMFTransform, IMFActivate), EncodeError> {
     let input_type = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
@@ -519,7 +528,7 @@ fn enumerate_hw_mft(adapter_luid: LUID) -> Result<IMFTransform, EncodeError> {
                 if selected.is_none() {
                     // SAFETY: ActivateObject instantiates the hardware MFT transform.
                     if let Ok(transform) = unsafe { activate.ActivateObject::<IMFTransform>() } {
-                        selected = Some(transform);
+                        selected = Some((transform, activate));
                     }
                 }
             }
@@ -530,8 +539,8 @@ fn enumerate_hw_mft(adapter_luid: LUID) -> Result<IMFTransform, EncodeError> {
         }
     }
 
-    if let Some(transform) = selected {
-        return Ok(transform);
+    if let Some((transform, activate)) = selected {
+        return Ok((transform, activate));
     }
 
     let mut activations_ex: *mut Option<IMFActivate> = ptr::null_mut();
@@ -555,7 +564,7 @@ fn enumerate_hw_mft(adapter_luid: LUID) -> Result<IMFTransform, EncodeError> {
                 if selected.is_none() {
                     // SAFETY: ActivateObject instantiates the hardware MFT transform.
                     if let Ok(transform) = unsafe { activate.ActivateObject::<IMFTransform>() } {
-                        selected = Some(transform);
+                        selected = Some((transform, activate));
                     }
                 }
             }
@@ -577,8 +586,8 @@ mod tests {
     #[test]
     fn scheduler_initial_state_and_wait() {
         let scheduler = MftScheduler::new(166_666);
-        assert!(!scheduler.need_input);
-        assert!(!scheduler.has_output);
+        assert_eq!(scheduler.need_input, 0);
+        assert_eq!(scheduler.has_output, 0);
         assert_eq!(scheduler.decide(false), SchedulerAction::Wait);
         assert_eq!(scheduler.decide(true), SchedulerAction::Wait);
     }
@@ -587,7 +596,7 @@ mod tests {
     fn scheduler_need_input_triggers_submission() {
         let mut scheduler = MftScheduler::new(166_666);
         scheduler.on_need_input();
-        assert!(scheduler.need_input);
+        assert_eq!(scheduler.need_input, 1);
         assert_eq!(scheduler.decide(false), SchedulerAction::Wait);
         assert_eq!(scheduler.decide(true), SchedulerAction::SubmitInput);
     }
@@ -611,10 +620,14 @@ mod tests {
         let s1 = scheduler.next_sample_time();
         assert_eq!(s1, 166_666);
 
+        scheduler.on_need_input();
+        assert_eq!(scheduler.need_input, 1);
         scheduler.register_input(s0, t0, t1);
-        assert!(!scheduler.need_input);
+        assert_eq!(scheduler.need_input, 0);
         assert_eq!(scheduler.in_flight.len(), 1);
 
+        scheduler.on_have_output();
+        assert_eq!(scheduler.has_output, 1);
         let timing = scheduler.take_output_timing(s0);
         assert_eq!(timing, Some((t0, t1)));
         assert_eq!(scheduler.in_flight.len(), 0);
@@ -632,5 +645,52 @@ mod tests {
         assert_eq!(scheduler.decide(true), SchedulerAction::Wait);
         scheduler.on_drain_complete();
         assert_eq!(scheduler.decide(true), SchedulerAction::Drained);
+    }
+
+    #[test]
+    fn scheduler_counts_multiple_need_input_events() {
+        let mut scheduler = MftScheduler::new(166_666);
+        let now = Instant::now();
+        scheduler.on_need_input();
+        scheduler.on_need_input();
+        assert_eq!(scheduler.need_input, 2);
+
+        assert_eq!(scheduler.decide(true), SchedulerAction::SubmitInput);
+        let s0 = scheduler.next_sample_time();
+        scheduler.register_input(s0, now, now);
+        assert_eq!(scheduler.need_input, 1);
+
+        assert_eq!(scheduler.decide(true), SchedulerAction::SubmitInput);
+        let s1 = scheduler.next_sample_time();
+        scheduler.register_input(s1, now, now);
+        assert_eq!(scheduler.need_input, 0);
+
+        assert_eq!(scheduler.decide(true), SchedulerAction::Wait);
+    }
+
+    #[test]
+    fn scheduler_counts_multiple_have_output_events() {
+        let mut scheduler = MftScheduler::new(166_666);
+        let now = Instant::now();
+        let s0 = scheduler.next_sample_time();
+        let s1 = scheduler.next_sample_time();
+        scheduler.register_input(s0, now, now);
+        scheduler.register_input(s1, now, now);
+
+        scheduler.on_have_output();
+        scheduler.on_have_output();
+        assert_eq!(scheduler.has_output, 2);
+
+        assert_eq!(scheduler.decide(true), SchedulerAction::ProcessOutput);
+        scheduler.has_output = scheduler.has_output.saturating_sub(1);
+        assert_eq!(scheduler.take_output_timing(s0), Some((now, now)));
+        assert_eq!(scheduler.has_output, 1);
+
+        assert_eq!(scheduler.decide(true), SchedulerAction::ProcessOutput);
+        scheduler.has_output = scheduler.has_output.saturating_sub(1);
+        assert_eq!(scheduler.take_output_timing(s1), Some((now, now)));
+        assert_eq!(scheduler.has_output, 0);
+
+        assert_eq!(scheduler.decide(true), SchedulerAction::Wait);
     }
 }

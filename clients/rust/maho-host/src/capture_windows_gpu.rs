@@ -448,7 +448,7 @@ impl GpuCapture {
         }
         let ov = ov.unwrap();
 
-        let stream = D3D11_VIDEO_PROCESSOR_STREAM {
+        let mut streams = [D3D11_VIDEO_PROCESSOR_STREAM {
             Enable: true.into(),
             OutputIndex: 0,
             InputFrameOrField: 0,
@@ -460,13 +460,21 @@ impl GpuCapture {
             ppPastSurfacesRight: ptr::null_mut(),
             pInputSurfaceRight: ManuallyDrop::new(None),
             ppFutureSurfacesRight: ptr::null_mut(),
-        };
+        }];
 
         // SAFETY: VideoProcessorBlt executes hardware color conversion blit.
-        unsafe {
+        let blt_res = unsafe {
             self.video_context
-                .VideoProcessorBlt(&self.video_processor, &ov, 0, &[stream])?;
+                .VideoProcessorBlt(&self.video_processor, &ov, 0, &streams)
+        };
+
+        // SAFETY: the stream owns these view references; VideoProcessorBlt only borrows them.
+        unsafe {
+            ManuallyDrop::drop(&mut streams[0].pInputSurface);
+            ManuallyDrop::drop(&mut streams[0].pInputSurfaceRight);
         }
+
+        blt_res?;
         Ok(())
     }
 }
