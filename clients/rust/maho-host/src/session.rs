@@ -16,10 +16,11 @@ use maho_net::{
 };
 use maho_proto::{
     AudioFragmentHeader, BitrateAdjust, Capabilities, ControlMessage, CursorUpdate, FrameHeader,
-    Handshake, InputAckMessage, InputEvent, PacketHeader, PacketType, PairingGrant, PairingReject,
-    PairingRejectReason, PairingRequest, StreamConfiguration, StreamConfigurationErrorCode,
-    StreamConfigurationReject, StreamConfigurationResponse, WireCodec, MAX_AUDIO_FRAGMENT_BYTES,
-    MAX_VIDEO_CHUNK_BYTES, PROTOCOL_VERSION,
+    Handshake, HostDisplay, HostDisplayList, HostPolicy, InputAckMessage, InputEvent, PacketHeader,
+    PacketType, PairingGrant, PairingReject, PairingRejectReason, PairingRequest,
+    StreamCodecPreference, StreamConfiguration, StreamConfigurationErrorCode,
+    StreamConfigurationReject, StreamConfigurationResponse, StreamOptionsActive, WireCodec,
+    MAX_AUDIO_FRAGMENT_BYTES, MAX_HOST_DISPLAY_NAME_BYTES, MAX_VIDEO_CHUNK_BYTES, PROTOCOL_VERSION,
 };
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use maho_proto::{ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdate};
@@ -394,9 +395,18 @@ pub struct HostConfig {
     /// Linux only: which output to capture. `None` picks the first output,
     /// which on Hyprland is frequently a headless output that never commits.
     pub output_name: Option<String>,
+    pub allow_input: Arc<AtomicBool>,
+    pub allow_clipboard: Arc<AtomicBool>,
 }
 
 impl HostConfig {
+    pub fn host_policy(&self) -> HostPolicy {
+        HostPolicy {
+            allow_input: self.allow_input.load(Ordering::SeqCst),
+            allow_clipboard: self.allow_clipboard.load(Ordering::SeqCst),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub fn macos_default(
         bootstrap_pin: Option<String>,
@@ -419,6 +429,8 @@ impl HostConfig {
             capture_audio: true,
             output_name: None,
             consent_sender: None,
+            allow_input: Arc::new(AtomicBool::new(true)),
+            allow_clipboard: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -462,6 +474,8 @@ impl HostConfig {
             capture_audio: false,
             output_name: None,
             consent_sender: None,
+            allow_input: Arc::new(AtomicBool::new(true)),
+            allow_clipboard: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -510,6 +524,8 @@ impl HostConfig {
             capture_audio: false,
             output_name,
             consent_sender: None,
+            allow_input: Arc::new(AtomicBool::new(true)),
+            allow_clipboard: Arc::new(AtomicBool::new(true)),
         })
     }
 }
@@ -1031,6 +1047,120 @@ pub fn focused_output_name() -> Option<String> {
     resolve_output_target(None, std::env::var("MAHO_OUTPUT").ok(), monitors.as_ref())
 }
 
+/// Truncates a UTF-8 string to at most `max_bytes` without slicing through a code point.
+fn truncate_str_to_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Enumerates host displays for HostDisplayList control messages.
+pub fn host_displays(config: &HostConfig) -> Vec<HostDisplay> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(monitors) = probe_hyprland_monitors() {
+            if let Some(array) = monitors.as_array() {
+                let mut displays = Vec::new();
+                for item in array {
+                    if displays.len() >= maho_proto::MAX_HOST_DISPLAYS {
+                        break;
+                    }
+                    let disabled = item
+                        .get("disabled")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    if disabled {
+                        continue;
+                    }
+                    let raw_name = item
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("output");
+                    let name =
+                        truncate_str_to_bytes(raw_name, MAX_HOST_DISPLAY_NAME_BYTES).to_string();
+                    let width = item
+                        .get("width")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0)
+                        .max(0.0) as u32;
+                    let height = item
+                        .get("height")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0)
+                        .max(0.0) as u32;
+                    let primary = item
+                        .get("focused")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let index = displays.len() as u8;
+                    displays.push(HostDisplay {
+                        index,
+                        width,
+                        height,
+                        primary,
+                        name,
+                    });
+                }
+                if !displays.is_empty() {
+                    return displays;
+                }
+            }
+        }
+    }
+
+    let raw_name = if config.host_name.is_empty() {
+        "primary"
+    } else {
+        &config.host_name
+    };
+    let name = truncate_str_to_bytes(raw_name, MAX_HOST_DISPLAY_NAME_BYTES).to_string();
+    vec![HostDisplay {
+        index: 0,
+        width: config.display.pixel_width,
+        height: config.display.pixel_height,
+        primary: true,
+        name,
+    }]
+}
+
+/// Validates requested stream options against bounds and available displays.
+pub fn validate_stream_options(
+    request: &maho_proto::StreamOptionsRequest,
+    displays: &[maho_proto::HostDisplay],
+) -> Result<(), (maho_proto::StreamConfigurationErrorCode, String)> {
+    if !(100..=1000).contains(&request.scale_permille) {
+        return Err((
+            maho_proto::StreamConfigurationErrorCode::UnsupportedDimensions,
+            format!(
+                "unsupported scale {} permille; must be 100..=1000",
+                request.scale_permille
+            ),
+        ));
+    }
+    if !(1..=240).contains(&request.fps) {
+        return Err((
+            maho_proto::StreamConfigurationErrorCode::UnsupportedFps,
+            format!("unsupported fps {}; must be 1..=240", request.fps),
+        ));
+    }
+    if (request.display_index as usize) >= displays.len() {
+        return Err((
+            maho_proto::StreamConfigurationErrorCode::InvalidRequest,
+            format!(
+                "display index {} out of range; {} displays available",
+                request.display_index,
+                displays.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 trait MediaHandle: Send {
     fn force_key_frame(&self) -> Result<(), SessionError>;
     fn update_bitrate(&self, bitrate: u32) -> Result<(), SessionError>;
@@ -1514,6 +1644,7 @@ mod mac_media_tests {
 #[derive(Clone)]
 struct SyntheticMediaSource {
     frame_count: u32,
+    restart_starts: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(test)]
@@ -1522,6 +1653,7 @@ struct SyntheticMediaHandle(Option<thread::JoinHandle<()>>);
 #[cfg(test)]
 impl MediaSource for SyntheticMediaSource {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
+        self.restart_starts.fetch_add(1, Ordering::SeqCst);
         let count = self.frame_count;
         let producer = thread::spawn(move || {
             for index in 0..count {
@@ -2193,6 +2325,37 @@ struct LinuxMediaSource {
     bitrate: u32,
     capture_audio: bool,
     output_name: Option<String>,
+    codec: LinuxVideoCodec,
+    scale_permille: u16,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn downscale_bgra_nearest(
+    src: &[u8],
+    src_stride: usize,
+    sw: u32,
+    sh: u32,
+    dw: u32,
+    dh: u32,
+) -> Vec<u8> {
+    if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
+        return Vec::new();
+    }
+    let mut dst = vec![0u8; (dw as usize) * (dh as usize) * 4];
+    for dy in 0..dh {
+        let sy = ((dy as u64) * (sh as u64) / (dh as u64)) as u32;
+        let src_row_start = (sy as usize) * src_stride;
+        let dst_row_start = (dy as usize) * (dw as usize) * 4;
+        for dx in 0..dw {
+            let sx = ((dx as u64) * (sw as u64) / (dw as u64)) as u32;
+            let src_px = src_row_start + (sx as usize) * 4;
+            let dst_px = dst_row_start + (dx as usize) * 4;
+            if src_px + 4 <= src.len() && dst_px + 4 <= dst.len() {
+                dst[dst_px..dst_px + 4].copy_from_slice(&src[src_px..src_px + 4]);
+            }
+        }
+    }
+    dst
 }
 
 #[cfg(target_os = "linux")]
@@ -2312,11 +2475,32 @@ impl MediaSource for LinuxMediaSource {
                         Duration::from_millis(50),
                     ) {
                         Ok(Some(frame)) => {
+                            let (bgra, stride, width, height) = if self.scale_permille < 1000 {
+                                let target_w =
+                                    (((frame.width as u64) * (self.scale_permille as u64) / 1000)
+                                        & !1)
+                                        .max(2) as u32;
+                                let target_h =
+                                    (((frame.height as u64) * (self.scale_permille as u64) / 1000)
+                                        & !1)
+                                        .max(2) as u32;
+                                let scaled = downscale_bgra_nearest(
+                                    &frame.bgra,
+                                    frame.stride as usize,
+                                    frame.width,
+                                    frame.height,
+                                    target_w,
+                                    target_h,
+                                );
+                                (scaled, (target_w as usize) * 4, target_w, target_h)
+                            } else {
+                                (frame.bgra, frame.stride as usize, frame.width, frame.height)
+                            };
                             if !handoff.publish(LinuxRawFrame {
-                                bgra: frame.bgra,
-                                stride: frame.stride as usize,
-                                width: frame.width,
-                                height: frame.height,
+                                bgra,
+                                stride,
+                                width,
+                                height,
                                 captured_at: Instant::now(),
                             }) {
                                 break;
@@ -2342,7 +2526,7 @@ impl MediaSource for LinuxMediaSource {
                 bitrate: self.bitrate as usize,
                 fps: self.fps.max(1),
                 keyframe_interval: self.fps.max(1),
-                preferred_codec: LinuxVideoCodec::Hevc,
+                preferred_codec: self.codec,
             };
             workers.spawn("maho-linux-encode", true, move |handoff| {
                 let result = native_pipeline::run_encoder(
@@ -2490,11 +2674,30 @@ fn bgra_to_nv12(
     Ok(nv12)
 }
 
+/// Requested pipeline configuration passed to the restart factory. Only the
+/// Linux CPU source reads every field; other platforms reject restarts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct StreamRestart {
+    width: u32,
+    height: u32,
+    scale_permille: u16,
+    fps: u32,
+    codec: StreamCodecPreference,
+    display_index: u8,
+    output_name: Option<String>,
+    bitrate: u32,
+}
+
+type RestartFactory = Arc<dyn Fn(&StreamRestart) -> Arc<dyn MediaSource> + Send + Sync>;
+
 pub struct HostServer {
     config: HostConfig,
     tcp_listener: TcpListener,
     udp_socket: UdpSocket,
     media_source: Arc<dyn MediaSource>,
+    restart_factory: Option<RestartFactory>,
+    #[cfg(test)]
+    synthetic_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
     lockout: Arc<Mutex<BootstrapLockout>>,
     pairing_deadline: Option<Instant>,
     bootstrap_identity: Option<PskIdentity>,
@@ -2561,6 +2764,8 @@ impl HostServer {
             bitrate: config.bitrate,
             capture_audio: config.capture_audio,
             output_name: config.output_name.clone(),
+            codec: LinuxVideoCodec::Hevc,
+            scale_permille: 1000,
         };
         if gpu_pipeline_requested() {
             return Ok(media_gpu_linux::gpu_source(cpu));
@@ -2614,11 +2819,18 @@ impl HostServer {
 
     #[cfg(test)]
     fn bind_synthetic(config: HostConfig, frame_count: u32) -> Result<Self, SessionError> {
-        Self::bind_with_media_advertising(
-            config,
-            Arc::new(SyntheticMediaSource { frame_count }),
-            false,
-        )
+        let restart_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let synthetic = Arc::new(SyntheticMediaSource {
+            frame_count,
+            restart_starts: Arc::clone(&restart_starts),
+        });
+        let factory_source = Arc::clone(&synthetic);
+        let factory: RestartFactory =
+            Arc::new(move |_restart| Arc::clone(&factory_source) as Arc<dyn MediaSource>);
+        let mut server =
+            Self::bind_with_media_advertising_and_factory(config, synthetic, Some(factory), false)?;
+        server.synthetic_starts = Some(restart_starts);
+        Ok(server)
     }
 
     #[cfg(test)]
@@ -2626,12 +2838,46 @@ impl HostServer {
         config: HostConfig,
         media_source: Arc<dyn MediaSource>,
     ) -> Result<Self, SessionError> {
-        Self::bind_with_media_advertising(config, media_source, false)
+        Self::bind_with_media_advertising_and_factory(config, media_source, None, false)
     }
 
     fn bind_with_media_advertising(
         config: HostConfig,
         media_source: Arc<dyn MediaSource>,
+        advertise: bool,
+    ) -> Result<Self, SessionError> {
+        #[cfg(all(target_os = "linux", not(test)))]
+        let factory: Option<RestartFactory> = {
+            let config_clone = config.clone();
+            Some(Arc::new(move |restart: &StreamRestart| {
+                let preferred_codec = match restart.codec {
+                    StreamCodecPreference::H264 => LinuxVideoCodec::H264,
+                    StreamCodecPreference::Hevc | StreamCodecPreference::Auto => {
+                        LinuxVideoCodec::Hevc
+                    }
+                };
+                Arc::new(LinuxMediaSource {
+                    fps: restart.fps,
+                    width: restart.width,
+                    height: restart.height,
+                    bitrate: restart.bitrate,
+                    capture_audio: config_clone.capture_audio,
+                    output_name: restart.output_name.clone(),
+                    codec: preferred_codec,
+                    scale_permille: restart.scale_permille,
+                })
+            }))
+        };
+        #[cfg(not(all(target_os = "linux", not(test))))]
+        let factory: Option<RestartFactory> = None;
+
+        Self::bind_with_media_advertising_and_factory(config, media_source, factory, advertise)
+    }
+
+    fn bind_with_media_advertising_and_factory(
+        config: HostConfig,
+        media_source: Arc<dyn MediaSource>,
+        restart_factory: Option<RestartFactory>,
         advertise: bool,
     ) -> Result<Self, SessionError> {
         if config
@@ -2692,6 +2938,9 @@ impl HostServer {
             tcp_listener,
             udp_socket,
             media_source,
+            restart_factory,
+            #[cfg(test)]
+            synthetic_starts: None,
             lockout,
             pairing_deadline,
             bootstrap_identity,
@@ -3008,6 +3257,11 @@ impl HostServer {
         let mut last_pong = Instant::now();
         let mut next_ping = Instant::now() + HEARTBEAT_INTERVAL;
         let mut stop_sender_tx = None;
+        let mut swap_tx: Option<mpsc::Sender<(Receiver<MediaEvent>, u32, u32)>> = None;
+        let mut stream_dims = (
+            self.config.display.pixel_width,
+            self.config.display.pixel_height,
+        );
         let mut sender_thread = None;
         // Terminal status of the media pipeline. One bounded slot so a dying
         // sender thread reports its exit without ever blocking on this channel.
@@ -3021,6 +3275,9 @@ impl HostServer {
         let mut clipboard = crate::clipboard_linux::LinuxClipboard::new().ok();
         #[cfg(target_os = "linux")]
         let mut next_clipboard_poll = Instant::now();
+        let mut peer_has_stream_options = false;
+        let mut last_sent_policy = self.config.host_policy();
+        let mut input_disabled_warned = false;
 
         let result = (|| -> Result<(), SessionError> {
             // If authenticated and media_receiver is set, we run UDP sending in a dedicated thread to avoid TCP blocking it.
@@ -3060,13 +3317,15 @@ impl HostServer {
                     }
                     if sender_thread.is_none() {
                         if let (Some(_), Some(peer)) = (&media_receiver, udp_peer) {
-                            let receiver = media_receiver.take().unwrap();
+                            let mut receiver = media_receiver.take().unwrap();
                             let udp_socket = self.udp_socket.try_clone()?;
                             let mut cipher = h2c_cipher.take().ok_or(SessionError::PreAuth)?;
-                            let pixel_width = self.config.display.pixel_width;
-                            let pixel_height = self.config.display.pixel_height;
+                            let mut pixel_width = stream_dims.0;
+                            let mut pixel_height = stream_dims.1;
                             let (stx, srx) = mpsc::channel();
                             stop_sender_tx = Some(stx);
+                            let (stx2, srx2) = mpsc::channel();
+                            swap_tx = Some(stx2);
                             let media_status_tx = media_status_tx.clone();
                             #[cfg(test)]
                             let media_source = self.media_source.clone();
@@ -3077,6 +3336,11 @@ impl HostServer {
                                     sender.trace.as_ref().map_or(0, |t| t.time(session_origin));
                                 info!(%peer, "Starting UDP sender thread");
                                 loop {
+                                    while let Ok((r, w, h)) = srx2.try_recv() {
+                                        receiver = r;
+                                        pixel_width = w;
+                                        pixel_height = h;
+                                    }
                                     if !matches!(srx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
                                         info!("UDP sender received stop signal");
                                         break;
@@ -3129,12 +3393,30 @@ impl HostServer {
                                             );
                                         }
                                         Ok(MediaEvent::Error(err)) => {
+                                            // The replaced pipeline may report its own stop as
+                                            // an error; switch to the new one instead of ending.
+                                            if let Ok((r, w, h)) = srx2.try_recv() {
+                                                warn!(%err, "replaced media pipeline reported an error");
+                                                receiver = r;
+                                                pixel_width = w;
+                                                pixel_height = h;
+                                                continue;
+                                            }
                                             warn!(%err, "Media event error in sender thread");
                                             let _ = media_status_tx.try_send(());
                                             break;
                                         }
                                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                                         Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                            // A restart hands over the new receiver before it
+                                            // stops the old pipeline, so a pending swap means
+                                            // this disconnect is the replaced pipeline ending.
+                                            if let Ok((r, w, h)) = srx2.try_recv() {
+                                                receiver = r;
+                                                pixel_width = w;
+                                                pixel_height = h;
+                                                continue;
+                                            }
                                             warn!("Media receiver disconnected, exiting sender thread");
                                             let _ = media_status_tx.try_send(());
                                             break;
@@ -3149,6 +3431,19 @@ impl HostServer {
                         }
                     }
                     let now = Instant::now();
+                    if peer_has_stream_options {
+                        let current_policy = self.config.host_policy();
+                        if current_policy != last_sent_policy {
+                            if let Err(error) = send_tcp_control(
+                                &mut stream,
+                                ControlMessage::HostPolicy(current_policy),
+                            ) {
+                                warn!(%error, "failed to send updated host policy");
+                            } else {
+                                last_sent_policy = current_policy;
+                            }
+                        }
+                    }
                     if now >= next_ping {
                         send_tcp_control(&mut stream, ControlMessage::Ping)?;
                         next_ping = now + HEARTBEAT_INTERVAL;
@@ -3158,7 +3453,7 @@ impl HostServer {
                         break;
                     }
                     #[cfg(any(target_os = "windows", target_os = "linux"))]
-                    if clipboard_sync {
+                    if clipboard_sync && self.config.allow_clipboard.load(Ordering::SeqCst) {
                         // Linux reads the pasteboard through a subprocess, so it
                         // is gated to the protocol's 500 ms cadence; the Win32
                         // poll is a single syscall and runs every iteration.
@@ -3367,6 +3662,9 @@ impl HostServer {
                             .ssl_stream()
                             .get_ref()
                             .set_write_timeout(Some(Duration::from_secs(5)))?;
+                        peer_has_stream_options = handshake
+                            .capabilities
+                            .contains(Capabilities::STREAM_OPTIONS);
                         let ack = Handshake {
                             name: self.config.host_name.clone(),
                             width: self.config.display.logical_width.min(u16::MAX as u32) as u16,
@@ -3374,7 +3672,8 @@ impl HostServer {
                             scale: self.config.display.scale_factor(),
                             version: PROTOCOL_VERSION,
                             capabilities: Capabilities::STREAM_CONFIGURATION
-                                | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+                                | Capabilities::AUTHENTICATED_UDP_REGISTRATION
+                                | Capabilities::STREAM_OPTIONS,
                             pairing_id: String::new(),
                             session_salt: [0_u8; 16],
                         };
@@ -3383,6 +3682,18 @@ impl HostServer {
                         *pipeline.lock().expect("pipeline slot poisoned") = Some(started);
                         media_receiver = Some(media_rx);
                         send_tcp_packet(&mut stream, PacketType::HandshakeAck, &ack.encode()?)?;
+                        if peer_has_stream_options {
+                            last_sent_policy = self.config.host_policy();
+                            send_tcp_control(
+                                &mut stream,
+                                ControlMessage::HostPolicy(last_sent_policy),
+                            )?;
+                            let displays = host_displays(&self.config);
+                            send_tcp_control(
+                                &mut stream,
+                                ControlMessage::HostDisplayList(HostDisplayList { displays }),
+                            )?;
+                        }
                         last_pong = Instant::now();
                         next_ping = Instant::now() + HEARTBEAT_INTERVAL;
                         info!(
@@ -3395,6 +3706,24 @@ impl HostServer {
                             continue;
                         }
                         let event = InputEvent::decode(payload)?;
+                        if !self.config.allow_input.load(Ordering::SeqCst) {
+                            if !input_disabled_warned {
+                                input_disabled_warned = true;
+                                warn!("input disabled by host policy");
+                                crate::host_log("input disabled by host policy");
+                            }
+                            let ack = InputAckMessage {
+                                sequence: header.sequence,
+                                success: false,
+                                error_code: 2,
+                            };
+                            if let Err(error) =
+                                send_tcp_control(&mut stream, ControlMessage::InputAck(ack))
+                            {
+                                warn!(%error, "failed to send input ACK");
+                            }
+                            continue;
+                        }
                         let success = inject_input(&event, |event| input.inject(event));
                         injected_input |= success;
                         let ack = InputAckMessage {
@@ -3525,6 +3854,142 @@ impl HostServer {
                                     }
                                 }
                             }
+                            ControlMessage::StreamOptionsRequest(request) => {
+                                let displays = host_displays(&self.config);
+                                match validate_stream_options(&request, &displays) {
+                                    Err((reason, message)) => {
+                                        send_tcp_control(
+                                            &mut stream,
+                                            ControlMessage::StreamConfigReject(
+                                                StreamConfigurationReject {
+                                                    request_id: request.request_id,
+                                                    reason,
+                                                    message,
+                                                },
+                                            ),
+                                        )?;
+                                        continue;
+                                    }
+                                    Ok(()) => {
+                                        // H2b: restart pipeline here
+                                        let factory = match &self.restart_factory {
+                                            Some(f) => f,
+                                            None => {
+                                                send_tcp_control(
+                                                    &mut stream,
+                                                    ControlMessage::StreamConfigReject(
+                                                        StreamConfigurationReject {
+                                                            request_id: request.request_id,
+                                                            reason:
+                                                                StreamConfigurationErrorCode::RejectedByPeer,
+                                                            message: "stream options are not supported on this host platform yet".to_owned(),
+                                                        },
+                                                    ),
+                                                )?;
+                                                continue;
+                                            }
+                                        };
+                                        let native_w = self.config.display.pixel_width;
+                                        let native_h = self.config.display.pixel_height;
+                                        let w = (((native_w as u64)
+                                            * (request.scale_permille as u64)
+                                            / 1000)
+                                            & !1)
+                                            .max(2)
+                                            as u32;
+                                        let h = (((native_h as u64)
+                                            * (request.scale_permille as u64)
+                                            / 1000)
+                                            & !1)
+                                            .max(2)
+                                            as u32;
+                                        let resolved_codec = match request.codec {
+                                            StreamCodecPreference::Auto
+                                            | StreamCodecPreference::Hevc => {
+                                                StreamCodecPreference::Hevc
+                                            }
+                                            StreamCodecPreference::H264 => {
+                                                StreamCodecPreference::H264
+                                            }
+                                        };
+                                        let bitrate = if request.bitrate != 0 {
+                                            request.bitrate
+                                        } else {
+                                            active_bitrate
+                                        };
+                                        let output_name = displays
+                                            .get(request.display_index as usize)
+                                            .map(|d| d.name.clone());
+                                        let restart = StreamRestart {
+                                            width: w,
+                                            height: h,
+                                            scale_permille: request.scale_permille,
+                                            fps: request.fps as u32,
+                                            codec: resolved_codec,
+                                            display_index: request.display_index,
+                                            output_name,
+                                            bitrate,
+                                        };
+                                        let source = factory(&restart);
+                                        let (tx, rx) = mpsc::sync_channel(16);
+                                        let new_handle = match source.start(tx) {
+                                            Ok(handle) => handle,
+                                            Err(error) => {
+                                                warn!(%error, "failed to start restarted media pipeline");
+                                                send_tcp_control(
+                                                    &mut stream,
+                                                    ControlMessage::StreamConfigReject(
+                                                        StreamConfigurationReject {
+                                                            request_id: request.request_id,
+                                                            reason:
+                                                                StreamConfigurationErrorCode::RejectedByPeer,
+                                                            message: format!("pipeline start error: {error}"),
+                                                        },
+                                                    ),
+                                                )?;
+                                                continue;
+                                            }
+                                        };
+                                        // Hand the receiver over FIRST
+                                        if let Some(ref stx) = swap_tx {
+                                            let _ = stx.send((rx, w, h));
+                                        } else {
+                                            media_receiver = Some(rx);
+                                            stream_dims = (w, h);
+                                        }
+                                        // THEN take old handle and stop it
+                                        let old_handle =
+                                            pipeline.lock().expect("pipeline slot poisoned").take();
+                                        if let Some(mut old) = old_handle {
+                                            old.stop();
+                                        }
+                                        if let Err(error) = new_handle.force_key_frame() {
+                                            warn!(%error, "failed to force key frame on restarted media pipeline");
+                                        }
+                                        *pipeline.lock().expect("pipeline slot poisoned") =
+                                            Some(new_handle);
+                                        active_bitrate = bitrate;
+                                        send_tcp_control(
+                                            &mut stream,
+                                            ControlMessage::StreamOptionsActive(
+                                                StreamOptionsActive {
+                                                    request_id: request.request_id,
+                                                    width: w,
+                                                    height: h,
+                                                    fps: request.fps,
+                                                    codec: resolved_codec,
+                                                    display_index: request.display_index,
+                                                    bitrate,
+                                                },
+                                            ),
+                                        )?;
+                                        crate::host_log(&format!(
+                                            "stream options applied: {w}x{h} fps={} codec={:?} display={}",
+                                            request.fps, resolved_codec, request.display_index
+                                        ));
+                                    }
+                                }
+                            }
                             ControlMessage::Ping => {
                                 send_tcp_control(&mut stream, ControlMessage::Pong)?;
                             }
@@ -3532,6 +3997,7 @@ impl HostServer {
                             ControlMessage::ClipboardSyncUpdate(update) => {
                                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                                 if clipboard_sync
+                                    && self.config.allow_clipboard.load(Ordering::SeqCst)
                                     && matches!(
                                         update.direction,
                                         ClipboardSyncDirection::ClientToHost
@@ -4005,7 +4471,7 @@ fn monotonic_us(origin: Instant, value: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maho_proto::{AudioFragment, FrameChunk};
+    use maho_proto::{AudioFragment, FrameChunk, StreamCodecPreference, StreamOptionsRequest};
     mod sender_trace {
         include!("sender_trace_tests.rs");
     }
@@ -4092,7 +4558,10 @@ mod tests {
         );
         config.tcp_addr = "127.0.0.1:0".parse().unwrap();
         config.udp_addr = "127.0.0.1:0".parse().unwrap();
-        let source = Arc::new(SyntheticMediaSource { frame_count: 1 });
+        let source = Arc::new(SyntheticMediaSource {
+            frame_count: 1,
+            restart_starts: Arc::default(),
+        });
         let server = HostServer::bind_with_media_advertising(config, source, true).unwrap();
         assert!(server.tcp_addr().is_ok());
         assert!(server.udp_addr().is_ok());
@@ -4867,6 +5336,8 @@ mod tests {
             capture_audio: false,
             output_name: None,
             consent_sender: Some(consent_sender),
+            allow_input: Arc::new(AtomicBool::new(true)),
+            allow_clipboard: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -6889,5 +7360,461 @@ mod tests {
             }
         }
         assert!(closed, "client must observe socket closure after abort");
+    }
+
+    #[test]
+    fn policy_and_display_list_sent_after_stream_options_handshake() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [0x88; 32];
+        store
+            .save(PairingRecord {
+                id: "policy-test".into(),
+                name: "client-options".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, _) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let server = HostServer::bind_synthetic(config, 10).unwrap();
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1).unwrap());
+
+        let client = TlsPskClient::new(PskIdentity::pairing("policy-test", &key).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        let handshake = Handshake {
+            name: "client-options".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION
+                | Capabilities::STREAM_OPTIONS,
+            pairing_id: "policy-test".into(),
+            session_salt: [0x51; 16],
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        tcp.write_frame(&packet).unwrap();
+
+        // Expect HandshakeAck
+        let ack_frame = tcp.read_frame().unwrap();
+        let (hdr, payload) = decode_tcp_packet(&ack_frame);
+        assert_eq!(hdr.packet_type, PacketType::HandshakeAck);
+        let ack = Handshake::decode(payload).unwrap();
+        assert!(ack.capabilities.contains(Capabilities::STREAM_OPTIONS));
+
+        // Expect HostPolicy
+        let policy_frame = tcp.read_frame().unwrap();
+        let (hdr, payload) = decode_tcp_packet(&policy_frame);
+        assert_eq!(hdr.packet_type, PacketType::Control);
+        let policy_msg = ControlMessage::decode(payload).unwrap();
+        assert_eq!(
+            policy_msg,
+            ControlMessage::HostPolicy(HostPolicy {
+                allow_input: true,
+                allow_clipboard: true,
+            })
+        );
+
+        // Expect HostDisplayList
+        let displays_frame = tcp.read_frame().unwrap();
+        let (hdr, payload) = decode_tcp_packet(&displays_frame);
+        assert_eq!(hdr.packet_type, PacketType::Control);
+        let displays_msg = ControlMessage::decode(payload).unwrap();
+        match displays_msg {
+            ControlMessage::HostDisplayList(list) => {
+                assert!(!list.displays.is_empty());
+                assert_eq!(list.displays[0].index, 0);
+                assert!(list.displays[0].primary);
+            }
+            other => panic!("expected HostDisplayList, got {other:?}"),
+        }
+
+        send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn input_with_allow_input_false_is_not_injected_and_acked_error_code_2() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [0x99; 32];
+        store
+            .save(PairingRecord {
+                id: "input-gate-test".into(),
+                name: "client-gate".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, _) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        config.allow_input.store(false, Ordering::SeqCst);
+        let server = HostServer::bind_synthetic(config, 10).unwrap();
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1).unwrap());
+
+        let client =
+            TlsPskClient::new(PskIdentity::pairing("input-gate-test", &key).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        let handshake = Handshake {
+            name: "client-gate".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION
+                | Capabilities::STREAM_OPTIONS,
+            pairing_id: "input-gate-test".into(),
+            session_salt: [0x52; 16],
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        tcp.write_frame(&packet).unwrap();
+
+        // Read HandshakeAck, HostPolicy, HostDisplayList
+        let _ack = tcp.read_frame().unwrap();
+        let policy_frame = tcp.read_frame().unwrap();
+        let (_, payload) = decode_tcp_packet(&policy_frame);
+        assert_eq!(
+            ControlMessage::decode(payload).unwrap(),
+            ControlMessage::HostPolicy(HostPolicy {
+                allow_input: false,
+                allow_clipboard: true,
+            })
+        );
+        let _displays = tcp.read_frame().unwrap();
+
+        // Send InputEvent
+        let input_evt = InputEvent {
+            event_type: maho_proto::InputEventType::MouseMove,
+            x: 0.5,
+            y: 0.5,
+            key_code: 0,
+            modifiers: maho_proto::Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+        let mut input_packet = PacketHeader::new(PacketType::InputEvent, 42, 0, 0)
+            .encode()
+            .unwrap();
+        input_packet.extend_from_slice(&input_evt.encode().unwrap());
+        tcp.write_frame(&input_packet).unwrap();
+
+        // Expect InputAck with sequence 42, success false, error_code 2
+        let ack_frame = tcp.read_frame().unwrap();
+        let (hdr, payload) = decode_tcp_packet(&ack_frame);
+        assert_eq!(hdr.packet_type, PacketType::Control);
+        assert_eq!(
+            ControlMessage::decode(payload).unwrap(),
+            ControlMessage::InputAck(InputAckMessage {
+                sequence: 42,
+                success: false,
+                error_code: 2,
+            })
+        );
+
+        send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn validate_stream_options_accepts_valid_request() {
+        let displays = vec![HostDisplay {
+            index: 0,
+            width: 1920,
+            height: 1080,
+            primary: true,
+            name: "Display 1".to_string(),
+        }];
+        let request = StreamOptionsRequest {
+            request_id: 1,
+            scale_permille: 1000,
+            fps: 60,
+            codec: StreamCodecPreference::Auto,
+            display_index: 0,
+            bitrate: 10_000_000,
+        };
+        assert!(validate_stream_options(&request, &displays).is_ok());
+    }
+
+    #[test]
+    fn validate_stream_options_rejects_fps_zero() {
+        let displays = vec![HostDisplay {
+            index: 0,
+            width: 1920,
+            height: 1080,
+            primary: true,
+            name: "Display 1".to_string(),
+        }];
+        let request = StreamOptionsRequest {
+            request_id: 1,
+            scale_permille: 1000,
+            fps: 0,
+            codec: StreamCodecPreference::Auto,
+            display_index: 0,
+            bitrate: 10_000_000,
+        };
+        let err = validate_stream_options(&request, &displays).unwrap_err();
+        assert_eq!(err.0, StreamConfigurationErrorCode::UnsupportedFps);
+        assert!(!err.1.is_empty());
+    }
+
+    #[test]
+    fn validate_stream_options_rejects_scale_zero() {
+        let displays = vec![HostDisplay {
+            index: 0,
+            width: 1920,
+            height: 1080,
+            primary: true,
+            name: "Display 1".to_string(),
+        }];
+        let request = StreamOptionsRequest {
+            request_id: 1,
+            scale_permille: 0,
+            fps: 60,
+            codec: StreamCodecPreference::Auto,
+            display_index: 0,
+            bitrate: 10_000_000,
+        };
+        let err = validate_stream_options(&request, &displays).unwrap_err();
+        assert_eq!(err.0, StreamConfigurationErrorCode::UnsupportedDimensions);
+        assert!(!err.1.is_empty());
+    }
+
+    #[test]
+    fn validate_stream_options_rejects_scale_1001() {
+        let displays = vec![HostDisplay {
+            index: 0,
+            width: 1920,
+            height: 1080,
+            primary: true,
+            name: "Display 1".to_string(),
+        }];
+        let request = StreamOptionsRequest {
+            request_id: 1,
+            scale_permille: 1001,
+            fps: 60,
+            codec: StreamCodecPreference::Auto,
+            display_index: 0,
+            bitrate: 10_000_000,
+        };
+        let err = validate_stream_options(&request, &displays).unwrap_err();
+        assert_eq!(err.0, StreamConfigurationErrorCode::UnsupportedDimensions);
+        assert!(!err.1.is_empty());
+    }
+
+    #[test]
+    fn downscale_bgra_nearest_halves_dimensions() {
+        let sw = 4;
+        let sh = 4;
+        let dw = 2;
+        let dh = 2;
+        // Create 4x4 image with 4 distinct colored 2x2 quadrants
+        // Top-left: Red (255, 0, 0, 255)
+        // Top-right: Green (0, 255, 0, 255)
+        // Bottom-left: Blue (0, 0, 255, 255)
+        // Bottom-right: White (255, 255, 255, 255)
+        let mut src = vec![0u8; (sw * sh * 4) as usize];
+        for y in 0..sh {
+            for x in 0..sw {
+                let idx = ((y * sw + x) * 4) as usize;
+                let color = match (x < 2, y < 2) {
+                    (true, true) => [0, 0, 255, 255], // Red in BGRA: B=0, G=0, R=255, A=255
+                    (false, true) => [0, 255, 0, 255], // Green in BGRA: B=0, G=255, R=0, A=255
+                    (true, false) => [255, 0, 0, 255], // Blue in BGRA: B=255, G=0, R=0, A=255
+                    (false, false) => [255, 255, 255, 255], // White in BGRA
+                };
+                src[idx..idx + 4].copy_from_slice(&color);
+            }
+        }
+
+        let dst = downscale_bgra_nearest(&src, (sw * 4) as usize, sw, sh, dw, dh);
+        assert_eq!(dst.len(), (dw * dh * 4) as usize);
+
+        // Pixel (0,0) sampled from (0,0) -> Red
+        assert_eq!(&dst[0..4], &[0, 0, 255, 255]);
+        // Pixel (1,0) sampled from (2,0) -> Green
+        assert_eq!(&dst[4..8], &[0, 255, 0, 255]);
+        // Pixel (0,1) sampled from (0,2) -> Blue
+        assert_eq!(&dst[8..12], &[255, 0, 0, 255]);
+        // Pixel (1,1) sampled from (2,2) -> White
+        assert_eq!(&dst[12..16], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn stream_options_request_restarts_pipeline_and_replies_active() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [0x77; 32];
+        store
+            .save(PairingRecord {
+                id: "restart-test".into(),
+                name: "client-restart".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, _) = mpsc::channel();
+        let mut config = test_config(store, consent_tx);
+        config.display.pixel_width = 1920;
+        config.display.pixel_height = 1080;
+        let server = HostServer::bind_synthetic(config, 100).unwrap();
+        let starts = server
+            .synthetic_starts
+            .clone()
+            .expect("synthetic start counter");
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1).unwrap());
+
+        let client =
+            TlsPskClient::new(PskIdentity::pairing("restart-test", &key).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        let handshake = Handshake {
+            name: "client-restart".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION
+                | Capabilities::STREAM_OPTIONS,
+            pairing_id: "restart-test".into(),
+            session_salt: [0x53; 16],
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        tcp.write_frame(&packet).unwrap();
+
+        // Read HandshakeAck, HostPolicy, HostDisplayList
+        let _ack = tcp.read_frame().unwrap();
+        let _policy = tcp.read_frame().unwrap();
+        let _displays = tcp.read_frame().unwrap();
+
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        // Send StreamOptionsRequest with scale_permille = 500, fps = 30, codec = H264
+        let request = StreamOptionsRequest {
+            request_id: 101,
+            scale_permille: 500,
+            fps: 30,
+            codec: StreamCodecPreference::H264,
+            display_index: 0,
+            bitrate: 0,
+        };
+        send_tcp_control(&mut tcp, ControlMessage::StreamOptionsRequest(request)).unwrap();
+
+        // Read response
+        let resp_frame = tcp.read_frame().unwrap();
+        let (hdr, payload) = decode_tcp_packet(&resp_frame);
+        assert_eq!(hdr.packet_type, PacketType::Control);
+        let resp_msg = ControlMessage::decode(payload).unwrap();
+        match resp_msg {
+            ControlMessage::StreamOptionsActive(active) => {
+                assert_eq!(active.request_id, 101);
+                assert_eq!(active.width, 960);
+                assert_eq!(active.height, 540);
+                assert_eq!(active.fps, 30);
+                assert_eq!(active.codec, StreamCodecPreference::H264);
+                assert_eq!(active.display_index, 0);
+            }
+            other => panic!("expected StreamOptionsActive, got {other:?}"),
+        }
+
+        // Verify start count is now 2
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+
+        send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn invalid_stream_options_keep_pipeline_running() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [0x78; 32];
+        store
+            .save(PairingRecord {
+                id: "invalid-opt-test".into(),
+                name: "client-invalid".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, _) = mpsc::channel();
+        let mut config = test_config(store, consent_tx);
+        config.display.pixel_width = 1920;
+        config.display.pixel_height = 1080;
+        let server = HostServer::bind_synthetic(config, 100).unwrap();
+        let starts = server
+            .synthetic_starts
+            .clone()
+            .expect("synthetic start counter");
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1).unwrap());
+
+        let client =
+            TlsPskClient::new(PskIdentity::pairing("invalid-opt-test", &key).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        let handshake = Handshake {
+            name: "client-invalid".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION
+                | Capabilities::STREAM_OPTIONS,
+            pairing_id: "invalid-opt-test".into(),
+            session_salt: [0x54; 16],
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        tcp.write_frame(&packet).unwrap();
+
+        // Read HandshakeAck, HostPolicy, HostDisplayList
+        let _ack = tcp.read_frame().unwrap();
+        let _policy = tcp.read_frame().unwrap();
+        let _displays = tcp.read_frame().unwrap();
+
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        // Send invalid StreamOptionsRequest with fps = 0
+        let request = StreamOptionsRequest {
+            request_id: 202,
+            scale_permille: 1000,
+            fps: 0,
+            codec: StreamCodecPreference::Auto,
+            display_index: 0,
+            bitrate: 0,
+        };
+        send_tcp_control(&mut tcp, ControlMessage::StreamOptionsRequest(request)).unwrap();
+
+        // Expect StreamConfigReject
+        let resp_frame = tcp.read_frame().unwrap();
+        let (hdr, payload) = decode_tcp_packet(&resp_frame);
+        assert_eq!(hdr.packet_type, PacketType::Control);
+        let resp_msg = ControlMessage::decode(payload).unwrap();
+        match resp_msg {
+            ControlMessage::StreamConfigReject(reject) => {
+                assert_eq!(reject.request_id, 202);
+                assert_eq!(reject.reason, StreamConfigurationErrorCode::UnsupportedFps);
+            }
+            other => panic!("expected StreamConfigReject, got {other:?}"),
+        }
+
+        // Verify start count remains 1 (pipeline was not restarted)
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+        server_thread.join().unwrap();
     }
 }

@@ -72,6 +72,22 @@ struct Cli {
     /// Stable relay host id. Defaults to a sanitized hostname. Also read from MAHO_RELAY_HOST_ID.
     #[arg(long, value_name = "ID")]
     relay_host_id: Option<String>,
+
+    /// Disable remote input injection policy.
+    #[arg(long)]
+    no_input: bool,
+
+    /// Disable clipboard synchronization policy.
+    #[arg(long)]
+    no_clipboard: bool,
+
+    /// TCP port to listen on (default: 19730).
+    #[arg(long, value_name = "PORT")]
+    tcp_port: Option<u16>,
+
+    /// UDP port to listen on (default: 19731).
+    #[arg(long, value_name = "PORT")]
+    udp_port: Option<u16>,
 }
 
 pub fn select_pin<F>(
@@ -237,6 +253,22 @@ fn main() -> Result<()> {
     };
     config.capture_audio = !cli.no_audio;
     config.consent_sender = Some(consent_tx);
+    if cli.no_input {
+        config
+            .allow_input
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    if cli.no_clipboard {
+        config
+            .allow_clipboard
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    if let Some(port) = cli.tcp_port {
+        config.tcp_addr.set_port(port);
+    }
+    if let Some(port) = cli.udp_port {
+        config.udp_addr.set_port(port);
+    }
     if let Some(mbps) = cli.lan_bitrate_mbps {
         config.bitrate = mbps * 1_000_000;
     }

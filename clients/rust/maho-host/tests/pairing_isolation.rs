@@ -83,6 +83,8 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             capture_audio: false,
             output_name: None,
             consent_sender: None,
+            allow_input: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            allow_clipboard: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         let server = HostServer::bind(config).unwrap();
         let tcp_addr = server.tcp_addr().unwrap();
@@ -147,6 +149,8 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             capture_audio: false,
             output_name: None,
             consent_sender: None,
+            allow_input: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            allow_clipboard: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         let server2 = HostServer::bind(config2).unwrap();
         let tcp_addr2 = server2.tcp_addr().unwrap();
