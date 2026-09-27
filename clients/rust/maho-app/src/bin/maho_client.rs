@@ -528,7 +528,8 @@ fn run_client(mut cli: Cli) -> Result<()> {
         client_name: cli.client_name.clone(),
         capabilities: Capabilities::STREAM_CONFIGURATION
             | Capabilities::TEXT_CLIPBOARD_SYNC
-            | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+            | Capabilities::AUTHENTICATED_UDP_REGISTRATION
+            | Capabilities::STREAM_OPTIONS,
         pairing_store_path: cli.pairing_store.clone(),
         connect_timeout: Duration::from_secs(10),
         handshake_ack_timeout: Duration::from_secs(10),
