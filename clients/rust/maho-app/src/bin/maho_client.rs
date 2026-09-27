@@ -18,7 +18,10 @@ use maho_app::{
     SessionEvent,
 };
 use maho_decode::HevcDecoder;
-use maho_proto::{Capabilities, ControlMessage, InputEvent, InputEventType, Modifiers};
+use maho_proto::{
+    Capabilities, ControlMessage, InputEvent, InputEventType, Modifiers, StreamCodecPreference,
+    StreamOptionsRequest,
+};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -79,6 +82,22 @@ struct Cli {
     #[arg(long)]
     frames: Option<u64>,
 
+    /// Target streaming frame rate in FPS (1..=240).
+    #[arg(long, value_parser = parse_fps)]
+    fps: Option<u16>,
+
+    /// Preferred video codec (auto, h264, hevc).
+    #[arg(long, value_parser = parse_codec)]
+    codec: Option<StreamCodecPreference>,
+
+    /// Remote display scale factor (0.1..=1.0).
+    #[arg(long, value_parser = parse_scale)]
+    scale: Option<f32>,
+
+    /// Remote display index to capture.
+    #[arg(long)]
+    display: Option<u8>,
+
     /// Path to write legacy decode-latency statistics and a receiver snapshot.
     #[arg(long)]
     stats_json: Option<PathBuf>,
@@ -127,6 +146,10 @@ impl std::fmt::Debug for Cli {
             .field("pairing_id", &self.pairing_id)
             .field("pairing_store", &self.pairing_store)
             .field("frames", &self.frames)
+            .field("fps", &self.fps)
+            .field("codec", &self.codec)
+            .field("scale", &self.scale)
+            .field("display", &self.display)
             .field("stats_json", &self.stats_json)
             .field("timeout_secs", &self.timeout_secs)
             .field("client_name", &self.client_name)
@@ -148,6 +171,33 @@ fn parse_pin(pin: &str) -> Result<String, String> {
         Ok(pin.to_string())
     } else {
         Err("--pin must be exactly 8 digits".to_string())
+    }
+}
+
+fn parse_fps(fps: &str) -> Result<u16, String> {
+    let val: u16 = fps.parse().map_err(|e| format!("invalid fps: {e}"))?;
+    if (1..=240).contains(&val) {
+        Ok(val)
+    } else {
+        Err("--fps must be between 1 and 240".to_string())
+    }
+}
+
+fn parse_codec(codec: &str) -> Result<StreamCodecPreference, String> {
+    match codec.to_ascii_lowercase().as_str() {
+        "auto" => Ok(StreamCodecPreference::Auto),
+        "h264" => Ok(StreamCodecPreference::H264),
+        "hevc" => Ok(StreamCodecPreference::Hevc),
+        _ => Err("--codec must be auto, h264, or hevc".to_string()),
+    }
+}
+
+fn parse_scale(scale: &str) -> Result<f32, String> {
+    let val: f32 = scale.parse().map_err(|e| format!("invalid scale: {e}"))?;
+    if (0.1..=1.0).contains(&val) {
+        Ok(val)
+    } else {
+        Err("--scale must be between 0.1 and 1.0".to_string())
     }
 }
 
@@ -613,7 +663,14 @@ fn run_client(mut cli: Cli) -> Result<()> {
 
     let mut latency_recorder = LatencyRecorder::new();
     let mut decoder: Option<HevcDecoder> = None;
+    let mut current_codec: Option<maho_decode::CodecKind> = None;
+    let mut last_logged_size: Option<(u32, u32)> = None;
     let mut decoded_frames: u64 = 0;
+
+    let has_options_requested =
+        cli.fps.is_some() || cli.codec.is_some() || cli.scale.is_some() || cli.display.is_some();
+    let mut stream_options_sent = false;
+    let mut stream_options_active = false;
 
     let frame_rx = Arc::new(FrameQueue::with_receiver_trace(session.receiver_trace()));
     let frame_tx = frame_rx.clone();
@@ -842,7 +899,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
             break;
         }
 
-        // Check if TCP runtime emitted an error
+        // Check if TCP runtime emitted an event or error
         while let Ok(event_res) = tcp_runtime.events().try_recv() {
             match event_res {
                 Ok(SessionEvent::Ping) => {
@@ -851,6 +908,48 @@ fn run_client(mut cli: Cli) -> Result<()> {
                 Ok(SessionEvent::Clipboard(_text)) => {
                     debug!("Received clipboard update");
                 }
+                Ok(SessionEvent::StreamConfig(ref msg)) => match msg {
+                    ControlMessage::HostDisplayList(list) => {
+                        for d in &list.displays {
+                            let primary_str = if d.primary { " (primary)" } else { "" };
+                            println!(
+                                "host display [{}] {} {}x{}{}",
+                                d.index, d.name, d.width, d.height, primary_str
+                            );
+                        }
+                    }
+                    ControlMessage::HostPolicy(policy) => {
+                        println!(
+                            "host policy: input={} clipboard={}",
+                            policy.allow_input, policy.allow_clipboard
+                        );
+                    }
+                    ControlMessage::StreamOptionsActive(active) => {
+                        let codec_str = match active.codec {
+                            StreamCodecPreference::Auto => "auto",
+                            StreamCodecPreference::H264 => "h264",
+                            StreamCodecPreference::Hevc => "hevc",
+                        };
+                        println!(
+                            "active config: {}x{} fps={} codec={} display={}",
+                            active.width,
+                            active.height,
+                            active.fps,
+                            codec_str,
+                            active.display_index
+                        );
+                        stream_options_active = true;
+                        // Decoder recreation on codec or size change:
+                        // drop existing decoder so the next keyframe initializes a fresh decoder
+                        decoder = None;
+                        current_codec = None;
+                    }
+                    ControlMessage::StreamConfigReject(reject) => {
+                        eprintln!("stream options rejected: {}", reject.message);
+                        std::process::exit(1);
+                    }
+                    _ => {}
+                },
                 Ok(_) => {}
                 Err(err) => {
                     // Non-fatal or timeout errors in polling shouldn't abort immediately unless fatal
@@ -868,11 +967,33 @@ fn run_client(mut cli: Cli) -> Result<()> {
                     match HevcDecoder::from_keyframe_auto(data) {
                         Ok((codec_kind, dec)) => {
                             info!(?codec_kind, "decoder initialized from keyframe");
+                            current_codec = Some(codec_kind);
                             decoder = Some(dec);
                         }
                         Err(err) => {
                             decode_failed = true;
                             info!(%err, is_key, size = data.len(), "frame not usable for keyframe decoder init");
+                        }
+                    }
+                } else if is_key {
+                    // Check if codec changed in an arriving keyframe
+                    if let Ok(new_kind) = maho_decode::detect_codec(data) {
+                        if current_codec.is_some_and(|c| c != new_kind) {
+                            info!(
+                                ?current_codec,
+                                ?new_kind,
+                                "recreating decoder on codec change"
+                            );
+                            match HevcDecoder::from_keyframe_auto(data) {
+                                Ok((k, dec)) => {
+                                    current_codec = Some(k);
+                                    decoder = Some(dec);
+                                }
+                                Err(err) => {
+                                    decode_failed = true;
+                                    warn!(%err, "failed to reinit decoder on codec change");
+                                }
+                            }
                         }
                     }
                 }
@@ -884,9 +1005,47 @@ fn run_client(mut cli: Cli) -> Result<()> {
                         Ok(nv12_frames) => {
                             if !nv12_frames.is_empty() {
                                 decoded_any = true;
-                                decoded_frames =
-                                    decoded_frames.saturating_add(nv12_frames.len() as u64);
+                                for nv12 in &nv12_frames {
+                                    let size = (nv12.width, nv12.height);
+                                    if last_logged_size != Some(size) {
+                                        println!("decoded frame size {}x{}", size.0, size.1);
+                                        last_logged_size = Some(size);
+                                    }
+                                }
+
+                                if !has_options_requested || stream_options_active {
+                                    decoded_frames =
+                                        decoded_frames.saturating_add(nv12_frames.len() as u64);
+                                }
                                 first_frame_seen.store(true, Ordering::Relaxed);
+
+                                if has_options_requested && !stream_options_sent {
+                                    let host_supports_options = session
+                                        .stream_state()
+                                        .map(|s| s.host_supports_stream_options)
+                                        .unwrap_or(false);
+                                    if !host_supports_options {
+                                        eprintln!("host does not support stream options");
+                                        std::process::exit(1);
+                                    }
+                                    let scale_val = cli.scale.unwrap_or(1.0);
+                                    let scale_permille =
+                                        (scale_val * 1000.0).round().clamp(100.0, 1000.0) as u16;
+                                    let req = StreamOptionsRequest {
+                                        request_id: 1,
+                                        scale_permille,
+                                        fps: cli.fps.unwrap_or(60),
+                                        codec: cli.codec.unwrap_or(StreamCodecPreference::Auto),
+                                        display_index: cli.display.unwrap_or(0),
+                                        bitrate: 0,
+                                    };
+                                    if let Err(e) = session.request_stream_options(req) {
+                                        warn!(%e, "failed to send stream options request");
+                                    } else {
+                                        stream_options_sent = true;
+                                    }
+                                }
+
                                 if let Some(last) = nv12_frames.last() {
                                     store_latest_frame(
                                         &latest_frame,

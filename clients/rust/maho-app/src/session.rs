@@ -18,8 +18,9 @@ use maho_net::{
 use maho_proto::{
     AudioFragment, BitrateAdjust, Capabilities, ClipboardSyncDirection, ClipboardSyncOrigin,
     ClipboardSyncUpdate, ControlMessage, CursorUpdate, FrameChunk, FrameHeader, Handshake,
-    InputEvent, PacketHeader, PacketType, PairingGrant, PairingReject, PairingRejectReason,
-    PairingRequest, WireCodec, PROTOCOL_VERSION,
+    HostDisplay, HostPolicy, InputEvent, PacketHeader, PacketType, PairingGrant, PairingReject,
+    PairingRejectReason, PairingRequest, StreamOptionsActive, StreamOptionsRequest, WireCodec,
+    PROTOCOL_VERSION,
 };
 use rand::{rngs::OsRng, RngCore};
 use thiserror::Error;
@@ -73,7 +74,8 @@ impl SessionConfig {
             client_name: client_name.into(),
             capabilities: Capabilities::STREAM_CONFIGURATION
                 | Capabilities::TEXT_CLIPBOARD_SYNC
-                | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+                | Capabilities::AUTHENTICATED_UDP_REGISTRATION
+                | Capabilities::STREAM_OPTIONS,
             pairing_store_path: None,
             connect_timeout: CONNECT_TIMEOUT,
             handshake_ack_timeout: HANDSHAKE_ACK_TIMEOUT,
@@ -86,6 +88,15 @@ pub struct ReadySession {
     pub pairing: PairingRecord,
     pub server: Handshake,
     pub session_salt: [u8; 16],
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamState {
+    pub host_supports_stream_options: bool,
+    pub active: Option<StreamOptionsActive>,
+    pub displays: Vec<HostDisplay>,
+    pub policy: Option<HostPolicy>,
+    pub last_reject: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,6 +186,7 @@ struct SessionStateInner {
     receiver: crate::receiver_stats::ReceiverStats,
     audio: AudioFragmentReassembler,
     cursor: CursorState,
+    stream_state: StreamState,
 }
 
 impl Default for SessionStateInner {
@@ -190,6 +202,7 @@ impl Default for SessionStateInner {
             receiver: crate::receiver_stats::ReceiverStats::default(),
             audio: AudioFragmentReassembler::default(),
             cursor: CursorState::default(),
+            stream_state: StreamState::default(),
         }
     }
 }
@@ -573,6 +586,22 @@ impl ClientSession {
                 desired,
             },
         ))
+    }
+
+    pub fn request_stream_options(
+        &self,
+        options: StreamOptionsRequest,
+    ) -> Result<(), SessionError> {
+        self.send_control(ControlMessage::StreamOptionsRequest(options))
+    }
+
+    pub fn stream_state(&self) -> Result<StreamState, SessionError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?
+            .stream_state
+            .clone())
     }
 
     pub fn apply_remote_clipboard<C: PlatformClipboard>(
@@ -1145,7 +1174,10 @@ impl ClientSession {
             .udp_receive
             .lock()
             .map_err(|_| SessionError::Poisoned)? = Some(udp_receive);
+        let host_supports_stream_options =
+            server.capabilities.contains(Capabilities::STREAM_OPTIONS);
         let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+        state.stream_state.host_supports_stream_options = host_supports_stream_options;
         state.server = Some(server);
         state.state = SessionState::Ready;
         Ok(ready)
@@ -1304,8 +1336,31 @@ impl ClientSession {
                         error_code: ack.error_code,
                     })
                 }
+                ControlMessage::StreamOptionsActive(active) => {
+                    state.stream_state.active = Some(active);
+                    Ok(SessionEvent::StreamConfig(
+                        ControlMessage::StreamOptionsActive(active),
+                    ))
+                }
+                ControlMessage::HostDisplayList(list) => {
+                    state.stream_state.displays = list.displays.clone();
+                    Ok(SessionEvent::StreamConfig(ControlMessage::HostDisplayList(
+                        list,
+                    )))
+                }
+                ControlMessage::HostPolicy(policy) => {
+                    state.stream_state.policy = Some(policy);
+                    Ok(SessionEvent::StreamConfig(ControlMessage::HostPolicy(
+                        policy,
+                    )))
+                }
+                ControlMessage::StreamConfigReject(reject) => {
+                    state.stream_state.last_reject = Some(reject.message.clone());
+                    Ok(SessionEvent::StreamConfig(
+                        ControlMessage::StreamConfigReject(reject),
+                    ))
+                }
                 msg @ (ControlMessage::StreamConfigResponse(_)
-                | ControlMessage::StreamConfigReject(_)
                 | ControlMessage::StreamConfigError(_)) => Ok(SessionEvent::StreamConfig(msg)),
                 _ => Ok(SessionEvent::Ignored),
             },
@@ -1609,6 +1664,7 @@ mod cancellation_tests {
     use super::*;
 
     use maho_net::TlsPskServer;
+    use maho_proto::{HostDisplayList, StreamCodecPreference};
     fn packet(packet_type: PacketType, payload: &[u8]) -> Vec<u8> {
         let mut packet = PacketHeader::new(packet_type, 0, 0, 0).encode().unwrap();
         packet.extend_from_slice(payload);
@@ -1672,6 +1728,109 @@ mod cancellation_tests {
             SessionEvent::StreamConfig(reject)
         );
         assert!(matches!(events.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn session_stream_options_events_update_stream_state() {
+        let session =
+            ClientSession::new(SessionConfig::direct("127.0.0.1", "test-client")).unwrap();
+        assert_eq!(session.stream_state().unwrap(), StreamState::default());
+        // Control packets are only handled once the handshake has completed.
+        session.state.lock().unwrap().state = SessionState::Ready;
+
+        // HostPolicy event
+        let policy = HostPolicy {
+            allow_input: false,
+            allow_clipboard: true,
+        };
+        let msg = ControlMessage::HostPolicy(policy);
+        let header = PacketHeader::new(PacketType::Control, 1, 0, 0);
+        let event = session
+            .handle_packet(header, msg.encode().unwrap(), None)
+            .unwrap();
+        assert_eq!(
+            event,
+            SessionEvent::StreamConfig(ControlMessage::HostPolicy(policy))
+        );
+        assert_eq!(session.stream_state().unwrap().policy, Some(policy));
+
+        // HostDisplayList event
+        let displays = vec![
+            HostDisplay {
+                index: 0,
+                width: 3840,
+                height: 1600,
+                primary: true,
+                name: "DP-1".to_string(),
+            },
+            HostDisplay {
+                index: 1,
+                width: 1920,
+                height: 1080,
+                primary: false,
+                name: "HDMI-1".to_string(),
+            },
+        ];
+        let display_list = HostDisplayList {
+            displays: displays.clone(),
+        };
+        let msg = ControlMessage::HostDisplayList(display_list.clone());
+        let header = PacketHeader::new(PacketType::Control, 2, 0, 0);
+        let event = session
+            .handle_packet(header, msg.encode().unwrap(), None)
+            .unwrap();
+        assert_eq!(
+            event,
+            SessionEvent::StreamConfig(ControlMessage::HostDisplayList(display_list))
+        );
+        assert_eq!(session.stream_state().unwrap().displays, displays);
+
+        // StreamOptionsActive event
+        let active = StreamOptionsActive {
+            request_id: 42,
+            width: 1920,
+            height: 800,
+            fps: 120,
+            codec: StreamCodecPreference::Hevc,
+            display_index: 0,
+            bitrate: 15_000_000,
+        };
+        let msg = ControlMessage::StreamOptionsActive(active);
+        let header = PacketHeader::new(PacketType::Control, 3, 0, 0);
+        let event = session
+            .handle_packet(header, msg.encode().unwrap(), None)
+            .unwrap();
+        assert_eq!(
+            event,
+            SessionEvent::StreamConfig(ControlMessage::StreamOptionsActive(active))
+        );
+        assert_eq!(session.stream_state().unwrap().active, Some(active));
+
+        // StreamConfigReject event
+        let reject = maho_proto::StreamConfigurationReject {
+            request_id: 43,
+            reason: maho_proto::StreamConfigurationErrorCode::UnsupportedFps,
+            message: "fps too high".to_string(),
+        };
+        let msg = ControlMessage::StreamConfigReject(reject.clone());
+        let header = PacketHeader::new(PacketType::Control, 4, 0, 0);
+        let event = session
+            .handle_packet(header, msg.encode().unwrap(), None)
+            .unwrap();
+        assert_eq!(
+            event,
+            SessionEvent::StreamConfig(ControlMessage::StreamConfigReject(reject))
+        );
+        assert_eq!(
+            session.stream_state().unwrap().last_reject,
+            Some("fps too high".to_string())
+        );
+
+        // Host supports stream options capability test
+        let mut session_state = session.state.lock().unwrap();
+        session_state.stream_state.host_supports_stream_options = true;
+        drop(session_state);
+        assert!(session.stream_state().unwrap().host_supports_stream_options);
     }
 
     #[test]
