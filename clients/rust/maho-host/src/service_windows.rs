@@ -735,7 +735,9 @@ pub fn spawn_session_worker(session_id: u32, desktop: DesktopKind) -> io::Result
             None,
             None,
             false,
-            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_NEW_CONSOLE,
+            // CREATE_NO_WINDOW is ignored when combined with CREATE_NEW_CONSOLE, which
+            // left a visible console window on the user's desktop for every worker.
+            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
             environment.as_ref().map(|block| block.0.cast_const()),
             PCWSTR::null(),
             &startup,
