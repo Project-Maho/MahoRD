@@ -1,27 +1,19 @@
 import { useState, useEffect, useMemo, useCallback } from "react"
+import { RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { ThisComputerCard } from "@/features/host/ThisComputerCard"
-import { LibraryToolbar, type FilterOption } from "@/features/library/LibraryToolbar"
-import { SavedCredentials } from "@/features/library/SavedCredentials"
+import { cn } from "@/lib/utils"
+import { LibraryToolbar } from "@/features/library/LibraryToolbar"
 import { HostGrid } from "@/features/library/HostGrid"
 import { DirectConnect } from "@/features/library/DirectConnect"
 import {
   isNativeAvailable,
   invokeCommand,
-  listPairings,
-  forgetPairing,
-  getHostStatus,
-  startHost,
-  stopHost,
   agentReleaseAll,
   type HostItem,
-  type PairingSummary,
-  type HostStatus,
   type MahoCommand,
 } from "@/lib/ipc"
 import {
   createLibrary,
-  normalizeHostKey,
   type Library,
   type LibrarySnapshot,
 } from "@/lib/library"
@@ -36,24 +28,15 @@ export interface LibraryHost extends HostItem {
 }
 
 export interface ComputersPageProps {
-  view?: "computers" | "favorites";
-  activeView?: "computers" | "favorites";
   includeDirectConnect?: boolean;
   connection?: ConnectionInstance;
 }
 
 export function ComputersPage({
-  view,
-  activeView,
-  includeDirectConnect,
+  includeDirectConnect = true,
   connection: propConnection,
 }: ComputersPageProps) {
-  const currentView = view ?? activeView ?? "computers"
-  const isFavoritesView = currentView === "favorites"
-  const showDirect =
-    includeDirectConnect !== undefined
-      ? includeDirectConnect
-      : !isFavoritesView
+  const showDirect = includeDirectConnect
 
   const native = isNativeAvailable()
 
@@ -92,23 +75,11 @@ export function ComputersPage({
     connection.snapshot()
   )
 
-  const [hostStatus, setHostStatus] = useState<HostStatus | null>(null)
-  const [pairings, setPairings] = useState<PairingSummary[]>([])
-  const [hostBusy, setHostBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
 
   const [directIp, setDirectIp] = useState("")
-  const [relayUrl, setRelayUrl] = useState(() => {
-    if (typeof window === "undefined" || !window.localStorage) return ""
-    return window.localStorage.getItem("maho-relay-url") ?? ""
-  })
-  useEffect(() => {
-    if (typeof window === "undefined" || !window.localStorage) return
-    window.localStorage.setItem("maho-relay-url", relayUrl)
-  }, [relayUrl])
   const [directPin, setDirectPin] = useState("")
   const [directError, setDirectError] = useState<string | null>(null)
-  const [selectedPairingId, setSelectedPairingId] = useState<string | null>(null)
   const [selectedPorts, setSelectedPorts] = useState<{
     tcpPort?: number | null;
     udpPort?: number | null;
@@ -125,130 +96,25 @@ export function ComputersPage({
     return connection.subscribe(setConnSnapshot)
   }, [connection])
 
-  // Sync view selection with library filters
   useEffect(() => {
-    if (isFavoritesView) {
-      library.setFavoritesOnly(true)
-    } else {
-      library.clearFilters()
-    }
-  }, [isFavoritesView, library])
+    library.clearFilters()
+  }, [library])
 
-  // Initial data loading on mount when running inside Tauri
-  const loadInitialData = useCallback(async () => {
+  const refreshHosts = useCallback(async () => {
     if (!native) return
     setRefreshing(true)
     try {
-      const [statusResult, pairingsResult] = await Promise.allSettled([
-        getHostStatus(),
-        listPairings(),
-        library.refresh(),
-      ])
-      if (statusResult.status === "fulfilled" && statusResult.value) {
-        setHostStatus(statusResult.value)
-      }
-      if (pairingsResult.status === "fulfilled" && Array.isArray(pairingsResult.value)) {
-        setPairings(pairingsResult.value)
-      }
+      await library.refresh()
     } catch (err) {
-      console.error("Failed to load initial data:", err)
+      console.error("Failed to refresh computers:", err)
     } finally {
       setRefreshing(false)
     }
   }, [native, library])
 
   useEffect(() => {
-    loadInitialData()
-  }, [loadInitialData])
-
-  const handleRefreshAll = async () => {
-    if (!native) return
-    setRefreshing(true)
-    try {
-      const [statusResult, pairingsResult] = await Promise.allSettled([
-        getHostStatus(),
-        listPairings(),
-        library.refresh(),
-      ])
-      if (statusResult.status === "fulfilled" && statusResult.value) {
-        setHostStatus(statusResult.value)
-      }
-      if (pairingsResult.status === "fulfilled" && Array.isArray(pairingsResult.value)) {
-        setPairings(pairingsResult.value)
-      }
-    } catch (err) {
-      console.error("Failed to refresh:", err)
-    } finally {
-      setRefreshing(false)
-    }
-  }
-
-  const handleRefreshPairings = async () => {
-    if (!native) return
-    try {
-      const list = await listPairings()
-      if (Array.isArray(list)) {
-        setPairings(list)
-      }
-    } catch (err) {
-      console.error("Failed to refresh pairings:", err)
-    }
-  }
-
-  const handleForgetPairing = async (id: string) => {
-    if (!native) return
-    try {
-      await forgetPairing(id)
-      await handleRefreshPairings()
-    } catch (err) {
-      console.error("Failed to forget pairing:", err)
-    }
-  }
-
-  const handleToggleSharing = async () => {
-    if (!native) return
-    setHostBusy(true)
-    try {
-      const isRunning = hostStatus ? hostStatus.running : true
-      const nextStatus = isRunning ? await stopHost() : await startHost()
-      if (nextStatus) {
-        setHostStatus(nextStatus)
-      }
-    } catch (err) {
-      console.error("Failed to toggle sharing:", err)
-    } finally {
-      setHostBusy(false)
-    }
-  }
-
-  const handleCopyInfo = async () => {
-    const ip = hostStatus?.ip || "Unavailable"
-    const port = hostStatus?.port || 19730
-    const pin = hostStatus?.pin || "--------"
-    const info = `${ip}:${port} PIN: ${pin}`
-
-    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-      try {
-        await navigator.clipboard.writeText(info)
-        return
-      } catch {
-        // Fallback below
-      }
-    }
-    try {
-      const ta = document.createElement("textarea")
-      ta.value = info
-      ta.style.position = "fixed"
-      ta.style.opacity = "0"
-      document.body.appendChild(ta)
-      ta.focus()
-      ta.select()
-      document.execCommand("copy")
-      document.body.removeChild(ta)
-    } catch {
-      // Ignore clipboard fallback failure
-    }
-  }
+    refreshHosts()
+  }, [refreshHosts])
 
   const handleConnectHost = async (host: { id: string; ip: string; name: string }) => {
     if (!native) return
@@ -262,7 +128,6 @@ export function ComputersPage({
         udpPort: raw.udp_port ?? null,
       })
     } else {
-      setSelectedPairingId(null)
       setSelectedPorts({
         tcpPort: raw?.tcp_port ?? null,
         udpPort: raw?.udp_port ?? null,
@@ -273,29 +138,6 @@ export function ComputersPage({
       const pinEl = document.getElementById("direct-pin")
       pinEl?.focus()
       pinEl?.scrollIntoView?.({ behavior: "smooth", block: "center" })
-    }
-  }
-
-  const handleConnectSaved = async (id: string) => {
-    if (!native) return
-    const pairing = pairings.find((p) => p.id === id)
-    if (!pairing) return
-    if (pairing.lastEndpoint?.host) {
-      await connection.connect({
-        host: pairing.lastEndpoint.host,
-        name: pairing.hostName,
-        pairingId: pairing.id,
-        tcpPort: pairing.lastEndpoint.tcpPort,
-        udpPort: pairing.lastEndpoint.udpPort,
-      })
-    } else {
-      setSelectedPairingId(pairing.id)
-      setSelectedPorts({})
-      setDirectIp("")
-      setDirectPin("")
-      setDirectError(null)
-      const ipEl = document.getElementById("direct-ip")
-      ipEl?.focus()
     }
   }
 
@@ -315,7 +157,6 @@ export function ComputersPage({
       return
     }
     setDirectError(null)
-    const pairingId = pin ? null : selectedPairingId
     const ports = selectedPorts.tcpPort ? selectedPorts : {}
 
     const ok = await connection.connect({
@@ -324,7 +165,7 @@ export function ComputersPage({
       pin,
       tcpPort: ports.tcpPort ?? null,
       udpPort: ports.udpPort ?? null,
-      pairingId,
+      pairingId: null,
     })
 
     if (!ok) {
@@ -339,27 +180,8 @@ export function ComputersPage({
     }
   }
 
-  const currentToolbarFilter: FilterOption = libSnapshot.favoritesOnly
-    ? "favorites"
-    : libSnapshot.availableOnly
-      ? "available"
-      : "all"
-
-  const handleToolbarFilterChange = (f: FilterOption) => {
-    if (f === "all") {
-      library.clearFilters()
-    } else if (f === "available") {
-      library.clearFilters()
-      library.setAvailableOnly(true)
-    } else if (f === "favorites") {
-      library.clearFilters()
-      library.setFavoritesOnly(true)
-    }
-  }
-
   const getStatusMessage = () => {
-    const list = isFavoritesView ? favoriteHosts : libSnapshot.visibleHosts
-    if (list.length > 0) return null
+    if (libSnapshot.visibleHosts.length > 0) return null
     if (libSnapshot.status === "unavailable") {
       return "Desktop connection controls are unavailable in this browser."
     }
@@ -370,28 +192,12 @@ export function ComputersPage({
       return "Loading computers"
     }
     if (!libSnapshot.hosts.length) {
-      return "No computers listed. Connect by address below."
+      return "No computers found yet. Refresh, or connect by address below."
     }
-    if (isFavoritesView || libSnapshot.favoritesOnly) {
-      return "No favorites here. Star a computer to keep it in this local view."
-    }
-    if (libSnapshot.query.trim()) {
-      return "No matching computers."
-    }
-    return "No available computers match these filters."
+    return "No matching computers."
   }
 
-  const normalizedFavorites = useMemo(
-    () => new Set(libSnapshot.favoriteIps.map(normalizeHostKey)),
-    [libSnapshot.favoriteIps]
-  )
-
-  const favoriteHosts = useMemo(
-    () => libSnapshot.hosts.filter((h) => normalizedFavorites.has(normalizeHostKey(h.ip))),
-    [libSnapshot.hosts, normalizedFavorites]
-  )
-
-  const displayHosts = isFavoritesView ? favoriteHosts : libSnapshot.visibleHosts
+  const displayHosts = libSnapshot.visibleHosts
 
   const formattedHosts = useMemo(() => {
     return displayHosts.map((h) => ({
@@ -404,16 +210,6 @@ export function ComputersPage({
     }))
   }, [displayHosts])
 
-  const formattedPairings = useMemo(() => {
-    return pairings.map((p) => ({
-      id: p.id,
-      name: p.hostName,
-      endpoint: p.lastEndpoint
-        ? `${p.lastEndpoint.host}:${p.lastEndpoint.tcpPort} (UDP ${p.lastEndpoint.udpPort})`
-        : null,
-    }))
-  }, [pairings])
-
   const directCombinedError =
     directError ||
     connSnapshot.error ||
@@ -423,83 +219,52 @@ export function ComputersPage({
         ? "Use exactly eight ASCII digits, or leave PIN blank for saved pairing."
         : null)
 
+  const isRefreshing = refreshing || libSnapshot.status === "loading"
+
   return (
-    <div className="space-y-6">
-      <header className="dashboard-header flex items-center justify-between gap-4 max-[720px]:flex-wrap max-[720px]:pb-4">
-        <div className="dash-titles space-y-1">
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">
-            {isFavoritesView ? "Favorites" : "Computers"}
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            {isFavoritesView
-              ? "Starred computers for quick access."
-              : "Find a computer or connect by address."}
-          </p>
-        </div>
+    <div className="flex flex-col gap-8">
+      <header className="dashboard-header flex items-center justify-between gap-4">
+        <h1 className="text-[26px] font-semibold leading-8 tracking-[-0.02em] text-foreground">
+          Computers
+        </h1>
         <Button
           id="btn-refresh"
-          variant="outline"
-          size="sm"
-          onClick={handleRefreshAll}
-          disabled={refreshing || libSnapshot.status === "loading" || !native}
-          aria-busy={refreshing || libSnapshot.status === "loading"}
+          variant="ghost"
+          size="icon-sm"
+          onClick={refreshHosts}
+          disabled={isRefreshing || !native}
+          aria-busy={isRefreshing}
+          aria-label="Refresh computers"
+          title="Refresh computers"
         >
-          Refresh
+          <RefreshCw
+            className={cn(isRefreshing && native && "animate-spin motion-reduce:animate-none")}
+            aria-hidden="true"
+          />
         </Button>
       </header>
 
-      {!isFavoritesView && (
-        <ThisComputerCard
-          ip={hostStatus?.ip ?? null}
-          pin={hostStatus?.pin ?? null}
-          running={hostStatus?.running ?? false}
-          busy={hostBusy || !native}
-          onToggleSharing={handleToggleSharing}
-          onCopyInfo={handleCopyInfo}
+      <div className="flex flex-col gap-4">
+        {libSnapshot.hosts.length > 0 ? (
+          <LibraryToolbar
+            query={libSnapshot.query}
+            onQueryChange={(q) => library.setQuery(q)}
+            onClearSearch={() => library.setQuery("")}
+          />
+        ) : null}
+
+        <HostGrid
+          hosts={formattedHosts}
+          busy={connSnapshot.busy || !native}
+          onConnect={handleConnectHost}
+          statusMessage={getStatusMessage()}
         />
-      )}
-
-      {!isFavoritesView && (
-        <LibraryToolbar
-          query={libSnapshot.query}
-          onQueryChange={(q) => library.setQuery(q)}
-          onClearSearch={() => library.setQuery("")}
-          filter={currentToolbarFilter}
-          onFilterChange={handleToolbarFilterChange}
-        />
-      )}
-
-      {!isFavoritesView && (
-        <SavedCredentials
-          pairings={formattedPairings}
-          busy={connSnapshot.busy || refreshing || !native}
-          onConnect={handleConnectSaved}
-          onForget={handleForgetPairing}
-          onRefresh={handleRefreshPairings}
-        />
-      )}
-
-      <HostGrid
-        hosts={formattedHosts}
-        favoriteIps={libSnapshot.favoriteIps}
-        busy={connSnapshot.busy || !native}
-        onConnect={handleConnectHost}
-        onToggleFavorite={(ip) => library.toggleFavorite(ip)}
-        statusMessage={getStatusMessage()}
-      />
-
-      {libSnapshot.preferenceError && (
-        <div id="preference-error" role="status" className="text-xs text-warning">
-          {libSnapshot.preferenceError}
-        </div>
-      )}
+      </div>
 
       {showDirect && (
         <DirectConnect
           ip={directIp}
           pin={directPin}
-          relayUrl={relayUrl}
-          onRelayUrlChange={setRelayUrl}
           onIpChange={(v) => {
             setDirectIp(v)
             setDirectError(null)

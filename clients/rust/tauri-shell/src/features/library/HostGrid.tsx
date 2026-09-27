@@ -1,4 +1,4 @@
-import { Monitor, Star } from "lucide-react"
+import { ArrowRight, Hash, KeyRound, Monitor } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -21,118 +21,139 @@ export interface Props {
     online?: boolean | null;
     paired?: boolean | null;
   }>;
-  favoriteIps: string[];
   busy?: boolean;
   onConnect: (host: { id: string; ip: string; name: string }) => void;
-  onToggleFavorite: (ip: string) => void;
   statusMessage?: string | null;
 }
 
 export type HostGridProps = Props;
 
+const CHIP = "inline-flex h-6 items-center gap-1.5 rounded-full px-2 text-xs font-medium ring-1 ring-inset"
+const CHIP_NEUTRAL = "bg-white/[0.05] text-muted-foreground ring-white/[0.06]"
+
 export function HostGrid({
   hosts,
-  favoriteIps,
   busy = false,
   onConnect,
-  onToggleFavorite,
   statusMessage,
 }: Props) {
-  const normalizedFavorites = new Set(favoriteIps.map((ip) => ip.trim().toLowerCase()));
-
   return (
-    <section className="space-y-4" aria-labelledby="library-heading">
-      <div className="space-y-1">
-        <h2 id="library-heading" className="text-xl font-bold tracking-tight text-foreground">
-          Listed computers <span id="library-count" className="text-base font-normal text-muted-foreground">{hosts.length}</span>
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Availability is a discovery hint, not an MahoRD readiness check. Default testbeds may appear available without a probe.
-        </p>
-      </div>
+    <section className="space-y-3" aria-labelledby="library-heading">
+      <h2
+        id="library-heading"
+        className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground"
+      >
+        Listed computers{" "}
+        <span
+          id="library-count"
+          className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-white/[0.07] px-1.5 text-xs font-medium tabular-nums text-muted-foreground"
+        >
+          {hosts.length}
+        </span>
+      </h2>
 
       {statusMessage ? (
-        <div id="library-status" role="status" className="py-6 text-sm text-muted-foreground">
-          {statusMessage}
+        <div
+          id="library-status"
+          role="status"
+          className="flex flex-col items-center justify-center gap-3 rounded-panel border border-dashed border-white/10 bg-white/[0.015] px-6 py-12 text-center"
+        >
+          <div className="grid size-10 place-items-center rounded-[10px] surface-raised">
+            <Monitor className="size-5 text-subtle-foreground" aria-hidden="true" />
+          </div>
+          <p className="max-w-sm text-sm text-muted-foreground">{statusMessage}</p>
         </div>
       ) : (
         <div
           id="host-grid"
           role="list"
           aria-busy={busy}
-          className="grid grid-cols-[repeat(auto-fill,minmax(18rem,1fr))] max-[1040px]:grid-cols-2 max-[720px]:grid-cols-1 gap-4"
+          className="grid grid-cols-[repeat(auto-fill,minmax(min(17rem,100%),1fr))] gap-3"
         >
           {hosts.map((host) => {
-            const isFavorite =
-              favoriteIps.includes(host.ip) ||
-              normalizedFavorites.has(host.ip.trim().toLowerCase());
-
-            const osText = host.os || "Computer";
-            const availabilityText = host.online === true ? "Available" : "Offline";
-            const pairingText = host.paired ? "Saved pairing" : "PIN may be needed";
-            const metaLine = `${osText} · ${availabilityText} · ${pairingText}`;
+            const available = host.online === true
+            const canConnect = available && !busy
 
             return (
               <Card
                 key={host.id}
                 role="listitem"
                 data-host-id={host.id}
-                data-availability={host.online === true ? "available" : "offline"}
-                className="flex flex-col justify-between gap-4 p-4 rounded-panel border-border bg-card shadow-sm"
+                data-availability={available ? "available" : "offline"}
+                className="group relative gap-4 p-4 transition-[border-color,background-color] duration-150 hover:border-border-strong hover:bg-surface-2 focus-within:border-border-strong"
               >
-                <div className="flex items-start gap-3 min-w-0 max-[400px]:flex-wrap">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
-                    <Monitor className="h-5 w-5" aria-hidden="true" />
+                <div className="flex min-w-0 items-start gap-3">
+                  <div className="grid size-10 shrink-0 place-items-center rounded-[10px] surface-raised">
+                    <Monitor
+                      className={cn("size-5", available ? "text-foreground" : "text-subtle-foreground")}
+                      aria-hidden="true"
+                    />
                   </div>
-                  <div className="min-w-0 flex-1 space-y-1 max-[400px]:basis-[calc(100%-48px)]">
-                    <div
-                      className="font-bold truncate text-foreground text-base leading-snug"
+                  <div className="min-w-0 flex-1 pt-0.5">
+                    <h3
+                      className="line-clamp-2 break-all text-[15px] font-semibold leading-5 text-foreground"
                       title={host.name}
                     >
                       {host.name}
-                    </div>
-                    <div className="text-sm text-muted-foreground font-mono truncate">
+                    </h3>
+                    <p className="mt-0.5 truncate select-text font-mono text-[12.5px] text-muted-foreground">
                       {host.ip}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {metaLine}
-                    </div>
+                    </p>
                   </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    data-action="favorite"
-                    aria-label={`Favorite ${host.name}`}
-                    aria-pressed={isFavorite}
-                    title={`Favorite ${host.name}`}
-                    onClick={() => onToggleFavorite(host.ip)}
-                    className={cn(
-                      "shrink-0 text-muted-foreground hover:text-foreground",
-                      isFavorite && "text-warning hover:text-warning"
-                    )}
-                  >
-                    <Star
-                      className={cn("size-4", isFavorite && "fill-current")}
-                      aria-hidden="true"
-                    />
-                  </Button>
                 </div>
 
-                <div className="mt-auto pt-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span
+                    className={cn(
+                      CHIP,
+                      available ? "bg-success/10 text-success ring-success/20" : CHIP_NEUTRAL
+                    )}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "size-1.5 rounded-full",
+                        available
+                          ? "bg-success shadow-[0_0_0_3px_rgb(90_209_154_/_0.16)]"
+                          : "bg-subtle-foreground"
+                      )}
+                    />
+                    {available ? "Available" : "Offline"}
+                  </span>
+                  <span className={cn(CHIP, CHIP_NEUTRAL)}>
+                    {host.paired ? (
+                      <KeyRound className="size-3" aria-hidden="true" />
+                    ) : (
+                      <Hash className="size-3" aria-hidden="true" />
+                    )}
+                    {host.paired ? "Saved pairing" : "PIN may be needed"}
+                  </span>
+                </div>
+
+                <div className="mt-auto flex items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
+                  <span className="truncate text-xs text-subtle-foreground">
+                    {host.os || "Unknown OS"}
+                  </span>
                   <Button
                     type="button"
+                    variant="secondary"
+                    size="sm"
                     data-action="connect"
-                    className="w-full"
-                    disabled={host.online !== true || busy}
+                    disabled={!canConnect}
                     onClick={() => onConnect({ id: host.id, ip: host.ip, name: host.name })}
                     title={
-                      host.online !== true
+                      !available
                         ? "Offline discovery record. Use Direct connection to try an address explicitly."
                         : undefined
                     }
+                    className={cn(
+                      "gap-1.5",
+                      canConnect &&
+                        "group-hover:border-transparent group-hover:bg-primary group-hover:text-primary-foreground group-hover:shadow-cta group-focus-within:border-transparent group-focus-within:bg-primary group-focus-within:text-primary-foreground group-focus-within:shadow-cta hover:border-transparent hover:bg-primary-hover"
+                    )}
                   >
                     Connect
+                    <ArrowRight className="size-3.5" aria-hidden="true" />
                   </Button>
                 </div>
               </Card>

@@ -1,6 +1,6 @@
-import { Monitor } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import { Check, Copy, Pause, Play, ScreenShare } from "lucide-react"
 import { Card } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -10,7 +10,7 @@ export interface ThisComputerCardProps {
   running: boolean;
   busy?: boolean;
   onToggleSharing: () => void;
-  onCopyInfo: () => void;
+  onCopyInfo: () => void | boolean | Promise<void | boolean>;
 }
 
 export type Props = ThisComputerCardProps;
@@ -25,71 +25,121 @@ export function ThisComputerCard({
 }: ThisComputerCardProps) {
   const displayIp = ip || "Unavailable"
   const displayPin = pin || "--------"
+  const [copied, setCopied] = useState(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+    }
+  }, [])
+
+  const handleCopy = async () => {
+    const ok = await onCopyInfo()
+    if (ok === true) {
+      setCopied(true)
+      if (timerRef.current) clearTimeout(timerRef.current)
+      timerRef.current = setTimeout(() => setCopied(false), 1600)
+    }
+  }
 
   return (
     <Card
       id="this-computer-card"
-      className="flex flex-row items-center justify-between gap-4 p-5 max-[720px]:flex-col max-[720px]:items-start max-[720px]:gap-3 max-[720px]:p-4 rounded-panel border-border bg-card"
+      className="flex-row items-center justify-between gap-4 p-4 pl-5 max-[720px]:flex-col max-[720px]:items-stretch max-[720px]:gap-4"
     >
-      <div className="flex items-center gap-4 min-w-0 max-[720px]:w-full">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-secondary text-foreground">
-          <Monitor className="h-6 w-6" aria-hidden="true" />
+      <div className="flex min-w-0 items-center gap-3.5">
+        <div className="grid size-10 shrink-0 place-items-center rounded-[10px] surface-raised">
+          <ScreenShare
+            className={cn("size-5", running ? "text-foreground" : "text-subtle-foreground")}
+            aria-hidden="true"
+          />
         </div>
         <div className="min-w-0 space-y-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h2 id="this-computer-title" className="font-bold text-base text-foreground leading-tight">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2
+              id="this-computer-title"
+              className="text-[15px] font-semibold leading-5 tracking-[-0.01em] text-foreground"
+            >
               This Computer (Host)
             </h2>
-            <Badge
+            <span
               id="this-computer-badge"
-              variant="outline"
               className={cn(
+                "inline-flex h-6 items-center gap-1.5 rounded-full px-2 text-xs font-medium ring-1 ring-inset",
                 running
-                  ? "text-success border-success/30"
-                  : "text-warning border-warning/30"
+                  ? "bg-success/10 text-success ring-success/20"
+                  : "bg-warning/10 text-warning ring-warning/20"
               )}
             >
-              {running ? "READY" : "UNAVAILABLE"}
-            </Badge>
-          </div>
-          <p className="text-sm text-muted-foreground flex items-center gap-2 flex-wrap">
-            <span id="this-computer-ip">
-              IP: <span className="font-mono text-foreground">{displayIp}</span>
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "size-1.5 rounded-full",
+                  running
+                    ? "bg-success shadow-[0_0_0_3px_rgb(90_209_154_/_0.16)]"
+                    : "bg-warning"
+                )}
+              />
+              <span className="inline-block lowercase first-letter:uppercase">
+                {running ? "READY" : "UNAVAILABLE"}
+              </span>
             </span>
-            <span className="text-muted-foreground" aria-hidden="true">
+          </div>
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground">
+            <span id="this-computer-ip">
+              <span className="text-subtle-foreground">IP </span>
+              <span className="select-text font-mono text-foreground">{displayIp}</span>
+            </span>
+            <span className="text-subtle-foreground max-[720px]:hidden" aria-hidden="true">
               ·
             </span>
-            <span>
-              PIN:{" "}
+            <span className="inline-flex items-center gap-1.5">
+              <span className="text-subtle-foreground">PIN</span>
               <strong
                 id="this-computer-pin"
-                className="font-mono font-semibold text-foreground"
+                className="select-text rounded-md bg-well px-1.5 py-0.5 font-mono text-[13px] font-medium tracking-[0.08em] text-foreground ring-1 ring-white/[0.08]"
               >
-                {displayPin}
+                {displayPin.length === 8 ? (
+                  <>
+                    <span>{displayPin.slice(0, 4)}</span>
+                    <span className="ml-1">{displayPin.slice(4)}</span>
+                  </>
+                ) : (
+                  displayPin
+                )}
               </strong>
             </span>
           </p>
         </div>
       </div>
 
-      <div className="flex items-center gap-2 shrink-0 ml-auto max-[720px]:w-full max-[720px]:ml-0">
+      <div className="flex shrink-0 items-center gap-2 max-[720px]:w-full">
         <Button
           id="btn-host-toggle"
-          variant="outline"
+          variant="secondary"
+          size="sm"
           className="max-[720px]:flex-1"
           onClick={onToggleSharing}
           disabled={busy}
         >
+          {running ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
           {running ? "Pause Sharing" : "Resume Sharing"}
         </Button>
         <Button
           id="btn-host-copy"
-          variant="outline"
+          variant="secondary"
+          size="sm"
           className="max-[720px]:flex-1"
-          onClick={onCopyInfo}
+          onClick={handleCopy}
           disabled={busy}
         >
-          Copy Info
+          {copied ? (
+            <Check className="text-success" aria-hidden="true" />
+          ) : (
+            <Copy aria-hidden="true" />
+          )}
+          {copied ? "Copied" : "Copy Info"}
         </Button>
       </div>
     </Card>

@@ -1,87 +1,51 @@
+import { Search, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 
-export type FilterOption = "all" | "available" | "favorites";
-
 export interface Props {
   query: string;
   onQueryChange: (q: string) => void;
   onClearSearch: () => void;
-  filter: "all" | "available" | "favorites";
-  onFilterChange: (f: "all" | "available" | "favorites") => void;
   className?: string;
 }
 
 export type LibraryToolbarProps = Props;
 
-export function LibraryToolbar({
-  query,
-  onQueryChange,
-  onClearSearch,
-  filter,
-  onFilterChange,
-  className,
-}: Props) {
+export function LibraryToolbar({ query, onQueryChange, onClearSearch, className }: Props) {
   return (
-    <div className={cn("library-toolbar flex flex-wrap items-end gap-2 mb-6", className)}>
-      <Label htmlFor="host-search" className="basis-full text-sm font-medium text-foreground">
+    <div className={cn("library-toolbar relative w-full max-w-md", className)}>
+      <Label htmlFor="host-search" className="sr-only">
         Search computers
       </Label>
+      <Search
+        className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-subtle-foreground"
+        aria-hidden="true"
+      />
       <Input
         id="host-search"
         type="search"
-        placeholder="Name, address or OS"
+        placeholder="Search computers"
         spellCheck={false}
         value={query}
         onChange={(e) => onQueryChange(e.target.value)}
-        className="flex-1 min-w-[240px] bg-background"
+        className={cn("pl-9", query && "pr-9")}
       />
-      <Button
-        id="btn-clear-search"
-        type="button"
-        variant="outline"
-        onClick={onClearSearch}
-      >
-        Clear search
-      </Button>
-      <div
-        className="filter-group flex flex-wrap items-center gap-2"
-        role="group"
-        aria-label="Filter computers"
-      >
+      {query ? (
         <Button
-          id="filter-all"
+          id="btn-clear-search"
           type="button"
-          variant="outline"
-          aria-pressed={filter === "all" ? "true" : "false"}
-          className={cn(filter === "all" && "text-primary border-primary")}
-          onClick={() => onFilterChange("all")}
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Clear search"
+          title="Clear search"
+          onClick={onClearSearch}
+          className="absolute top-1/2 right-1.5 -translate-y-1/2"
         >
-          All
+          <X aria-hidden="true" />
         </Button>
-        <Button
-          id="filter-available"
-          type="button"
-          variant="outline"
-          aria-pressed={filter === "available" ? "true" : "false"}
-          className={cn(filter === "available" && "text-primary border-primary")}
-          onClick={() => onFilterChange("available")}
-        >
-          Available
-        </Button>
-        <Button
-          id="filter-favorites"
-          type="button"
-          variant="outline"
-          aria-pressed={filter === "favorites" ? "true" : "false"}
-          className={cn(filter === "favorites" && "text-primary border-primary")}
-          onClick={() => onFilterChange("favorites")}
-        >
-          Favorites
-        </Button>
-      </div>
+      ) : null}
     </div>
   )
 }

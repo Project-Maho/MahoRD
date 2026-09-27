@@ -211,12 +211,8 @@ describe("HostGrid", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
 
-    const toggleCalls: string[] = [];
     const connectCalls: any[] = [];
 
-    const onToggleFavorite = (ip: string) => {
-      toggleCalls.push(ip);
-    };
     const onConnect = (host: { id: string; ip: string; name: string }) => {
       connectCalls.push(host);
     };
@@ -225,10 +221,8 @@ describe("HostGrid", () => {
       root.render(
         React.createElement(HostGrid, {
           hosts: mockHosts,
-          favoriteIps: [mockHosts[0].ip],
           busy: false,
           onConnect,
-          onToggleFavorite,
         })
       );
     });
@@ -255,21 +249,6 @@ describe("HostGrid", () => {
     expect(allText).toContain("Server-Beta");
     expect(allText).toContain("192.168.1.20");
 
-    // 3. the first host's favorite control has aria-label "Favorite <name>" and aria-pressed "true";
-    //    the second host's favorite control has aria-pressed "false"
-    const favoriteControls = findElements(
-      container,
-      (el) => el.getAttribute("data-action") === "favorite"
-    );
-    expect(favoriteControls.length).toBe(2);
-
-    const firstFav = favoriteControls[0];
-    const secondFav = favoriteControls[1];
-
-    expect(firstFav.getAttribute("aria-label")).toBe("Favorite Desktop-Alpha");
-    expect(firstFav.getAttribute("aria-pressed")).toBe("true");
-    expect(secondFav.getAttribute("aria-pressed")).toBe("false");
-
     // 4. the offline host's Connect control is disabled and the online host's Connect control is not
     const connectControls = findElements(
       container,
@@ -290,10 +269,10 @@ describe("HostGrid", () => {
     expect(isOnlineDisabled).toBe(false);
     expect(isOfflineDisabled).toBe(true);
 
-    // 6. invoking the first host's favorite onClick calls onToggleFavorite with that host's ip
-    expect(typeof firstFav.onClick).toBe("function");
-    firstFav.onClick();
-    expect(toggleCalls).toEqual(["192.168.1.10"]);
+    // 5. invoking the online host's Connect onClick reports that host
+    expect(typeof onlineConnect.onClick).toBe("function");
+    onlineConnect.onClick();
+    expect(connectCalls).toEqual([{ id: "host-1", ip: "192.168.1.10", name: "Desktop-Alpha" }]);
 
     act(() => {
       root.unmount();
@@ -308,10 +287,8 @@ describe("HostGrid", () => {
       root.render(
         React.createElement(HostGrid, {
           hosts: mockHosts,
-          favoriteIps: [mockHosts[0].ip],
           busy: false,
           onConnect: () => {},
-          onToggleFavorite: () => {},
           statusMessage: "No hosts discovered on network",
         })
       );

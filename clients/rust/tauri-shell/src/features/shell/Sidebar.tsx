@@ -1,62 +1,66 @@
-import { Monitor, Star } from "lucide-react"
-import { Button } from "@/components/ui/button"
+import { Monitor, Settings } from "lucide-react"
+import { BrandMark } from "@/components/brand/BrandMark"
 import { cn } from "@/lib/utils"
 
+export type AppView = "computers" | "settings"
+
 export interface Props {
-  active: "computers" | "favorites"
-  onSelect: (view: "computers" | "favorites") => void
+  active: AppView
+  onSelect: (view: AppView) => void
 }
 
 export type SidebarProps = Props
 
+const NAV_ITEMS = [
+  { id: "computers", label: "Computers", icon: Monitor },
+  { id: "settings", label: "Settings", icon: Settings },
+] as const
+
 export function Sidebar({ active, onSelect }: Props) {
   return (
-    <aside className="flex h-full w-64 max-[1040px]:w-[72px] shrink-0 flex-col border-r border-border bg-sidebar">
-      <header className="flex h-16 items-center gap-3 p-4 max-[1040px]:justify-center max-[1040px]:p-0">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary font-bold text-primary-foreground">
-          E
-        </div>
-        <span className="font-bold text-foreground max-[1040px]:hidden">MahoRD</span>
+    <aside className="flex h-full w-[232px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar max-[1040px]:w-[68px]">
+      <header className="flex h-14 items-center gap-2.5 px-4 max-[1040px]:justify-center max-[1040px]:px-0">
+        <BrandMark />
+        <span className="text-[15px] font-semibold tracking-[-0.01em] text-foreground max-[1040px]:sr-only">
+          MahoRD
+        </span>
       </header>
 
-      <nav aria-label="Primary" className="flex flex-1 flex-col gap-1 px-3 py-2 max-[1040px]:px-2">
-        <Button
-          id="nav-computers"
-          type="button"
-          variant="ghost"
-          aria-label="Computers"
-          title="Computers"
-          className={cn(
-            "w-full justify-start gap-2 max-[1040px]:justify-center max-[1040px]:px-0",
-            active === "computers" && "bg-accent text-accent-foreground"
-          )}
-          aria-current={active === "computers" ? "page" : "false"}
-          onClick={() => onSelect("computers")}
-        >
-          <Monitor className="size-4 shrink-0" />
-          <span className="max-[1040px]:sr-only">Computers</span>
-        </Button>
-        <Button
-          id="nav-favorites"
-          type="button"
-          variant="ghost"
-          aria-label="Favorites"
-          title="Favorites"
-          className={cn(
-            "w-full justify-start gap-2 max-[1040px]:justify-center max-[1040px]:px-0",
-            active === "favorites" && "bg-accent text-accent-foreground"
-          )}
-          aria-current={active === "favorites" ? "page" : "false"}
-          onClick={() => onSelect("favorites")}
-        >
-          <Star className="size-4 shrink-0" />
-          <span className="max-[1040px]:sr-only">Favorites</span>
-        </Button>
+      <nav
+        aria-label="Primary"
+        className="flex flex-1 flex-col gap-0.5 px-3 pt-3 max-[1040px]:items-center max-[1040px]:px-0"
+      >
+        {NAV_ITEMS.map(({ id, label, icon: Icon }) => {
+          const isActive = active === id
+          return (
+            <button
+              key={id}
+              id={`nav-${id}`}
+              type="button"
+              title={label}
+              aria-current={isActive ? "page" : "false"}
+              onClick={() => onSelect(id)}
+              className={cn(
+                "group flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring max-[1040px]:size-10 max-[1040px]:justify-center max-[1040px]:px-0",
+                isActive
+                  ? "bg-white/[0.06] text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_0_0_1px_rgba(255,255,255,0.05)]"
+                  : "text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
+              )}
+            >
+              <Icon
+                className={cn(
+                  "size-4 shrink-0",
+                  isActive
+                    ? "text-brand-soft"
+                    : "text-subtle-foreground group-hover:text-muted-foreground"
+                )}
+                aria-hidden="true"
+              />
+              <span className="max-[1040px]:sr-only">{label}</span>
+            </button>
+          )
+        })}
       </nav>
-
-      <footer className="mt-auto p-4 text-xs text-muted-foreground max-[1040px]:hidden">
-        MahoRD
-      </footer>
     </aside>
   )
 }

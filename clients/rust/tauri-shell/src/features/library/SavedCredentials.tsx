@@ -1,6 +1,5 @@
-import { Badge } from "@/components/ui/badge"
+import { KeyRound, RefreshCw, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
 
 export interface SavedCredential {
   id: string;
@@ -35,77 +34,78 @@ export function SavedCredentials({
       <div className="flex items-center justify-between gap-4">
         <h2
           id="saved-pairings-heading"
-          className="text-lg font-semibold text-foreground"
+          className="flex items-center gap-2 text-[15px] font-semibold leading-5 tracking-[-0.01em] text-foreground"
         >
           Saved credentials{" "}
           <span
             id="saved-pairings-count"
-            className="text-muted-foreground font-normal tabular-nums"
+            className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-white/[0.07] px-1.5 text-xs font-medium tabular-nums text-muted-foreground"
           >
             {pairings.length}
           </span>
         </h2>
         <Button
           id="btn-refresh-pairings"
-          variant="outline"
-          size="sm"
+          variant="ghost"
+          size="icon-sm"
           onClick={onRefresh}
           disabled={busy}
+          aria-label="Refresh saved credentials"
           title="Refresh saved credentials"
         >
-          Refresh credentials
+          <RefreshCw aria-hidden="true" />
         </Button>
       </div>
 
-      <p className="text-xs text-muted-foreground leading-relaxed">
-        Saved credentials connect directly without a PIN. Same-name credentials are distinguished by ID and endpoint metadata.
+      <p className="text-xs text-subtle-foreground">
+        Saved credentials reconnect without a PIN. Same-name entries are told apart by ID and endpoint.
       </p>
 
       {pairings.length === 0 ? (
         <div
           id="saved-pairings-empty"
-          className="rounded-panel border border-dashed border-border p-6 text-center text-sm text-muted-foreground bg-card"
+          className="flex items-center gap-3 rounded-panel border border-dashed border-white/10 bg-white/[0.015] px-4 py-4"
         >
-          No saved credentials yet.
+          <KeyRound className="size-4 shrink-0 text-subtle-foreground" aria-hidden="true" />
+          <div className="text-sm">
+            <p className="text-muted-foreground">No saved credentials yet.</p>
+            <p className="text-xs text-subtle-foreground">Connect once with a host PIN to save one.</p>
+          </div>
         </div>
       ) : (
         <div
           id="saved-pairings-list"
           role="list"
-          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
+          className="divide-y divide-white/[0.06] overflow-hidden rounded-panel surface-card"
         >
           {pairings.map((pairing) => (
-            <Card
+            <div
               key={pairing.id}
               data-pairing-id={pairing.id}
               role="listitem"
-              className="flex flex-col justify-between gap-3 p-4 rounded-panel border-border bg-card"
+              className="flex items-center gap-3 px-4 py-3 transition-colors duration-150 hover:bg-white/[0.02] max-[520px]:flex-wrap"
             >
-              <div className="space-y-1.5 min-w-0">
-                <div className="flex items-center justify-between gap-2">
-                  <h3
-                    className="font-bold text-base text-foreground truncate"
-                    title={pairing.name}
-                  >
-                    {pairing.name}
-                  </h3>
-                  <Badge variant="secondary" className="text-xs font-semibold">
-                    SAVED
-                  </Badge>
-                </div>
-                <p className="font-mono text-xs text-muted-foreground break-all">
-                  ID: {pairing.id}
-                </p>
-                <p className="font-mono text-xs text-foreground/90 break-all">
+              <div className="grid size-8 shrink-0 place-items-center rounded-[9px] surface-raised">
+                <KeyRound className="size-4 text-brand-soft" aria-hidden="true" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3
+                  className="truncate text-sm font-semibold leading-5 text-foreground"
+                  title={pairing.name}
+                >
+                  {pairing.name}
+                </h3>
+                <p className="break-all select-text font-mono text-xs text-muted-foreground">
                   {pairing.endpoint || "Endpoint not yet recorded"}
                 </p>
+                <p className="truncate select-text font-mono text-[11px] text-subtle-foreground">
+                  ID {pairing.id}
+                </p>
               </div>
-
-              <div className="flex items-center gap-2 pt-2 mt-auto">
+              <div className="flex shrink-0 items-center gap-1.5 max-[520px]:w-full max-[520px]:justify-end">
                 <Button
-                  variant="default"
+                  variant="secondary"
                   size="sm"
-                  className="flex-1"
                   disabled={busy}
                   onClick={() => onConnect(pairing.id)}
                   data-action="connect-saved"
@@ -113,16 +113,18 @@ export function SavedCredentials({
                   Connect
                 </Button>
                 <Button
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
                   disabled={busy}
                   onClick={() => onForget(pairing.id)}
                   data-action="forget-saved"
+                  className="hover:bg-destructive/10 hover:text-destructive"
                 >
+                  <Trash2 aria-hidden="true" />
                   Forget
                 </Button>
               </div>
-            </Card>
+            </div>
           ))}
         </div>
       )}

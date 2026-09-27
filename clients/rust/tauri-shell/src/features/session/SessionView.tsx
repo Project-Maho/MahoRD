@@ -1,4 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  Check,
+  ChevronDown,
+  CircleAlert,
+  House,
+  Maximize2,
+  Minimize2,
+  Monitor,
+  Power,
+} from "lucide-react";
 import { SessionCanvas } from "./SessionCanvas";
 
 import { useRemoteInput } from "./useRemoteInput";
@@ -202,17 +212,54 @@ export function SessionView({
   const hostName = snapshot.host?.name || snapshot.host?.ip || "Remote host";
   const ms = (val?: number | null) => (val == null ? "—" : `${val.toFixed(1)} ms`);
 
-  const fpsText =
-    fps != null && snapshot.phase === "streaming" ? `Rendered FPS ${fps}` : "Rendered FPS —";
-  const latText =
-    snapshot.stats?.latency_p50_ms != null
-      ? `Decode p50 ${ms(snapshot.stats.latency_p50_ms)}`
-      : "Decode p50 —";
+  const fpsValue = fps != null && snapshot.phase === "streaming" ? String(fps) : "—";
+  const latValue =
+    snapshot.stats?.latency_p50_ms != null ? ms(snapshot.stats.latency_p50_ms) : "—";
 
   const showConnectingModal =
     snapshot.phase === "connecting" || snapshot.phase === "waiting-video";
   const isActive =
     snapshot.phase === "waiting-video" || snapshot.phase === "streaming";
+  const isWaiting = snapshot.phase === "waiting-video";
+  const viaRelay =
+    typeof window !== "undefined" &&
+    Boolean(window.localStorage) &&
+    Boolean(window.localStorage.getItem("maho-relay-url"));
+
+  const statusDot =
+    snapshot.phase === "streaming"
+      ? "bg-success animate-status-pulse"
+      : showConnectingModal
+        ? "bg-warning"
+        : "bg-subtle-foreground";
+
+  const focusRing =
+    "outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring";
+  const glassIcon = `inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-white/[0.08] hover:text-foreground ${focusRing}`;
+
+  const metrics: Array<{ label: string; id?: string; value: string }> = [
+    { label: "Rendered FPS", value: fpsValue },
+    { label: "Decode p50", id: "session-stat-p50", value: ms(snapshot.stats?.latency_p50_ms) },
+    { label: "Decode p99", id: "session-stat-p99", value: ms(snapshot.stats?.latency_p99_ms) },
+    {
+      label: "Frames received",
+      id: "session-stat-frames",
+      value: snapshot.stats?.frames_received != null ? String(snapshot.stats.frames_received) : "—",
+    },
+    {
+      label: "Frames decoded",
+      id: "session-stat-decoded",
+      value: snapshot.stats?.frames_decoded != null ? String(snapshot.stats.frames_decoded) : "—",
+    },
+    {
+      label: "Audio packets",
+      id: "session-stat-audio",
+      value:
+        snapshot.stats?.audio_packets_received != null
+          ? String(snapshot.stats.audio_packets_received)
+          : "—",
+    },
+  ];
 
   return (
     <div
@@ -221,99 +268,84 @@ export function SessionView({
       className="fixed inset-0 w-full h-full overflow-hidden bg-black select-none z-[1000]"
       data-phase={snapshot.phase}
     >
-      {/* Floating session overlay reproducing legacy copy, ids, and controls */}
       <div
         id="session-overlay"
         data-ui-scope
         role="group"
         aria-label="Session controls"
-        className="absolute top-4 left-1/2 -translate-x-1/2 z-[1100] flex flex-col items-center gap-2 pointer-events-none w-[min(40rem,calc(100%-32px))] max-w-[calc(100%-32px)]"
+        className="@container absolute top-3 left-1/2 -translate-x-1/2 z-[1100] flex flex-col items-center gap-2 pointer-events-none w-[min(44rem,calc(100%-24px))]"
       >
         <div
           id="launcher-bar"
-          className="launcher-bar flex items-center gap-2 w-full min-h-[48px] p-1 box-border rounded-[var(--radius-panel)] bg-[var(--card)] border border-[var(--border)] shadow-[var(--shadow-overlay)] pointer-events-auto"
+          className="launcher-bar surface-glass pointer-events-auto flex w-full min-h-12 items-center gap-1 rounded-[14px] p-1.5 pl-3"
         >
-          <div className="overlay-badge flex items-center gap-2 pl-2 font-semibold min-w-[6rem] flex-1 text-sm text-[var(--foreground)]">
-            <div className="status-dot w-2 h-2 rounded-full bg-[var(--success)] shrink-0" />
-            <span id="session-host-name" className="truncate">
+          <div className="overlay-badge flex min-w-0 flex-1 items-center gap-2.5">
+            <span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${statusDot}`} />
+            <span
+              id="session-host-name"
+              className="truncate text-[13px] font-semibold text-foreground"
+              title={hostName}
+            >
               {hostName}
             </span>
-          </div>
-
-          <div className="overlay-stats flex items-center gap-3 text-xs text-[var(--muted-foreground)] tabular-nums shrink-0">
-            <span id="session-stat-fps">{fpsText}</span>
-            <span id="session-stat-lat">{latText}</span>
-            {typeof window !== "undefined" &&
-            window.localStorage &&
-            window.localStorage.getItem("maho-relay-url") ? (
-              <span id="session-via-relay" className="via-relay-badge">
+            {viaRelay ? (
+              <span
+                id="session-via-relay"
+                className="via-relay-badge inline-flex h-5 shrink-0 items-center rounded-full bg-primary/12 px-2 text-[11px] font-medium text-brand-soft ring-1 ring-inset ring-primary/25"
+              >
                 via relay
               </span>
             ) : null}
           </div>
 
+          <div className="overlay-stats flex shrink-0 items-center gap-4 px-2 text-xs tabular-nums @max-[34rem]:hidden">
+            <span id="session-stat-fps" className="text-muted-foreground">
+              Rendered FPS{" "}
+              <span className="font-mono font-medium text-foreground">{fpsValue}</span>
+            </span>
+            <span id="session-stat-lat" className="text-muted-foreground">
+              Decode p50{" "}
+              <span className="font-mono font-medium text-foreground">{latValue}</span>
+            </span>
+          </div>
+
+          <span aria-hidden="true" className="mx-1 h-5 w-px shrink-0 bg-white/10" />
+
           <button
             type="button"
             id="btn-home"
-            className="overlay-btn icon-only inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-[var(--secondary)] text-[var(--foreground)] transition-colors cursor-pointer shrink-0"
+            className={`overlay-btn ${glassIcon}`}
             title="Home — end session and return to main screen"
             aria-label="Home — end session and return to main screen"
             onClick={handleHome}
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-              <polyline points="9 22 9 12 15 12 15 22" />
-            </svg>
+            <House className="size-4" aria-hidden="true" />
           </button>
 
           <button
             type="button"
             id="btn-expand"
-            className="overlay-btn icon-only inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-[var(--secondary)] text-[var(--foreground)] transition-colors cursor-pointer shrink-0"
+            className={`overlay-btn ${glassIcon} ${expanded ? "bg-white/[0.08] text-foreground" : ""}`}
             aria-expanded={expanded}
             aria-controls="launcher-panel"
             title="More session controls"
             aria-label="More session controls"
             onClick={handleToggleExpand}
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              className={`transition-transform duration-200 ${expanded ? "rotate-180" : ""}`}
-            >
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
+            <ChevronDown
+              className={`size-4 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`}
+              aria-hidden="true"
+            />
           </button>
 
           <button
             type="button"
             id="btn-disconnect"
-            className="overlay-btn btn-disconnect inline-flex items-center gap-1.5 px-3 h-8 rounded-md text-xs font-medium text-[var(--destructive)] hover:bg-[var(--secondary)] transition-colors cursor-pointer shrink-0"
+            className={`overlay-btn btn-disconnect inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-destructive transition-colors duration-150 hover:bg-destructive/12 ${focusRing}`}
             title="Disconnect"
             onClick={handleDisconnect}
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
-              <line x1="12" y1="2" x2="12" y2="12" />
-            </svg>
+            <Power className="size-3.5" aria-hidden="true" />
             Disconnect
           </button>
         </div>
@@ -323,86 +355,78 @@ export function SessionView({
             id="launcher-panel"
             role="region"
             aria-label="Session details"
-            className="launcher-panel w-[320px] max-w-full max-h-[calc(100dvh-96px)] overflow-y-auto p-4 flex flex-col gap-3 rounded-[var(--radius-panel)] bg-[var(--card)] border border-[var(--border)] shadow-[var(--shadow-overlay)] pointer-events-auto text-sm text-[var(--foreground)]"
+            className="launcher-panel surface-glass pointer-events-auto flex w-[340px] max-w-full max-h-[calc(100dvh-96px)] flex-col gap-4 overflow-y-auto rounded-[14px] p-4 text-foreground animate-panel-in"
           >
-            <div className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-              Session details
+            <div className="flex items-center justify-between">
+              <h2 className="text-[13px] font-semibold">Session details</h2>
+              <span className="truncate pl-3 font-mono text-[11.5px] text-muted-foreground">
+                {snapshot.host?.ip ?? ""}
+              </span>
             </div>
-            <p className="text-xs text-[var(--muted-foreground)]">
-              Frames rendered by this client per second. Decode measures local
-              receive-to-decode time, not network latency.
-            </p>
+
             {snapshot.statsError && (
               <p
                 id="session-stats-notice"
                 role="status"
-                className="text-xs text-[var(--destructive)]"
+                className="flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs text-destructive"
               >
-                {snapshot.statsError}
+                <CircleAlert className="mt-px size-3.5 shrink-0" aria-hidden="true" />
+                <span>{snapshot.statsError}</span>
               </p>
             )}
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
-              <dt className="text-[var(--muted-foreground)]">State</dt>
-              <dd id="session-stat-state" className="text-right font-mono">
-                {snapshot.phase}
-              </dd>
-              <dt className="text-[var(--muted-foreground)]">Decode p50</dt>
-              <dd id="session-stat-p50" className="text-right font-mono">
-                {ms(snapshot.stats?.latency_p50_ms)}
-              </dd>
-              <dt className="text-[var(--muted-foreground)]">Decode p99</dt>
-              <dd id="session-stat-p99" className="text-right font-mono">
-                {ms(snapshot.stats?.latency_p99_ms)}
-              </dd>
-              <dt className="text-[var(--muted-foreground)]">Frames received</dt>
-              <dd id="session-stat-frames" className="text-right font-mono">
-                {snapshot.stats?.frames_received != null
-                  ? String(snapshot.stats.frames_received)
-                  : "—"}
-              </dd>
-              <dt className="text-[var(--muted-foreground)]">Frames decoded</dt>
-              <dd id="session-stat-decoded" className="text-right font-mono">
-                {snapshot.stats?.frames_decoded != null
-                  ? String(snapshot.stats.frames_decoded)
-                  : "—"}
-              </dd>
-              <dt className="text-[var(--muted-foreground)]">Audio packets</dt>
-              <dd id="session-stat-audio" className="text-right font-mono">
-                {snapshot.stats?.audio_packets_received != null
-                  ? String(snapshot.stats.audio_packets_received)
-                  : "—"}
-              </dd>
+
+            <dl className="grid grid-cols-2 gap-2">
+              <div className="col-span-2 flex items-center justify-between rounded-lg bg-white/[0.04] px-3 py-2.5 ring-1 ring-inset ring-white/[0.06]">
+                <dt className="text-[11px] font-medium text-muted-foreground">State</dt>
+                <dd className="flex items-center gap-2 text-[13px] font-medium">
+                  <span aria-hidden="true" className={`size-1.5 rounded-full ${statusDot}`} />
+                  <span id="session-stat-state" className="capitalize">
+                    {snapshot.phase}
+                  </span>
+                </dd>
+              </div>
+              {metrics.map((m) => (
+                <div
+                  key={m.label}
+                  className="rounded-lg bg-white/[0.04] px-3 py-2.5 ring-1 ring-inset ring-white/[0.06]"
+                >
+                  <dt className="text-[11px] font-medium text-muted-foreground">{m.label}</dt>
+                  <dd
+                    id={m.id}
+                    className="mt-0.5 font-mono text-[15px] font-medium leading-5 tabular-nums"
+                  >
+                    {m.value}
+                  </dd>
+                </div>
+              ))}
             </dl>
 
-            <div className="pt-2 border-t border-[var(--border)] flex gap-2">
-              <button
-                type="button"
-                id="btn-fullscreen"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-[var(--border)] hover:bg-[var(--secondary)] transition-colors cursor-pointer"
-                aria-pressed={fullscreenActive}
-                title="Toggle fullscreen"
-                onClick={handleToggleFullscreen}
-              >
-                <svg
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
-                </svg>
-                <span id="btn-fullscreen-label">
-                  {fullscreenActive ? "Exit Fullscreen" : "Fullscreen"}
-                </span>
-              </button>
-            </div>
+            <p className="text-[11.5px] leading-4 text-muted-foreground">
+              Rendered FPS counts frames drawn by this client. Decode is local
+              receive-to-decode time, not network latency.
+            </p>
+
+            <button
+              type="button"
+              id="btn-fullscreen"
+              className={`surface-raised inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg text-[13px] font-medium text-foreground transition-colors duration-150 hover:bg-surface-4 ${focusRing}`}
+              aria-pressed={fullscreenActive}
+              title="Toggle fullscreen"
+              onClick={handleToggleFullscreen}
+            >
+              {fullscreenActive ? (
+                <Minimize2 className="size-4" aria-hidden="true" />
+              ) : (
+                <Maximize2 className="size-4" aria-hidden="true" />
+              )}
+              <span id="btn-fullscreen-label">
+                {fullscreenActive ? "Exit Fullscreen" : "Fullscreen"}
+              </span>
+            </button>
           </div>
         )}
       </div>
 
-      {/* Connecting modal displayed while connecting / waiting for video */}
       {showConnectingModal && (
         <div
           id="session-connecting-modal"
@@ -410,29 +434,59 @@ export function SessionView({
           role="dialog"
           aria-modal="true"
           aria-labelledby="modal-connecting-text"
-          className="absolute inset-0 z-[1200] flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-auto"
+          className="absolute inset-0 z-[1200] flex items-center justify-center bg-black/65 backdrop-blur-md pointer-events-auto animate-fade-in"
         >
-          <div className="connection-panel flex flex-col items-center gap-3 p-6 rounded-[var(--radius-panel)] bg-[var(--card)] border border-[var(--border)] shadow-[var(--shadow-overlay)] min-w-[280px]">
-            <div
-              className="spinner w-6 h-6 border-2 border-[var(--muted)] border-t-[var(--primary)] rounded-full animate-spin"
-              aria-hidden="true"
-            />
-            <div
-              id="modal-connecting-text"
-              role="status"
-              className="text-sm font-medium text-[var(--foreground)]"
-            >
-              {snapshot.phase === "waiting-video"
-                ? "Waiting for video"
-                : "Connecting"}
+          <div className="connection-panel surface-glass flex w-[min(360px,calc(100%-32px))] flex-col items-center gap-4 rounded-2xl p-6 text-center animate-panel-in">
+            <div className="relative grid size-14 place-items-center">
+              <div
+                className="spinner absolute inset-0 rounded-full border-2 border-white/10 border-t-primary animate-spin motion-reduce:animate-none"
+                aria-hidden="true"
+              />
+              <Monitor className="size-5 text-brand-soft" aria-hidden="true" />
             </div>
-            <p id="modal-host-name" className="text-xs text-[var(--muted-foreground)]">
-              {snapshot.host?.name || snapshot.host?.ip || ""}
+            <div className="space-y-1">
+              <div
+                id="modal-connecting-text"
+                role="status"
+                className="text-[15px] font-semibold text-foreground"
+              >
+                {isWaiting ? "Waiting for video" : "Connecting"}
+              </div>
+              <p id="modal-host-name" className="font-mono text-xs text-muted-foreground">
+                {snapshot.host?.name || snapshot.host?.ip || ""}
+              </p>
+            </div>
+            <p className="text-[13px] text-muted-foreground">
+              {isWaiting
+                ? "Connected. Waiting for the first frame."
+                : "Establishing a secure session"}
             </p>
+            <ol className="flex items-center gap-2 text-xs font-medium" aria-label="Connection progress">
+              <li
+                className={`inline-flex h-6 items-center gap-1.5 rounded-full px-2.5 ring-1 ring-inset ${
+                  isWaiting
+                    ? "bg-success/10 text-success ring-success/20"
+                    : "bg-primary/12 text-brand-soft ring-primary/25"
+                }`}
+              >
+                {isWaiting ? <Check className="size-3" aria-hidden="true" /> : null}
+                Connect
+              </li>
+              <li aria-hidden="true" className="h-px w-4 bg-white/15" />
+              <li
+                className={`inline-flex h-6 items-center rounded-full px-2.5 ring-1 ring-inset ${
+                  isWaiting
+                    ? "bg-primary/12 text-brand-soft ring-primary/25"
+                    : "bg-white/[0.05] text-muted-foreground ring-white/[0.06]"
+                }`}
+              >
+                First frame
+              </li>
+            </ol>
             <button
               id="btn-cancel-connect"
               type="button"
-              className="mt-2 px-4 py-1.5 rounded-md text-xs font-medium border border-[var(--border)] hover:bg-[var(--secondary)] text-[var(--foreground)] transition-colors cursor-pointer"
+              className={`surface-raised mt-1 inline-flex h-9 items-center justify-center rounded-lg px-4 text-[13px] font-medium text-foreground transition-colors duration-150 hover:bg-surface-4 ${focusRing}`}
               onClick={handleDisconnect}
             >
               Cancel
@@ -441,18 +495,17 @@ export function SessionView({
         </div>
       )}
 
-      {/* Render error banner if WebGL initialization or rendering fails */}
       {renderError && (
         <div
           role="alert"
           id="render-error-alert"
-          className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-destructive text-destructive-foreground rounded shadow-lg text-sm font-medium flex items-center gap-2"
+          className="absolute top-[76px] left-1/2 -translate-x-1/2 z-[1050] flex max-w-[calc(100%-32px)] items-start gap-2 rounded-lg border border-destructive/30 bg-[#281012]/95 px-3.5 py-2.5 text-[13px] font-medium text-[#ffb4b4] shadow-float backdrop-blur-md"
         >
+          <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
           <span>{renderError}</span>
         </div>
       )}
 
-      {/* Session canvas video renderer */}
       <SessionCanvas
         active={isActive && !renderError}
         pollFrame={handlePollFrame}

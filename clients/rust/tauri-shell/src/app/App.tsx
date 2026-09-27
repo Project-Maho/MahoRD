@@ -1,5 +1,7 @@
 import { useState, useMemo, useEffect } from "react"
-import { Sidebar } from "@/features/shell/Sidebar"
+import { CircleAlert } from "lucide-react"
+import { Sidebar, type AppView } from "@/features/shell/Sidebar"
+import { SettingsPage } from "@/features/settings/SettingsPage"
 import { ComputersPage } from "@/features/library/ComputersPage"
 import { SessionView } from "@/features/session/SessionView"
 import {
@@ -20,7 +22,7 @@ export interface AppProps {
 
 export function App(props: AppProps = {}) {
   const propConnection = props.connection
-  const [activeView, setActiveView] = useState<"computers" | "favorites">("computers")
+  const [activeView, setActiveView] = useState<AppView>("computers")
   const native = isNativeAvailable()
 
   const connection: ConnectionInstance = useMemo(() => {
@@ -80,19 +82,26 @@ export function App(props: AppProps = {}) {
     >
       <Sidebar active={activeView} onSelect={setActiveView} />
       <main
-        className="flex-1 min-w-0 h-full overflow-y-auto p-8 max-[1040px]:p-6 max-[720px]:p-4"
+        className="canvas-glow h-full min-w-0 flex-1 overflow-y-auto bg-background px-10 py-9 max-[1040px]:px-6 max-[1040px]:py-7 max-[720px]:px-4 max-[720px]:py-5"
         id="main-view"
         data-ui-scope
       >
-        {sessionError && (
-          <div
-            role="alert"
-            className="mb-4 p-3 rounded bg-destructive text-destructive-foreground text-sm font-medium"
-          >
-            {sessionError}
-          </div>
-        )}
-        <ComputersPage view={activeView} connection={connection} />
+        <div className="mx-auto w-full max-w-[960px]">
+          {sessionError && (
+            <div
+              role="alert"
+              className="mb-6 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-[13px] text-destructive"
+            >
+              <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+              <span>{sessionError}</span>
+            </div>
+          )}
+          {activeView === "settings" ? (
+            <SettingsPage connection={connection} />
+          ) : (
+            <ComputersPage connection={connection} />
+          )}
+        </div>
       </main>
     </div>
   )

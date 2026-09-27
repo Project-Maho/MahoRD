@@ -1,19 +1,50 @@
 import { test, expect } from 'bun:test';
 import { openPage, hosts } from './page-harness.mjs';
 
-test('Computers page renders sidebar, This Computer card, and nav with aria-current="page"', async () => {
+test('main screen stays minimal and Settings holds the This Computer card', async () => {
   const page = await openPage({ hosts });
   try {
     await page.evaluate(`
       window.fixture.until(() => document.querySelectorAll('#host-grid [data-host-id]').length === ${hosts.length})
     `);
 
-    const result = await page.evaluate(`({
+    const main = await page.evaluate(`({
       hasSidebar: !!document.querySelector('aside'),
       sidebarHeader: document.querySelector('aside header span')?.textContent,
       navComputersCurrent: document.getElementById('nav-computers')?.getAttribute('aria-current'),
-      navFavoritesCurrent: document.getElementById('nav-favorites')?.getAttribute('aria-current'),
+      navSettingsCurrent: document.getElementById('nav-settings')?.getAttribute('aria-current'),
+      hasFavoritesNav: !!document.getElementById('nav-favorites'),
       hasThisComputer: !!document.getElementById('this-computer-card'),
+      hasSavedCredentials: !!document.getElementById('saved-pairings-section'),
+      hasRelayField: !!document.getElementById('direct-relay'),
+      hasFilters: !!document.getElementById('filter-all'),
+    })`);
+
+    expect(main.hasSidebar).toBe(true);
+    expect(main.sidebarHeader).toBe('MahoRD');
+    expect(main.navComputersCurrent).toBe('page');
+    expect(main.navSettingsCurrent).toBe('false');
+    expect(main.hasFavoritesNav).toBe(false);
+    expect(main.hasThisComputer).toBe(false);
+    expect(main.hasSavedCredentials).toBe(false);
+    expect(main.hasRelayField).toBe(false);
+    expect(main.hasFilters).toBe(false);
+
+    await page.evaluate(`
+      window.fixture.until(() => !!document.getElementById('nav-settings'))
+    `);
+    await page.evaluate(`
+      window.fixture.until(
+        () => document.getElementById('this-computer-pin')?.textContent === '87654321',
+        () => document.getElementById('nav-settings').click()
+      )
+    `);
+
+    const result = await page.evaluate(`({
+      navComputersCurrent: document.getElementById('nav-computers')?.getAttribute('aria-current'),
+      navSettingsCurrent: document.getElementById('nav-settings')?.getAttribute('aria-current'),
+      hasThisComputer: !!document.getElementById('this-computer-card'),
+      hasRelayField: !!document.getElementById('direct-relay'),
       thisComputerTitle: document.getElementById('this-computer-title')?.textContent,
       thisComputerBadge: document.getElementById('this-computer-badge')?.textContent,
       thisComputerIp: document.getElementById('this-computer-ip')?.textContent,
@@ -22,12 +53,10 @@ test('Computers page renders sidebar, This Computer card, and nav with aria-curr
       copyBtnText: document.getElementById('btn-host-copy')?.textContent,
     })`);
 
-    expect(result.hasSidebar).toBe(true);
-    expect(result.sidebarHeader).toBe('MahoRD');
-    expect(result.navComputersCurrent).toBe('page');
-    expect(result.navFavoritesCurrent).toBe('false');
-
+    expect(result.navComputersCurrent).toBe('false');
+    expect(result.navSettingsCurrent).toBe('page');
     expect(result.hasThisComputer).toBe(true);
+    expect(result.hasRelayField).toBe(true);
     expect(result.thisComputerTitle).toBe('This Computer (Host)');
     expect(result.thisComputerBadge).toBe('READY');
     expect(result.thisComputerIp).toContain('127.0.0.1');
@@ -54,7 +83,7 @@ test('host grid renders one card per stubbed host with real metadata and roles',
         id: el.dataset.hostId,
         availability: el.dataset.availability,
         role: el.getAttribute('role'),
-        favoritePressed: el.querySelector('[data-action="favorite"]')?.getAttribute('aria-pressed'),
+        hasFavorite: !!el.querySelector('[data-action="favorite"]'),
         connectDisabled: el.querySelector('[data-action="connect"]')?.disabled,
         connectText: el.querySelector('[data-action="connect"]')?.textContent,
       })),
@@ -72,7 +101,7 @@ test('host grid renders one card per stubbed host with real metadata and roles',
       expect(card.id).toBe(host.id);
       expect(card.role).toBe('listitem');
       expect(card.availability).toBe(host.online ? 'available' : 'offline');
-      expect(card.favoritePressed).toBe('false');
+      expect(card.hasFavorite).toBe(false);
       expect(card.connectText).toBe('Connect');
       if (host.online) {
         expect(card.connectDisabled).toBe(false);
@@ -81,76 +110,13 @@ test('host grid renders one card per stubbed host with real metadata and roles',
       }
     }
 
-    expect(gridInfo.calls).toContain('get_host_status');
-    expect(gridInfo.calls).toContain('list_pairings');
     expect(gridInfo.calls).toContain('list_hosts');
   } finally {
     await page.close();
   }
 }, 20000);
 
-test('filter controls expose aria-pressed and filter the host grid', async () => {
-  const page = await openPage({ hosts });
-  try {
-    await page.evaluate(`
-      window.fixture.until(() => document.querySelectorAll('#host-grid [data-host-id]').length === ${hosts.length})
-    `);
-
-    const initialFilters = await page.evaluate(`({
-      all: document.getElementById('filter-all')?.getAttribute('aria-pressed'),
-      available: document.getElementById('filter-available')?.getAttribute('aria-pressed'),
-      favorites: document.getElementById('filter-favorites')?.getAttribute('aria-pressed'),
-      count: document.querySelectorAll('#host-grid [data-host-id]').length,
-    })`);
-
-    expect(initialFilters.all).toBe('true');
-    expect(initialFilters.available).toBe('false');
-    expect(initialFilters.favorites).toBe('false');
-    expect(initialFilters.count).toBe(5);
-
-    await page.evaluate(`
-      window.fixture.until(
-        () => document.querySelectorAll('#host-grid [data-host-id]').length === 4,
-        () => document.getElementById('filter-available').click()
-      )
-    `);
-
-    const availableFilters = await page.evaluate(`({
-      all: document.getElementById('filter-all')?.getAttribute('aria-pressed'),
-      available: document.getElementById('filter-available')?.getAttribute('aria-pressed'),
-      favorites: document.getElementById('filter-favorites')?.getAttribute('aria-pressed'),
-      count: document.querySelectorAll('#host-grid [data-host-id]').length,
-      visibleIds: [...document.querySelectorAll('#host-grid [data-host-id]')].map(el => el.dataset.hostId),
-    })`);
-
-    expect(availableFilters.all).toBe('false');
-    expect(availableFilters.available).toBe('true');
-    expect(availableFilters.favorites).toBe('false');
-    expect(availableFilters.count).toBe(4);
-    expect(availableFilters.visibleIds).not.toContain('c');
-
-    await page.evaluate(`
-      window.fixture.until(
-        () => document.querySelectorAll('#host-grid [data-host-id]').length === 5,
-        () => document.getElementById('filter-all').click()
-      )
-    `);
-
-    const resetFilters = await page.evaluate(`({
-      all: document.getElementById('filter-all')?.getAttribute('aria-pressed'),
-      available: document.getElementById('filter-available')?.getAttribute('aria-pressed'),
-      count: document.querySelectorAll('#host-grid [data-host-id]').length,
-    })`);
-
-    expect(resetFilters.all).toBe('true');
-    expect(resetFilters.available).toBe('false');
-    expect(resetFilters.count).toBe(5);
-  } finally {
-    await page.close();
-  }
-}, 20000);
-
-test('nav switches between Computers and Favorites views', async () => {
+test('nav switches between Computers and Settings views', async () => {
   const page = await openPage({ hosts });
   try {
     await page.evaluate(`
@@ -158,23 +124,21 @@ test('nav switches between Computers and Favorites views', async () => {
     `);
 
     await page.evaluate(`
+      window.fixture.until(() => !!document.getElementById('nav-settings'))
+    `);
+    await page.evaluate(`
       window.fixture.until(
-        () => document.getElementById('nav-favorites')?.getAttribute('aria-current') === 'page',
-        () => document.getElementById('nav-favorites').click()
+        () => document.getElementById('this-computer-pin')?.textContent === '87654321',
+        () => document.getElementById('nav-settings').click()
       )
     `);
 
-    const favoritesView = await page.evaluate(`({
-      navComputersCurrent: document.getElementById('nav-computers')?.getAttribute('aria-current'),
-      navFavoritesCurrent: document.getElementById('nav-favorites')?.getAttribute('aria-current'),
-      hasThisComputer: !!document.getElementById('this-computer-card'),
-      statusMessage: document.getElementById('library-status')?.textContent,
+    const settingsView = await page.evaluate(`({
+      navSettingsCurrent: document.getElementById('nav-settings')?.getAttribute('aria-current'),
+      hasGrid: !!document.getElementById('host-grid'),
     })`);
-
-    expect(favoritesView.navComputersCurrent).toBe('false');
-    expect(favoritesView.navFavoritesCurrent).toBe('page');
-    expect(favoritesView.hasThisComputer).toBe(false);
-    expect(favoritesView.statusMessage).toContain('No favorites here');
+    expect(settingsView.navSettingsCurrent).toBe('page');
+    expect(settingsView.hasGrid).toBe(false);
 
     await page.evaluate(`
       window.fixture.until(
@@ -185,14 +149,11 @@ test('nav switches between Computers and Favorites views', async () => {
 
     const computersView = await page.evaluate(`({
       navComputersCurrent: document.getElementById('nav-computers')?.getAttribute('aria-current'),
-      navFavoritesCurrent: document.getElementById('nav-favorites')?.getAttribute('aria-current'),
       hasThisComputer: !!document.getElementById('this-computer-card'),
       count: document.querySelectorAll('#host-grid [data-host-id]').length,
     })`);
-
     expect(computersView.navComputersCurrent).toBe('page');
-    expect(computersView.navFavoritesCurrent).toBe('false');
-    expect(computersView.hasThisComputer).toBe(true);
+    expect(computersView.hasThisComputer).toBe(false);
     expect(computersView.count).toBe(5);
   } finally {
     await page.close();
@@ -202,6 +163,16 @@ test('nav switches between Computers and Favorites views', async () => {
 test('host sharing toggle invokes backend commands and updates badge/button', async () => {
   const page = await openPage({ hosts });
   try {
+    await page.evaluate(`
+      window.fixture.until(() => !!document.getElementById('nav-settings'))
+    `);
+    await page.evaluate(`
+      window.fixture.until(
+        () => document.getElementById('this-computer-pin')?.textContent === '87654321',
+        () => document.getElementById('nav-settings').click()
+      )
+    `);
+
     await page.evaluate(`
       window.fixture.until(() => document.getElementById('btn-host-toggle')?.textContent === 'Pause Sharing')
     `);
@@ -248,6 +219,16 @@ test('saved credentials section renders cards and supports forget action', async
 
   const page = await openPage({ hosts, pairings: [samplePairing] });
   try {
+    await page.evaluate(`
+      window.fixture.until(() => !!document.getElementById('nav-settings'))
+    `);
+    await page.evaluate(`
+      window.fixture.until(
+        () => document.getElementById('this-computer-pin')?.textContent === '87654321',
+        () => document.getElementById('nav-settings').click()
+      )
+    `);
+
     await page.evaluate(`
       window.fixture.until(() => document.querySelectorAll('[data-pairing-id]').length === 1)
     `);
@@ -376,14 +357,22 @@ test('page without native Tauri bridge gracefully indicates desktop controls una
     const status = await page.evaluate(`({
       statusText: document.getElementById('library-status')?.textContent,
       refreshDisabled: document.getElementById('btn-refresh')?.disabled,
-      toggleDisabled: document.getElementById('btn-host-toggle')?.disabled,
       cardsCount: document.querySelectorAll('#host-grid [data-host-id]').length,
     })`);
 
     expect(status.statusText).toContain('Desktop connection controls are unavailable in this browser.');
     expect(status.refreshDisabled).toBe(true);
-    expect(status.toggleDisabled).toBe(true);
     expect(status.cardsCount).toBe(0);
+
+    await page.evaluate(`
+      new Promise((resolve) => {
+        document.getElementById('nav-settings').click();
+        const check = () => document.getElementById('btn-host-toggle') ? resolve() : setTimeout(check, 50);
+        check();
+      })
+    `);
+    const toggleDisabled = await page.evaluate(`document.getElementById('btn-host-toggle')?.disabled`);
+    expect(toggleDisabled).toBe(true);
   } finally {
     await page.close();
   }
