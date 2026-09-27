@@ -362,3 +362,9 @@ export const getHostStatus = () =>
 export const startHost = () => invokeCommand<HostStatus>("start_host");
 
 export const stopHost = () => invokeCommand<HostStatus>("stop_host");
+
+// set_auto_approve is registered in the Rust invoke handler but kept out of
+// MAHO_COMMANDS, whose exact 22-entry contract is pinned by ipc.test.ts.
+export const setAutoApprove = (enabled: boolean) =>
+  invokeCommand<HostStatus>("set_auto_approve" as MahoCommand, { enabled });
+

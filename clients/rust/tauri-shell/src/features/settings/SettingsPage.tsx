@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { CircleAlert } from "lucide-react"
 import { ThisComputerCard } from "@/features/host/ThisComputerCard"
 import { SavedCredentials } from "@/features/library/SavedCredentials"
 import { Input } from "@/components/ui/input"
@@ -10,6 +11,7 @@ import {
   getHostStatus,
   startHost,
   stopHost,
+  setAutoApprove,
   type PairingSummary,
   type HostStatus,
 } from "@/lib/ipc"
@@ -56,6 +58,8 @@ export function SettingsPage({ connection }: SettingsPageProps) {
     if (typeof window === "undefined" || !window.localStorage) return ""
     return window.localStorage.getItem(RELAY_URL_STORAGE_KEY) ?? ""
   })
+  const [autoApproveBusy, setAutoApproveBusy] = useState(false)
+  const [autoApproveError, setAutoApproveError] = useState<string | null>(null)
 
   useEffect(() => connection.subscribe((s) => setConnBusy(s.busy)), [connection])
 
@@ -93,6 +97,23 @@ export function SettingsPage({ connection }: SettingsPageProps) {
       console.error("Failed to toggle sharing:", err)
     } finally {
       setHostBusy(false)
+    }
+  }
+
+  const handleToggleAutoApprove = async () => {
+    if (!native || autoApproveBusy || hostBusy) return
+    const next = !(hostStatus?.auto_approve ?? false)
+    setAutoApproveBusy(true)
+    setAutoApproveError(null)
+    try {
+      await setAutoApprove(next)
+      const updated = await getHostStatus()
+      if (updated) setHostStatus(updated)
+    } catch (err: any) {
+      console.error("Failed to toggle auto-approve:", err)
+      setAutoApproveError(String(err?.message ?? err ?? "Failed to toggle auto-approve"))
+    } finally {
+      setAutoApproveBusy(false)
     }
   }
 
@@ -154,6 +175,49 @@ export function SettingsPage({ connection }: SettingsPageProps) {
           onToggleSharing={handleToggleSharing}
           onCopyInfo={handleCopyInfo}
         />
+
+        <div className="rounded-panel surface-card p-4 space-y-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-0.5">
+              <label
+                htmlFor="toggle-auto-approve"
+                className="text-[13px] font-medium text-foreground cursor-pointer"
+              >
+                Auto-approve new devices
+              </label>
+              <p className="text-xs text-subtle-foreground">
+                Skip the approval prompt when a device pairs with this computer&apos;s PIN.
+              </p>
+            </div>
+            <button
+              id="toggle-auto-approve"
+              type="button"
+              role="switch"
+              aria-checked={hostStatus?.auto_approve ?? false}
+              disabled={!native || hostBusy || autoApproveBusy}
+              onClick={handleToggleAutoApprove}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-50 ${
+                hostStatus?.auto_approve ? "bg-primary" : "bg-white/10"
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block size-4 transform rounded-full bg-white shadow-sm transition-transform duration-150 ${
+                  hostStatus?.auto_approve ? "translate-x-4" : "translate-x-0.5"
+                }`}
+              />
+            </button>
+          </div>
+
+          {autoApproveError && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-[13px] text-destructive"
+            >
+              <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+              <span>{autoApproveError}</span>
+            </div>
+          )}
+        </div>
       </section>
 
       <SavedCredentials

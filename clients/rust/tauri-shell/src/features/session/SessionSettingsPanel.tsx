@@ -9,14 +9,6 @@ import {
   type DesktopAudioStatus,
   type DesktopAudioDevice,
 } from "@/lib/ipc";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -323,38 +315,43 @@ export function SessionSettingsPanel({
       <Separator />
 
       {/* Video Quality Section */}
-      <div className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-        Video quality
+      <div className="text-[11px] font-medium text-muted-foreground">
+        Quality
       </div>
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor="session-quality">Bitrate ceiling</Label>
-        <Select
-          value={String(bitrate)}
-          onValueChange={handleBitrateChange}
+        <span id="session-quality-label" className="text-[12.5px] font-medium text-muted-foreground">
+          Bitrate ceiling
+        </span>
+        <div
+          id="session-quality"
+          role="group"
+          aria-labelledby="session-quality-label"
+          aria-describedby="session-quality-error"
+          className="grid h-9 grid-cols-4 gap-1 rounded-[10px] surface-well p-1"
         >
-          <SelectTrigger
-            id="session-quality"
-            aria-describedby="session-quality-error"
-            className="w-full"
-            onChange={(e: any) => {
-              const val = e?.target?.value ?? (typeof e === "string" || typeof e === "number" ? e : null);
-              if (val != null) handleBitrateChange(String(val));
-            }}
-          >
-            <SelectValue placeholder="50 Mbps" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="8">8 Mbps</SelectItem>
-            <SelectItem value="25">25 Mbps</SelectItem>
-            <SelectItem value="50">50 Mbps</SelectItem>
-            <SelectItem value="100">100 Mbps</SelectItem>
-          </SelectContent>
-        </Select>
+          {QUALITY_OPTIONS.map((mbps) => {
+            const pressed = bitrate === mbps
+            return (
+              <button
+                key={mbps}
+                type="button"
+                aria-pressed={pressed}
+                onClick={() => handleBitrateChange(String(mbps))}
+                className={`rounded-lg text-[12.5px] font-medium tabular-nums transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring ${
+                  pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {mbps}
+              </button>
+            )
+          })}
+        </div>
+        <span className="text-[11px] text-muted-foreground">Mbps</span>
       </div>
       <p
         id="session-quality-error"
         role="status"
-        className="text-xs text-[var(--destructive)]"
+        className="text-xs text-destructive"
         hidden={!qualityError}
       >
         {qualityError || ""}
@@ -363,68 +360,69 @@ export function SessionSettingsPanel({
       <Separator />
 
       {/* Audio Output Section */}
-      <div className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-        Audio output
+      <div className="text-[11px] font-medium text-muted-foreground">
+        Audio
       </div>
-      <p id="audio-status" role="status" className="text-xs text-[var(--muted-foreground)]">
+      <p id="audio-status" role="status" className="text-xs text-muted-foreground">
         {audioStatusText}
       </p>
 
       {/* Volume slider */}
       <div className="flex flex-col gap-1.5">
         <div className="flex justify-between items-center">
-          <Label htmlFor="audio-volume">Volume</Label>
-          <span id="audio-volume-value" className="text-xs font-mono text-[var(--muted-foreground)]">
+          <Label htmlFor="audio-volume" className="text-[12.5px] font-medium text-muted-foreground">
+            Volume
+          </Label>
+          <span id="audio-volume-value" className="text-xs font-mono text-muted-foreground">
             {liveVolume}%
           </span>
         </div>
-        <Slider
+        <input
           id="audio-volume"
+          type="range"
           min={0}
           max={100}
           step={1}
-          value={[liveVolume]}
-          onValueChange={handleVolumeInput}
-          onValueCommit={handleVolumeChange}
-          onChange={(e: any) => {
-            const raw = e?.target?.value ?? (Array.isArray(e) ? e[0] : e);
-            if (raw != null) {
-              handleVolumeChange([Number(raw)]);
-            }
-          }}
+          value={liveVolume}
+          onChange={(e) => handleVolumeInput([Number(e.target.value)])}
+          onPointerUp={(e) => handleVolumeChange([Number((e.target as HTMLInputElement).value)])}
+          onKeyUp={(e) => handleVolumeChange([Number((e.target as HTMLInputElement).value)])}
           disabled={disabledControls}
           aria-describedby="audio-error"
+          className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-white/10 accent-[#ff6353] disabled:cursor-not-allowed disabled:opacity-50"
         />
       </div>
 
       {/* Output device selector */}
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor="audio-device">Output device</Label>
-        <Select
-          value={selectedDeviceId}
-          onValueChange={setSelectedDeviceId}
-          disabled={disabledControls}
+        <span id="audio-device-label" className="text-[12.5px] font-medium text-muted-foreground">
+          Output device
+        </span>
+        <div
+          id="audio-device"
+          role="group"
+          aria-labelledby="audio-device-label"
+          aria-describedby="audio-error"
+          className="flex flex-col gap-1 rounded-[10px] surface-well p-1"
         >
-          <SelectTrigger
-            id="audio-device"
-            aria-describedby="audio-error"
-            className="w-full"
-          >
-            <SelectValue placeholder="System default" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="default">System default</SelectItem>
-            {devices.map((device) => (
-              <SelectItem
+          {[{ id: "default", name: "System default", supported: true }, ...devices].map((device) => {
+            const pressed = selectedDeviceId === device.id
+            return (
+              <button
                 key={device.id}
-                value={device.id}
-                disabled={!device.supported}
+                type="button"
+                aria-pressed={pressed}
+                disabled={disabledControls || !device.supported}
+                onClick={() => setSelectedDeviceId(device.id)}
+                className={`h-8 truncate rounded-lg px-2.5 text-left text-[12.5px] font-medium transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring disabled:opacity-50 ${
+                  pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
+                }`}
               >
                 {device.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+              </button>
+            )
+          })}
+        </div>
       </div>
 
       {/* Audio Action Buttons */}
@@ -466,7 +464,7 @@ export function SessionSettingsPanel({
       <p
         id="audio-error"
         role="alert"
-        className="text-xs text-[var(--destructive)]"
+        className="text-xs text-destructive"
         hidden={!audioErrorText}
       >
         {audioErrorText || ""}

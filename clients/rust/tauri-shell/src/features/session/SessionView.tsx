@@ -10,6 +10,7 @@ import {
   Power,
 } from "lucide-react";
 import { SessionCanvas } from "./SessionCanvas";
+import { SessionSettingsPanel } from "./SessionSettingsPanel";
 
 import { useRemoteInput } from "./useRemoteInput";
 import {
@@ -400,6 +401,15 @@ export function SessionView({
                 </div>
               ))}
             </dl>
+
+            <div className="h-px bg-white/[0.06]" />
+
+            <SessionSettingsPanel
+              isConnected={snapshot.phase === "streaming"}
+              onError={onError}
+            />
+
+            <div className="h-px bg-white/[0.06]" />
 
             <p className="text-[11.5px] leading-4 text-muted-foreground">
               Rendered FPS counts frames drawn by this client. Decode is local
