@@ -203,6 +203,42 @@ pub fn mouse_button_flags(event_type: maho_proto::InputEventType) -> u32 {
     }
 }
 
+/// Browser wheel pixels that make up one Win32 wheel notch (`WHEEL_DELTA`).
+const PIXELS_PER_WHEEL_NOTCH: f32 = 100.0;
+const WHEEL_DELTA: f32 = 120.0;
+
+/// Converts wire scroll deltas (browser `WheelEvent` pixels: +dy scrolls down,
+/// +dx scrolls right) to `SendInput` wheel data `(vertical, horizontal)`.
+/// Win32 `MOUSEEVENTF_WHEEL` is positive when the wheel rotates forward (scroll
+/// up), so the vertical axis is negated; `MOUSEEVENTF_HWHEEL` is positive to the
+/// right and keeps its sign. The client has already applied its own scroll
+/// preference, but Windows applies the host user's "reverse scrolling" setting
+/// to injected wheel input as well, so `host_reversed` pre-flips both axes to
+/// cancel it. A non-zero delta always yields at least one unit so small trackpad
+/// deltas are not dropped, and units are clamped to the 16-bit range the wheel
+/// message carries so large deltas cannot wrap into the opposite direction.
+pub fn wheel_data_from_scroll(scroll_dx: f32, scroll_dy: f32, host_reversed: bool) -> (i32, i32) {
+    let sign = if host_reversed { -1.0 } else { 1.0 };
+    (
+        pixels_to_wheel_units(-scroll_dy * sign),
+        pixels_to_wheel_units(scroll_dx * sign),
+    )
+}
+
+fn pixels_to_wheel_units(pixels: f32) -> i32 {
+    if !pixels.is_finite() || pixels == 0.0 {
+        return 0;
+    }
+    let units = (pixels * WHEEL_DELTA / PIXELS_PER_WHEEL_NOTCH)
+        .round()
+        .clamp(-(i16::MAX as f32), i16::MAX as f32) as i32;
+    if units == 0 {
+        pixels.signum() as i32
+    } else {
+        units
+    }
+}
+
 /// Stable FNV-1a clipboard hash used for content-level dedup.
 pub fn clipboard_content_hash(text: &str) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -443,6 +479,33 @@ pub fn resolve_output_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_data_inverts_vertical_and_scales_pixels_to_notches() {
+        // One browser notch down (+100 px) is one Win32 notch backward (-120).
+        assert_eq!(wheel_data_from_scroll(0.0, 100.0, false), (-120, 0));
+        assert_eq!(wheel_data_from_scroll(0.0, -100.0, false), (120, 0));
+        // Horizontal keeps its sign: +dx scrolls right, as does +HWHEEL.
+        assert_eq!(wheel_data_from_scroll(50.0, 0.0, false), (0, 60));
+        // Tiny trackpad deltas still move one unit in the right direction.
+        assert_eq!(wheel_data_from_scroll(-0.2, 0.3, false), (-1, -1));
+        assert_eq!(wheel_data_from_scroll(0.0, 0.0, false), (0, 0));
+        assert_eq!(
+            wheel_data_from_scroll(f32::NAN, f32::INFINITY, false),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn wheel_data_cancels_host_reverse_scrolling_and_never_wraps() {
+        // Windows flips injected wheel data when the host user enabled reverse
+        // scrolling, so both axes are pre-flipped to keep the client's intent.
+        assert_eq!(wheel_data_from_scroll(0.0, 100.0, true), (120, 0));
+        assert_eq!(wheel_data_from_scroll(50.0, 0.0, true), (0, -60));
+        // Huge deltas saturate instead of wrapping the 16-bit wheel delta.
+        assert_eq!(wheel_data_from_scroll(0.0, 1.0e6, false), (-32767, 0));
+        assert_eq!(wheel_data_from_scroll(-1.0e6, 0.0, false), (0, -32767));
+    }
 
     #[test]
     fn maps_alphabet_digits_navigation_and_modifiers() {

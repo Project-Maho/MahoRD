@@ -12,6 +12,14 @@
 use std::{collections::HashSet, io, mem::size_of};
 
 use maho_proto::{InputEvent, InputEventType, Modifiers};
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+use windows::Win32::Security::{
+    Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_USERS, RRF_RT_REG_DWORD};
+use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
@@ -29,11 +37,9 @@ use windows::Win32::UI::{
 };
 
 pub use crate::windows_logic::{
-    macos_keycode_to_vk, normalize_absolute_pointer, vk_to_macos_keycode, TargetDisplay,
-    VirtualDesktop,
+    macos_keycode_to_vk, normalize_absolute_pointer, vk_to_macos_keycode, wheel_data_from_scroll,
+    TargetDisplay, VirtualDesktop,
 };
-
-const WHEEL_DELTA: f32 = 120.0;
 
 pub struct WindowsInputInjector {
     target: TargetDisplay,
@@ -43,6 +49,9 @@ pub struct WindowsInputInjector {
     // dropped session can release them instead of leaving them stuck.
     active_keys: HashSet<u16>,
     active_buttons: HashSet<u8>,
+    // `HKEY_USERS` path of the interactive user's mouse settings; the worker
+    // runs as SYSTEM, so its own HKCU does not hold the user's preferences.
+    mouse_settings_key: Option<Vec<u16>>,
 }
 
 impl WindowsInputInjector {
@@ -61,6 +70,8 @@ impl WindowsInputInjector {
             modifiers: Modifiers::empty(),
             active_keys: HashSet::new(),
             active_buttons: HashSet::new(),
+            mouse_settings_key: interactive_user_sid()
+                .map(|sid| wide_nul(&format!("{sid}\\Control Panel\\Mouse"))),
         })
     }
 
@@ -160,11 +171,15 @@ impl WindowsInputInjector {
             }
             InputEventType::ScrollWheel => {
                 let mut inputs = Vec::with_capacity(2);
-                let vertical = scroll_units(event.scroll_dy);
+                // Read per event: the user can toggle the setting mid-session.
+                let (vertical, horizontal) = wheel_data_from_scroll(
+                    event.scroll_dx,
+                    event.scroll_dy,
+                    self.host_wheel_reversed(),
+                );
                 if vertical != 0 {
                     inputs.push(mouse_input(0, 0, vertical as u32, MOUSEEVENTF_WHEEL));
                 }
-                let horizontal = scroll_units(event.scroll_dx);
                 if horizontal != 0 {
                     inputs.push(mouse_input(0, 0, horizontal as u32, MOUSEEVENTF_HWHEEL));
                 }
@@ -239,6 +254,81 @@ impl Drop for WindowsInputInjector {
             inputs.push(mouse_input(0, 0, 0, button_flags));
         }
         let _ = send_inputs(&inputs);
+    }
+}
+
+impl WindowsInputInjector {
+    /// Whether Windows will reverse injected wheel input because the host user
+    /// enabled "Reverse scrolling direction" (Settings > Mouse).
+    fn host_wheel_reversed(&self) -> bool {
+        let Some(key) = self.mouse_settings_key.as_ref() else {
+            return false;
+        };
+        let value = wide_nul("ReverseMouseWheelDirection");
+        let mut data = 0u32;
+        let mut size = size_of::<u32>() as u32;
+        // SAFETY: both strings are NUL-terminated and `data`/`size` describe a valid DWORD buffer.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_USERS,
+                PCWSTR(key.as_ptr()),
+                PCWSTR(value.as_ptr()),
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&mut data as *mut u32).cast()),
+                Some(&mut size),
+            )
+        };
+        status.is_ok() && data != 0
+    }
+}
+
+fn wide_nul(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// SID string of the user logged on to the console, falling back to the
+/// current process user when not running as SYSTEM (for example a user task).
+fn interactive_user_sid() -> Option<String> {
+    let mut token = HANDLE::default();
+    // SAFETY: `token` is valid output storage and is closed below on every path.
+    unsafe {
+        if WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token).is_err() {
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        }
+        let sid = token_user_sid(token);
+        let _ = CloseHandle(token);
+        sid
+    }
+}
+
+/// # Safety
+/// `token` must be a valid token handle opened with `TOKEN_QUERY` access.
+unsafe fn token_user_sid(token: HANDLE) -> Option<String> {
+    let mut needed = 0u32;
+    // SAFETY: a size query with no buffer only writes `needed`.
+    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut needed) };
+    if needed == 0 {
+        return None;
+    }
+    // u64 storage keeps the TOKEN_USER header suitably aligned.
+    let mut buffer = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
+    // SAFETY: `buffer` holds at least `needed` bytes and outlives every use of the SID.
+    unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            needed,
+            &mut needed,
+        )
+        .ok()?;
+        let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+        let mut text = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut text).ok()?;
+        let sid = text.to_string().ok();
+        let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+        sid
     }
 }
 
@@ -317,12 +407,6 @@ fn mouse_input(dx: i32, dy: i32, data: u32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
             },
         },
     }
-}
-
-fn scroll_units(delta: f32) -> i32 {
-    (delta * WHEEL_DELTA)
-        .round()
-        .clamp(i32::MIN as f32, i32::MAX as f32) as i32
 }
 
 fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
