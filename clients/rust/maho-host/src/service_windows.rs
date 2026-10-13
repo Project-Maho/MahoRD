@@ -295,10 +295,143 @@ pub fn uninstall() -> io::Result<()> {
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-extern "system" fn control_handler(control: u32) {
+const SAS_CONTROL: u32 = 128;
+
+/// SCM authenticates this worker-to-service request using the service DACL.
+/// Ordinary interactive users cannot acquire SERVICE_USER_DEFINED_CONTROL.
+pub struct SecureAttentionBroker;
+
+impl crate::guests::SecureAttentionHandler for SecureAttentionBroker {
+    fn request(&self, _guest: &crate::guests::GuestSession) -> maho_proto::SecureAttentionResult {
+        let name = wide(OsStr::new(SERVICE_NAME));
+        // SAFETY: SCM handles are owned by RAII, and the status output and name
+        // buffer remain live throughout the synchronous calls.
+        let result = unsafe {
+            (|| {
+                let manager = ServiceHandle(
+                    OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+                        .map_err(io_error)?,
+                );
+                let service = ServiceHandle(
+                    OpenServiceW(
+                        manager.0,
+                        PCWSTR(name.as_ptr()),
+                        SERVICE_USER_DEFINED_CONTROL,
+                    )
+                    .map_err(io_error)?,
+                );
+                let mut status = SERVICE_STATUS::default();
+                ControlService(service.0, SAS_CONTROL, &mut status).map_err(io_error)
+            })()
+        };
+        match result {
+            Ok(()) => maho_proto::SecureAttentionResult::Accepted,
+            Err(error) => {
+                service_log(&format!("SAS broker failed: {error}"));
+                match error.raw_os_error() {
+                    Some(1060 | 1062 | 120) => maho_proto::SecureAttentionResult::Unsupported,
+                    _ => maho_proto::SecureAttentionResult::Failed,
+                }
+            }
+        }
+    }
+}
+
+fn send_native_sas() -> io::Result<()> {
+    use windows::core::w;
+    use windows::Win32::System::Registry::*;
+    let mut session = u32::MAX;
+    // SAFETY: process ID belongs to this process and the output is initialized.
+    unsafe {
+        ProcessIdToSessionId(GetCurrentProcessId(), &mut session).map_err(io_error)?;
+    }
+    if session != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "SAS requires service session 0",
+        ));
+    }
+    let mut policy = 0u32;
+    let mut bytes = 4u32;
+    // SAFETY: registry output points to four initialized bytes; both strings
+    // are static NUL-terminated UTF-16. No ownership crosses the FFI boundary.
+    unsafe {
+        let key = w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System");
+        let value = w!("SoftwareSASGeneration");
+        let read = RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key,
+            value,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut policy as *mut u32).cast()),
+            Some(&mut bytes),
+        );
+        if read == ERROR_FILE_NOT_FOUND {
+            policy = 1; // Services only; never widen an existing administrator policy.
+            RegSetKeyValueW(
+                HKEY_LOCAL_MACHINE,
+                key,
+                value,
+                REG_DWORD.0,
+                Some((&policy as *const u32).cast()),
+                4,
+            )
+            .ok()
+            .map_err(io_error)?;
+            service_log("SAS: created absent SoftwareSASGeneration=1 (services only)");
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                key,
+                value,
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&mut policy as *mut u32).cast()),
+                Some(&mut bytes),
+            )
+            .ok()
+            .map_err(io_error)?;
+        } else {
+            read.ok().map_err(io_error)?;
+        }
+        if !matches!(policy, 1 | 3) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "SoftwareSASGeneration disallows service SAS; existing policy preserved",
+            ));
+        }
+        let library =
+            libloading::Library::new("C:\\Windows\\System32\\sas.dll").map_err(io::Error::other)?;
+        let send: libloading::Symbol<unsafe extern "system" fn(BOOL)> =
+            library.get(b"SendSAS\0").map_err(io::Error::other)?;
+        // SendSAS has no result; Accepted means policy verified and native
+        // invocation completed, never that the security screen was observed.
+        send(BOOL(0));
+    }
+    Ok(())
+}
+
+extern "system" fn control_handler(
+    control: u32,
+    _event: u32,
+    _data: *mut c_void,
+    _context: *mut c_void,
+) -> u32 {
+    if control == SAS_CONTROL {
+        return match send_native_sas() {
+            Ok(()) => 0,
+            Err(error) => {
+                service_log(&format!("native SAS failed: {error}"));
+                error
+                    .raw_os_error()
+                    .map_or(ERROR_GEN_FAILURE.0, |code| code as u32)
+            }
+        };
+    }
     if control == SERVICE_CONTROL_STOP {
         STOP_REQUESTED.store(true, Ordering::Release);
     }
+    0
 }
 
 fn report_status(
@@ -388,7 +521,7 @@ extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
     let name = wide(OsStr::new(SERVICE_NAME));
     // SAFETY: the callback has the SCM ABI and the service name is NUL-terminated.
     let status_handle = match unsafe {
-        RegisterServiceCtrlHandlerW(PCWSTR(name.as_ptr()), Some(control_handler))
+        RegisterServiceCtrlHandlerExW(PCWSTR(name.as_ptr()), Some(control_handler), None)
     } {
         Ok(handle) => handle,
         Err(error) => {

@@ -8,6 +8,8 @@ pub mod capture_linux;
 pub mod capture_macos;
 #[cfg(target_os = "windows")]
 pub mod capture_windows;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod clipboard_image;
 #[cfg(target_os = "linux")]
 pub mod clipboard_linux;
 #[cfg(target_os = "windows")]
@@ -19,6 +21,11 @@ pub mod encode_vt;
 #[cfg(target_os = "windows")]
 pub mod encode_windows;
 #[cfg(target_os = "linux")]
+mod gamepad_linux;
+#[cfg(target_os = "windows")]
+mod gamepad_windows;
+pub mod guests;
+#[cfg(target_os = "linux")]
 pub mod inject_linux;
 #[cfg(target_os = "macos")]
 pub mod inject_macos;
@@ -28,6 +35,7 @@ pub mod relay;
 #[cfg(target_os = "windows")]
 pub mod service_windows;
 pub mod session;
+mod sleep_inhibit;
 pub mod windows_logic;
 pub mod windows_session;
 

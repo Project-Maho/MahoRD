@@ -43,6 +43,7 @@ pub use crate::windows_logic::{
 use crate::windows_logic::{macos_keycode_to_windows_key, vk_is_extended};
 
 pub struct WindowsInputInjector {
+    gamepads: crate::gamepad_windows::Gamepads,
     target: TargetDisplay,
     desktop: VirtualDesktop,
     modifiers: Modifiers,
@@ -66,6 +67,7 @@ impl WindowsInputInjector {
             ));
         }
         Ok(Self {
+            gamepads: crate::gamepad_windows::Gamepads::default(),
             target,
             desktop,
             modifiers: Modifiers::empty(),
@@ -147,13 +149,14 @@ impl WindowsInputInjector {
             }
             InputEventType::GamepadAxis
             | InputEventType::GamepadButtonDown
-            | InputEventType::GamepadButtonUp => Ok(()),
+            | InputEventType::GamepadButtonUp => self.gamepads.inject(event),
             InputEventType::RelativeMove => {
                 let dx = event.scroll_dx.round() as i32;
                 let dy = event.scroll_dy.round() as i32;
                 self.move_relative(dx, dy)
             }
             InputEventType::Reset => {
+                self.gamepads.reset();
                 let mut inputs = Vec::new();
                 inputs.push(mouse_input(
                     0,

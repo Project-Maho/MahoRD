@@ -41,6 +41,9 @@ rustix.workspace = true
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 ffmpeg-next = { workspace = true, default-features = false, features = ["format", "software-scaling"] }
 
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+png = "0.17.16"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
@@ -63,6 +66,7 @@ wayland-protocols = { version = "0.32.13", features = ["client"] }
 libloading = "0.8.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+libloading = "0.8.9"
 clipboard-win = { version = "5.4.1", features = ["std"] }
 dxgi-capture-rs = "1.2.2"
 nvenc = "0.1.0"

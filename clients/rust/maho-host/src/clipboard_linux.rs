@@ -135,6 +135,7 @@ impl ClipboardEchoSuppressor {
 }
 
 pub struct LinuxClipboard {
+    image: Option<Vec<u8>>,
     backend: ClipboardBackend,
     suppressor: ClipboardEchoSuppressor,
 }
@@ -148,6 +149,7 @@ impl LinuxClipboard {
         backend: Result<ClipboardBackend, ClipboardError>,
     ) -> Result<Self, ClipboardError> {
         Ok(Self {
+            image: None,
             backend: backend?,
             suppressor: ClipboardEchoSuppressor::new(DEFAULT_ECHO_PERIOD),
         })
@@ -155,6 +157,47 @@ impl LinuxClipboard {
 
     pub fn backend(&self) -> ClipboardBackend {
         self.backend
+    }
+
+    pub fn apply_remote_image(&mut self, bytes: &[u8]) -> Result<(), ClipboardError> {
+        crate::clipboard_image::validate_png(bytes)?;
+        if self.backend != ClipboardBackend::Wayland {
+            return Err(ClipboardError::Unavailable);
+        }
+        write_command_bounded(
+            Command::new("wl-copy").args(["--type", "image/png"]),
+            bytes,
+            WRITE_COMMAND_TIMEOUT,
+        )?;
+        self.image = Some(bytes.to_vec());
+        Ok(())
+    }
+
+    pub fn poll_image(&mut self) -> Result<Option<Vec<u8>>, ClipboardError> {
+        if self.backend != ClipboardBackend::Wayland || self.wayland_selection_is_concealed()? {
+            return Ok(None);
+        }
+        let types = read_command_bounded(
+            Command::new("wl-paste").arg("--list-types"),
+            MAX_TYPE_LIST_BYTES,
+        )?;
+        if !String::from_utf8_lossy(&types)
+            .lines()
+            .any(|mime| mime == "image/png")
+        {
+            self.image = None;
+            return Ok(None);
+        }
+        let bytes = read_command_bounded(
+            Command::new("wl-paste").args(["--type", "image/png"]),
+            crate::clipboard_image::LIMIT,
+        )?;
+        crate::clipboard_image::validate_png(&bytes)?;
+        if self.image.as_ref() == Some(&bytes) {
+            return Ok(None);
+        }
+        self.image = Some(bytes.clone());
+        Ok(Some(bytes))
     }
 
     /// Poll once. The host session should call this every
@@ -268,11 +311,36 @@ fn write_command_bounded(
     let mut stderr = child.stderr.take();
 
     let outcome: Result<(std::process::ExitStatus, Vec<u8>), ClipboardError> = (|| {
-        stdin.write_all(input)?;
+        let flags = rustix::fs::fcntl_getfl(&stdin).map_err(io::Error::from)?;
+        rustix::fs::fcntl_setfl(&stdin, flags | rustix::fs::OFlags::NONBLOCK)
+            .map_err(io::Error::from)?;
+        let deadline = Instant::now() + timeout;
+        let mut offset = 0;
+        while offset < input.len() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ClipboardError::Timeout);
+            }
+            let timeout = Timespec::try_from(remaining).map_err(io::Error::other)?;
+            let mut fds = [PollFd::new(&stdin, PollFlags::OUT)];
+            poll(&mut fds, Some(&timeout)).map_err(io::Error::from)?;
+            match stdin.write(&input[offset..]) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
+                Ok(count) => offset += count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         // Closing stdin marks end-of-input; otherwise the owner waits for more.
         drop(stdin);
 
-        let deadline = Instant::now() + timeout;
         let mut collected = Vec::new();
         loop {
             let exited = child.try_wait()?;

@@ -343,6 +343,51 @@ fn selected_output_metadata(display_index: usize) -> Result<SelectedOutputMetada
     ))
 }
 
+pub fn enumerate_displays() -> Result<Vec<maho_proto::HostDisplay>, CaptureError> {
+    let error = |e: windows::core::Error| CaptureError::Initialization(e.to_string());
+    // SAFETY: all returned COM interfaces are owned and descriptions are initialized by DXGI.
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(error)?;
+        let mut displays = Vec::new();
+        for a in 0.. {
+            let adapter = match factory.EnumAdapters1(a) {
+                Ok(adapter) => adapter,
+                Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(e) => return Err(error(e)),
+            };
+            for o in 0.. {
+                let output = match adapter.EnumOutputs(o) {
+                    Ok(output) => output,
+                    Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+                    Err(e) => return Err(error(e)),
+                };
+                let desc = output.GetDesc().map_err(error)?;
+                if !desc.AttachedToDesktop.as_bool() {
+                    continue;
+                }
+                if displays.len() == maho_proto::MAX_HOST_DISPLAYS {
+                    return Ok(displays);
+                }
+                let bounds = desc.DesktopCoordinates;
+                displays.push(maho_proto::HostDisplay {
+                    index: displays.len() as u8,
+                    name: String::from_utf16_lossy(
+                        &desc.DeviceName[..desc
+                            .DeviceName
+                            .iter()
+                            .position(|c| *c == 0)
+                            .unwrap_or(desc.DeviceName.len())],
+                    ),
+                    width: (bounds.right - bounds.left).unsigned_abs(),
+                    height: (bounds.bottom - bounds.top).unsigned_abs(),
+                    primary: bounds.left == 0 && bounds.top == 0,
+                });
+            }
+        }
+        Ok(displays)
+    }
+}
+
 fn geometry_device(
     adapter: &IDXGIAdapter1,
     levels: Option<&[D3D_FEATURE_LEVEL]>,

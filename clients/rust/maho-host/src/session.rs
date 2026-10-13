@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::guests::{self, GuestCommand, GuestRegistry, GuestSession, PendingRequest};
 use maho_net::{
     BootstrapLockout, DatagramCipher, Direction, PskIdentity, TlsPskError, TlsPskServer,
     BOOTSTRAP_IDENTITY, PAIRING_IDENTITY_PREFIX,
@@ -24,6 +25,10 @@ use maho_proto::{
 };
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use maho_proto::{ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdate};
+use maho_proto::{
+    GuestPermissions, PairingTrust, PairingTrustGrant, SecureAttentionResponse, SessionEndReason,
+    SessionEnded,
+};
 use openssl::base64;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -225,6 +230,71 @@ struct DiskPairingRecord {
 }
 
 impl PairingStore {
+    pub fn authorization(
+        &self,
+        id: &str,
+    ) -> Result<(PairingTrust, Option<GuestPermissions>), SessionError> {
+        let _guard = self.lock.lock().expect("pairing store lock poisoned");
+        let records = self.read_grants()?;
+        let Some((trust, permissions)) = records.get(id) else {
+            return Ok((PairingTrust::Owner, None));
+        };
+        Ok((
+            PairingTrust::decode(trust)?,
+            permissions.map(|p| GuestPermissions {
+                keyboard: p[0],
+                mouse: p[1],
+                gamepad: p[2],
+                clipboard: p[3],
+                audio: p[4],
+            }),
+        ))
+    }
+
+    fn read_grants(&self) -> Result<HostGrants, SessionError> {
+        match fs::read(self.path.with_extension("grants.json")) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|e| SessionError::Store(e.to_string()))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn set_authorization(
+        &self,
+        id: &str,
+        trust: PairingTrust,
+        permissions: Option<GuestPermissions>,
+    ) -> Result<(), SessionError> {
+        let _guard = self.lock.lock().expect("pairing store lock poisoned");
+        let mut records = self.read_grants()?;
+        records.insert(
+            id.to_owned(),
+            (
+                trust.encode()?,
+                permissions.map(|p| [p.keyboard, p.mouse, p.gamepad, p.clipboard, p.audio]),
+            ),
+        );
+        let path = self.path.with_extension("grants.json");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension("tmp");
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        use std::io::Write;
+        let mut file = options.open(&temporary)?;
+        file.write_all(
+            &serde_json::to_vec(&records).map_err(|e| SessionError::Store(e.to_string()))?,
+        )?;
+        file.sync_all()?;
+        fs::rename(temporary, path)?;
+        Ok(())
+    }
+
     pub fn default_path() -> Result<PathBuf, SessionError> {
         let directory = dirs::data_dir()
             .ok_or_else(|| SessionError::Store("Application Support is unavailable".into()))?
@@ -360,22 +430,32 @@ pub fn random_pin() -> String {
     format!("{value:08}")
 }
 
+type HostGrants = std::collections::BTreeMap<String, (Vec<u8>, Option<[bool; 5]>)>;
+
 pub struct ConsentPrompt {
     pub client_name: String,
-    response: SyncSender<bool>,
+    response: SyncSender<Option<PairingTrust>>,
 }
 
 impl ConsentPrompt {
     pub fn approve(self) {
-        let _ = self.response.send(true);
+        self.approve_as(PairingTrust::Owner);
+    }
+
+    pub fn approve_as(self, trust: PairingTrust) {
+        let _ = self.response.try_send(Some(trust));
     }
 
     pub fn reject(self) {
-        let _ = self.response.send(false);
+        let _ = self.response.try_send(None);
     }
 
     pub fn respond(self, approved: bool) {
-        let _ = self.response.send(approved);
+        if approved {
+            self.approve_as(PairingTrust::Owner);
+        } else {
+            self.reject();
+        }
     }
 }
 
@@ -1061,7 +1141,36 @@ fn truncate_str_to_bytes(s: &str, max_bytes: usize) -> &str {
 
 /// Enumerates host displays for HostDisplayList control messages.
 pub fn host_displays(config: &HostConfig) -> Vec<HostDisplay> {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "macos", not(test)))]
+    if let Ok(ids) = core_graphics::display::CGDisplay::active_displays() {
+        let displays: Vec<_> = ids
+            .into_iter()
+            .take(maho_proto::MAX_HOST_DISPLAYS)
+            .filter_map(|id| {
+                ScreenCapture::display_info_for(id)
+                    .ok()
+                    .map(|info| (id, info))
+            })
+            .enumerate()
+            .map(|(index, (id, info))| HostDisplay {
+                index: index as u8,
+                width: info.pixel_width,
+                height: info.pixel_height,
+                primary: id == core_graphics::display::CGDisplay::main().id,
+                name: id.to_string(),
+            })
+            .collect();
+        if !displays.is_empty() {
+            return displays;
+        }
+    }
+    #[cfg(all(target_os = "windows", not(test)))]
+    if let Ok(displays) = crate::capture_windows::enumerate_displays() {
+        if !displays.is_empty() {
+            return displays;
+        }
+    }
+    #[cfg(all(target_os = "linux", not(test)))]
     {
         if let Some(monitors) = probe_hyprland_monitors() {
             if let Some(array) = monitors.as_array() {
@@ -2690,6 +2799,7 @@ struct StreamRestart {
 type RestartFactory = Arc<dyn Fn(&StreamRestart) -> Arc<dyn MediaSource> + Send + Sync>;
 
 pub struct HostServer {
+    guests: Arc<GuestRegistry>,
     config: HostConfig,
     tcp_listener: TcpListener,
     udp_socket: UdpSocket,
@@ -2718,7 +2828,135 @@ fn derive_bootstrap_identity(pin: &str) -> Result<PskIdentity, TlsPskError> {
     PskIdentity::bootstrap(pin)
 }
 
+fn host_guest_capabilities() -> Capabilities {
+    let mut capabilities = Capabilities::HOST_STATUS
+        | Capabilities::SESSION_ENDED
+        | Capabilities::GUEST_PERMISSIONS
+        | Capabilities::PAIRING_TRUST
+        | Capabilities::RTT_PROBE;
+    #[cfg(target_os = "windows")]
+    {
+        capabilities |= Capabilities::SECURE_ATTENTION;
+        if crate::gamepad_windows::available() {
+            capabilities |= Capabilities::GAMEPAD;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if crate::gamepad_linux::available() {
+        capabilities |= Capabilities::GAMEPAD;
+    }
+    if cfg!(any(target_os = "windows", target_os = "linux")) {
+        capabilities |= Capabilities::TEXT_CLIPBOARD_SYNC;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        capabilities |= Capabilities::CLIPBOARD_IMAGE;
+    }
+    #[cfg(target_os = "linux")]
+    if crate::clipboard_linux::ClipboardBackend::detect()
+        .is_ok_and(|b| b == crate::clipboard_linux::ClipboardBackend::Wayland)
+    {
+        capabilities |= Capabilities::CLIPBOARD_IMAGE;
+    }
+    capabilities
+}
+
+fn send_session_end(
+    stream: &mut maho_net::TlsPskStream<TcpStream>,
+    peer: Capabilities,
+    reason: SessionEndReason,
+) -> Result<(), SessionError> {
+    send_tcp_control(
+        stream,
+        if peer.contains(Capabilities::SESSION_ENDED) {
+            ControlMessage::SessionEnded(SessionEnded { reason })
+        } else {
+            ControlMessage::Disconnect
+        },
+    )
+}
+
+fn send_permissions(
+    stream: &mut maho_net::TlsPskStream<TcpStream>,
+    peer: Capabilities,
+    permissions: GuestPermissions,
+) -> Result<(), SessionError> {
+    if peer.contains(Capabilities::GUEST_PERMISSIONS) {
+        send_tcp_control(stream, ControlMessage::GuestPermissions(permissions))?;
+    } else if peer.contains(Capabilities::STREAM_OPTIONS) {
+        send_tcp_control(
+            stream,
+            ControlMessage::HostPolicy(HostPolicy {
+                allow_input: permissions.keyboard && permissions.mouse,
+                allow_clipboard: permissions.clipboard,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
 impl HostServer {
+    pub fn guest_registry(&self) -> Arc<GuestRegistry> {
+        self.guests.clone()
+    }
+
+    pub fn set_secure_attention_handler(
+        &self,
+        handler: Arc<dyn crate::guests::SecureAttentionHandler>,
+    ) {
+        self.guests.set_secure_attention_handler(handler);
+    }
+
+    pub fn sessions(&self) -> Vec<GuestSession> {
+        self.guests.sessions()
+    }
+
+    pub fn kick_session(&self, id: &str) -> bool {
+        self.guests.kick(id)
+    }
+
+    pub fn kick_all_sessions(&self) -> usize {
+        self.guests.kick_all()
+    }
+
+    pub fn subscribe_events(&self) -> Receiver<crate::guests::HostEvent> {
+        self.guests.subscribe()
+    }
+
+    pub fn pending_requests(&self) -> Vec<PendingRequest> {
+        self.guests.pending_requests()
+    }
+
+    pub fn approve_request(&self, id: &str, trust: PairingTrust) -> bool {
+        self.guests.respond(id, Some(trust))
+    }
+
+    pub fn deny_request(&self, id: &str) -> bool {
+        self.guests.respond(id, None)
+    }
+
+    pub fn set_guest_permissions(
+        &self,
+        pairing_id: &str,
+        permissions: GuestPermissions,
+    ) -> Result<(), SessionError> {
+        self.guests.set_guest_permissions(pairing_id, permissions)
+    }
+
+    fn permission_ceiling(&self, clipboard: bool) -> GuestPermissions {
+        let policy = self.config.host_policy();
+        GuestPermissions {
+            keyboard: policy.allow_input,
+            mouse: policy.allow_input,
+            gamepad: policy.allow_input
+                && host_guest_capabilities().contains(Capabilities::GAMEPAD),
+            clipboard: policy.allow_clipboard
+                && clipboard
+                && cfg!(any(target_os = "linux", target_os = "windows")),
+            audio: self.config.capture_audio,
+        }
+    }
+
     pub fn bind(config: HostConfig) -> Result<Self, SessionError> {
         let fps = if config.frames_per_second == 0 {
             60
@@ -2736,6 +2974,7 @@ impl HostServer {
     ) -> Result<Arc<dyn MediaSource>, SessionError> {
         Ok(Arc::new(MacMediaSource {
             config: CaptureConfig {
+                display_id: None,
                 width: config.display.pixel_width,
                 height: config.display.pixel_height,
                 frames_per_second: fps,
@@ -2867,7 +3106,66 @@ impl HostServer {
                 })
             }))
         };
-        #[cfg(not(all(target_os = "linux", not(test))))]
+        #[cfg(all(target_os = "macos", not(test)))]
+        let factory: Option<RestartFactory> = {
+            let config = config.clone();
+            Some(Arc::new(move |restart: &StreamRestart| {
+                Arc::new(MacMediaSource {
+                    config: CaptureConfig {
+                        display_id: restart
+                            .output_name
+                            .as_deref()
+                            .and_then(|id| id.parse().ok()),
+                        width: restart.width,
+                        height: restart.height,
+                        frames_per_second: restart.fps,
+                        capture_audio: config.capture_audio,
+                    },
+                    encoder: EncoderConfig {
+                        width: restart.width,
+                        height: restart.height,
+                        frames_per_second: restart.fps,
+                        bitrate: restart.bitrate,
+                        key_frame_interval: restart.fps.saturating_mul(2),
+                    },
+                })
+            }))
+        };
+        #[cfg(all(target_os = "windows", not(test)))]
+        let factory: Option<RestartFactory> = {
+            let config = config.clone();
+            Some(Arc::new(move |restart: &StreamRestart| {
+                let display_index = crate::capture_windows::enumerate_displays()
+                    .ok()
+                    .and_then(|list| {
+                        list.iter().position(|display| {
+                            Some(display.name.as_str()) == restart.output_name.as_deref()
+                        })
+                    })
+                    .unwrap_or(0);
+                let meta = WindowsCapture::selected_output_metadata(display_index).ok();
+                Arc::new(WindowsMediaSource {
+                    display_index,
+                    fps: restart.fps,
+                    width: restart.width,
+                    height: restart.height,
+                    bitrate: restart.bitrate,
+                    codec: if restart.codec == StreamCodecPreference::Hevc {
+                        VideoCodec::Hevc
+                    } else {
+                        VideoCodec::H264
+                    },
+                    capture_audio: config.capture_audio,
+                    desktop_x: meta.as_ref().map_or(0, |m| m.desktop_x),
+                    desktop_y: meta.as_ref().map_or(0, |m| m.desktop_y),
+                })
+            }))
+        };
+        #[cfg(not(any(
+            all(target_os = "linux", not(test)),
+            all(target_os = "macos", not(test)),
+            all(target_os = "windows", not(test))
+        )))]
         let factory: Option<RestartFactory> = None;
 
         Self::bind_with_media_advertising_and_factory(config, media_source, factory, advertise)
@@ -2932,7 +3230,12 @@ impl HostServer {
         } else {
             None
         };
+        let guests = Arc::new(GuestRegistry::with_store(config.pairing_store.clone()));
+        #[cfg(target_os = "windows")]
+        guests
+            .set_secure_attention_handler(Arc::new(crate::service_windows::SecureAttentionBroker));
         Ok(Self {
+            guests,
             config,
             tcp_listener,
             udp_socket,
@@ -3164,6 +3467,12 @@ impl HostServer {
             .pairing_store
             .load_all()?
             .into_iter()
+            .filter(|record| {
+                self.config
+                    .pairing_store
+                    .authorization(&record.id)
+                    .is_ok_and(|(trust, _)| guests::valid_trust(trust, unix_ms_u64()))
+            })
             .map(|record| PskIdentity::pairing(&record.id, &record.key))
             .collect::<Result<Vec<_>, _>>()?;
         let pairing_active = self
@@ -3217,14 +3526,25 @@ impl HostServer {
             .to_owned();
         let mut state = SessionState::PreAuth;
         let mut granted_pairing_id: Option<String> = None;
+        let mut provisional: Option<PairingRecord> = None;
+        let mut session_trust = PairingTrust::GuestOnce;
+        let mut peer_caps = Capabilities::empty();
+        let mut guest_guard = None;
+        let mut guest_commands: Option<Receiver<GuestCommand>> = None;
+        let mut active_guest = None;
+        let mut grant_permissions = self.permission_ceiling(true);
+        let mut effective_permissions = self.permission_ceiling(false);
+        let audio_allowed = Arc::new(AtomicBool::new(false));
         let mut c2h_cipher = None;
         let mut h2c_cipher = None;
         let mut udp_peer = None;
         let mut media_receiver: Option<Receiver<MediaEvent>> = None;
         #[cfg(target_os = "macos")]
-        let input = InputInjector::new(
+        let mut input = InputInjector::with_origin(
             self.config.display.logical_width as f32,
             self.config.display.logical_height as f32,
+            self.config.display.desktop_x as f32,
+            self.config.display.desktop_y as f32,
         );
         #[cfg(target_os = "windows")]
         let mut input = {
@@ -3266,8 +3586,27 @@ impl HostServer {
         // sender thread reports its exit without ever blocking on this channel.
         let (media_status_tx, media_status_rx) = mpsc::sync_channel::<()>(1);
         let mut active_bitrate = self.config.bitrate;
+        let mut topology = host_displays(&self.config);
+        let mut selected_output = self.config.output_name.clone().or_else(|| {
+            topology
+                .iter()
+                .find(|d| d.primary)
+                .or(topology.first())
+                .map(|d| d.name.clone())
+        });
+        let mut active_scale = 1000u16;
+        let mut active_fps = self.config.frames_per_second.max(1);
+        let mut active_codec = StreamCodecPreference::Auto;
+        let mut topology_check = Instant::now() + Duration::from_secs(2);
         let mut injected_input = false;
+        let mut sleep_guard = None;
         let mut clipboard_sync = false;
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let mut image_assembly = crate::clipboard_image::Assembly::default();
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let mut image_id = 0u32;
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let mut next_image_poll = Instant::now();
         #[cfg(target_os = "windows")]
         let mut clipboard = Some(crate::WindowsClipboard::new());
         #[cfg(target_os = "linux")]
@@ -3287,14 +3626,178 @@ impl HostServer {
                     break;
                 }
                 if stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed)) {
+                    if state == SessionState::Authenticated {
+                        send_session_end(&mut stream, peer_caps, SessionEndReason::HostStopped)?;
+                    }
                     info!(peer = %tcp_peer, "host stop requested; closing connection");
                     break;
                 }
+                // Observe media termination before reading control, so a queued
+                // orderly Disconnect wins over the sender's terminal status.
+                let media_failed = media_status_rx.try_recv().is_ok();
+                let read = if state == SessionState::Authenticated {
+                    stream.read_frame_step()
+                } else {
+                    stream.read_frame_until(admission_deadline)
+                };
+                let packet = match read {
+                    Ok(packet) => packet,
+                    Err(TlsPskError::Io(error))
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        None
+                    }
+                    Err(TlsPskError::Io(error))
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::BrokenPipe
+                        ) || error
+                            .get_ref()
+                            .and_then(|cause| cause.downcast_ref::<openssl::ssl::Error>())
+                            .is_some_and(|ssl_err| {
+                                ssl_err.code() == openssl::ssl::ErrorCode::SYSCALL
+                            }) =>
+                    {
+                        warn!(%error, "read_frame saw EOF/reset/broken pipe, closing connection");
+                        break;
+                    }
+                    Err(error) => {
+                        warn!(%error, "read_frame failed with error, terminating connection");
+                        return Err(SessionError::Tls(error));
+                    }
+                };
+                if state == SessionState::Authenticated {
+                    if let Some(packet) = &packet {
+                        let (header, payload) = split_packet(packet)?;
+                        if header.packet_type == PacketType::Control
+                            && matches!(
+                                ControlMessage::decode(payload)?,
+                                ControlMessage::Disconnect | ControlMessage::StopStream
+                            )
+                        {
+                            break;
+                        }
+                    }
+                }
                 // Checked independently of UDP registration: a media pipeline that
                 // died must end the session instead of serving heartbeats forever.
-                if media_status_rx.try_recv().is_ok() {
-                    warn!(peer = %tcp_peer, "media pipeline terminated; closing connection");
-                    break;
+                if media_failed
+                    || (state == SessionState::Authenticated && Instant::now() >= topology_check)
+                {
+                    topology_check = Instant::now() + Duration::from_secs(2);
+                    let displays = host_displays(&self.config);
+                    let disappeared = selected_output
+                        .as_ref()
+                        .is_some_and(|name| !displays.iter().any(|d| &d.name == name));
+                    if media_failed && !disappeared {
+                        return Err(SessionError::MediaStopped);
+                    }
+                    if peer_has_stream_options && displays != topology {
+                        send_tcp_control(
+                            &mut stream,
+                            ControlMessage::HostDisplayList(HostDisplayList {
+                                displays: displays.clone(),
+                            }),
+                        )?;
+                    }
+                    topology = displays;
+                    if media_failed || disappeared {
+                        let Some(factory) = &self.restart_factory else {
+                            if media_failed {
+                                return Err(SessionError::MediaStopped);
+                            }
+                            continue;
+                        };
+                        let Some(display) =
+                            topology.iter().find(|d| d.primary).or(topology.first())
+                        else {
+                            return Err(SessionError::MediaStopped);
+                        };
+                        let width = ((u64::from(display.width) * u64::from(active_scale) / 1000)
+                            as u32
+                            & !1)
+                            .max(2);
+                        let height = ((u64::from(display.height) * u64::from(active_scale) / 1000)
+                            as u32
+                            & !1)
+                            .max(2);
+                        let restart = StreamRestart {
+                            width,
+                            height,
+                            scale_permille: active_scale,
+                            fps: active_fps,
+                            codec: active_codec,
+                            output_name: Some(display.name.clone()),
+                            bitrate: active_bitrate,
+                        };
+                        let (tx, rx) = mpsc::sync_channel(16);
+                        let handle = factory(&restart).start(tx)?;
+                        if let Some(tx) = &swap_tx {
+                            tx.send((rx, width, height))
+                                .map_err(|_| SessionError::MediaStopped)?;
+                        } else {
+                            media_receiver = Some(rx);
+                            stream_dims = (width, height);
+                        }
+                        let old = pipeline
+                            .lock()
+                            .expect("pipeline slot poisoned")
+                            .replace(handle);
+                        if let Some(mut old) = old {
+                            old.stop();
+                        }
+                        selected_output = Some(display.name.clone());
+                        #[cfg(target_os = "linux")]
+                        if let Some(geometry) =
+                            probe_linux_input_geometry(selected_output.as_deref())
+                        {
+                            input.update_geometry(geometry).map_err(SessionError::Io)?;
+                        }
+                        #[cfg(target_os = "windows")]
+                        if let Ok(meta) =
+                            WindowsCapture::selected_output_metadata(display.index as usize)
+                        {
+                            input.update_target(TargetDisplay {
+                                x: meta.desktop_x,
+                                y: meta.desktop_y,
+                                width: meta.pixel_width,
+                                height: meta.pixel_height,
+                            });
+                            input.refresh_virtual_desktop().map_err(SessionError::Io)?;
+                        }
+                        #[cfg(target_os = "macos")]
+                        if let Some(info) = selected_output
+                            .as_deref()
+                            .and_then(|id| id.parse().ok())
+                            .and_then(|id| ScreenCapture::display_info_for(id).ok())
+                        {
+                            input = InputInjector::with_origin(
+                                info.logical_width as f32,
+                                info.logical_height as f32,
+                                info.desktop_x as f32,
+                                info.desktop_y as f32,
+                            );
+                        }
+                        if peer_has_stream_options {
+                            send_tcp_control(
+                                &mut stream,
+                                ControlMessage::StreamOptionsActive(StreamOptionsActive {
+                                    request_id: 0,
+                                    width,
+                                    height,
+                                    fps: active_fps as u16,
+                                    codec: active_codec,
+                                    display_index: display.index,
+                                    bitrate: active_bitrate,
+                                }),
+                            )?;
+                        }
+                    }
                 }
                 if state != SessionState::Authenticated {
                     let remaining = admission_deadline
@@ -3307,6 +3810,68 @@ impl HostServer {
                         .set_write_timeout(Some(remaining))?;
                 }
                 if state == SessionState::Authenticated {
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
+                    if !effective_permissions.clipboard {
+                        image_assembly.cancel();
+                    }
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
+                    image_assembly.expire(Instant::now());
+                    let mut end = None;
+                    if let Some(commands) = &guest_commands {
+                        while let Ok(command) = commands.try_recv() {
+                            match command {
+                                GuestCommand::End(reason) => {
+                                    end = Some(reason);
+                                    break;
+                                }
+                                GuestCommand::Status(status)
+                                    if peer_caps.contains(Capabilities::HOST_STATUS) =>
+                                {
+                                    send_tcp_control(
+                                        &mut stream,
+                                        ControlMessage::HostStatus(status),
+                                    )?
+                                }
+                                GuestCommand::Permissions(permissions) => {
+                                    grant_permissions = permissions
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if let PairingTrust::GuestExpiring { expires_at_unix_ms } = session_trust {
+                        if unix_ms_u64() >= expires_at_unix_ms {
+                            end = Some(SessionEndReason::GuestExpired);
+                        }
+                    }
+                    if let Some(reason) = end {
+                        send_session_end(&mut stream, peer_caps, reason)?;
+                        break;
+                    }
+                    let current = guests::intersect(
+                        grant_permissions,
+                        self.permission_ceiling(clipboard_sync),
+                    );
+                    if current != effective_permissions {
+                        if (effective_permissions.keyboard && !current.keyboard)
+                            || (effective_permissions.mouse && !current.mouse)
+                            || (effective_permissions.gamepad && !current.gamepad)
+                        {
+                            let reset = InputEvent {
+                                event_type: maho_proto::InputEventType::Reset,
+                                x: 0.0,
+                                y: 0.0,
+                                key_code: 0,
+                                modifiers: maho_proto::Modifiers::empty(),
+                                scroll_dx: 0.0,
+                                scroll_dy: 0.0,
+                            };
+                            inject_input(&reset, |event| input.inject(event));
+                        }
+                        effective_permissions = current;
+                        audio_allowed.store(current.audio, Ordering::SeqCst);
+                        send_permissions(&mut stream, peer_caps, current)?;
+                    }
                     // A registered session must stop draining the shared UDP socket:
                     // an established session that keeps reading would eat the
                     // registration datagrams of any client that connects while it is
@@ -3326,6 +3891,7 @@ impl HostServer {
                             let (stx2, srx2) = mpsc::channel();
                             swap_tx = Some(stx2);
                             let media_status_tx = media_status_tx.clone();
+                            let audio_allowed = audio_allowed.clone();
                             #[cfg(test)]
                             let media_source = self.media_source.clone();
                             let handle = thread::spawn(move || {
@@ -3363,6 +3929,9 @@ impl HostServer {
                                             }
                                         }
                                         Ok(MediaEvent::Audio(bytes)) => {
+                                            if !audio_allowed.load(Ordering::SeqCst) {
+                                                continue;
+                                            }
                                             let _ = sender.send_audio(
                                                 &udp_socket,
                                                 peer,
@@ -3372,6 +3941,9 @@ impl HostServer {
                                         }
                                         #[cfg(target_os = "linux")]
                                         Ok(MediaEvent::NativeAudio(slot)) => {
+                                            if !audio_allowed.load(Ordering::SeqCst) {
+                                                continue;
+                                            }
                                             if let Some(block) = slot.take_fresh(Instant::now()) {
                                                 if let Err(error) = sender.send_audio(
                                                     &udp_socket,
@@ -3403,7 +3975,16 @@ impl HostServer {
                                             }
                                             warn!(%err, "Media event error in sender thread");
                                             let _ = media_status_tx.try_send(());
-                                            break;
+                                            // Teardown drops swap_tx, waking this receive;
+                                            // hotplug recovery supplies the replacement.
+                                            match srx2.recv() {
+                                                Ok((r, w, h)) => {
+                                                    receiver = r;
+                                                    pixel_width = w;
+                                                    pixel_height = h;
+                                                }
+                                                Err(_) => break,
+                                            }
                                         }
                                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                                         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -3418,7 +3999,14 @@ impl HostServer {
                                             }
                                             warn!("Media receiver disconnected, exiting sender thread");
                                             let _ = media_status_tx.try_send(());
-                                            break;
+                                            match srx2.recv() {
+                                                Ok((r, w, h)) => {
+                                                    receiver = r;
+                                                    pixel_width = w;
+                                                    pixel_height = h;
+                                                }
+                                                Err(_) => break,
+                                            }
                                         }
                                     }
                                 }
@@ -3430,8 +4018,49 @@ impl HostServer {
                         }
                     }
                     let now = Instant::now();
-                    if peer_has_stream_options {
-                        let current_policy = self.config.host_policy();
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
+                    if clipboard_sync
+                        && effective_permissions.clipboard
+                        && peer_caps.contains(Capabilities::CLIPBOARD_IMAGE)
+                        && host_guest_capabilities().contains(Capabilities::CLIPBOARD_IMAGE)
+                        && now >= next_image_poll
+                    {
+                        next_image_poll = now + Duration::from_millis(500);
+                        if let Some(clipboard) = clipboard.as_mut() {
+                            match clipboard.poll_image() {
+                                Ok(Some(bytes)) => {
+                                    image_id = image_id
+                                        .checked_add(1)
+                                        .ok_or(SessionError::MediaStopped)?;
+                                    for (index, chunk) in bytes.chunks(65536).enumerate() {
+                                        send_tcp_control(
+                                            &mut stream,
+                                            ControlMessage::ClipboardImageChunk(
+                                                maho_proto::ClipboardImageChunk {
+                                                    transfer_id: image_id,
+                                                    total_bytes: bytes.len() as u32,
+                                                    offset: (index * 65536) as u32,
+                                                    png_bytes: chunk.to_vec(),
+                                                },
+                                            ),
+                                        )?;
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    tracing::debug!(%error, "clipboard image poll unavailable")
+                                }
+                            }
+                        }
+                    }
+                    if peer_has_stream_options
+                        && !peer_caps.contains(Capabilities::GUEST_PERMISSIONS)
+                    {
+                        let current_policy = HostPolicy {
+                            allow_input: effective_permissions.keyboard
+                                && effective_permissions.mouse,
+                            allow_clipboard: effective_permissions.clipboard,
+                        };
                         if current_policy != last_sent_policy {
                             if let Err(error) = send_tcp_control(
                                 &mut stream,
@@ -3452,7 +4081,7 @@ impl HostServer {
                         break;
                     }
                     #[cfg(any(target_os = "windows", target_os = "linux"))]
-                    if clipboard_sync && self.config.allow_clipboard.load(Ordering::SeqCst) {
+                    if clipboard_sync && effective_permissions.clipboard {
                         // Linux reads the pasteboard through a subprocess, so it
                         // is gated to the protocol's 500 ms cadence; the Win32
                         // poll is a single syscall and runs every iteration.
@@ -3502,42 +4131,8 @@ impl HostServer {
                     }
                 }
 
-                let read = if state == SessionState::Authenticated {
-                    stream.read_frame_step()
-                } else {
-                    stream.read_frame_until(admission_deadline)
-                };
-                let packet = match read {
-                    Ok(Some(packet)) => packet,
-                    Ok(None) => continue,
-                    Err(TlsPskError::Io(error))
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        continue
-                    }
-                    Err(TlsPskError::Io(error))
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::UnexpectedEof
-                                | io::ErrorKind::ConnectionReset
-                                | io::ErrorKind::BrokenPipe
-                        ) || error
-                            .get_ref()
-                            .and_then(|cause| cause.downcast_ref::<openssl::ssl::Error>())
-                            .is_some_and(|ssl_err| {
-                                ssl_err.code() == openssl::ssl::ErrorCode::SYSCALL
-                            }) =>
-                    {
-                        warn!(%error, "read_frame saw EOF/reset/broken pipe, closing connection");
-                        break;
-                    }
-                    Err(error) => {
-                        warn!(%error, "read_frame failed with error, terminating connection");
-                        return Err(SessionError::Tls(error));
-                    }
+                let Some(packet) = packet else {
+                    continue;
                 };
                 let (header, payload) = split_packet(&packet)?;
                 if !state.allows(header.packet_type) {
@@ -3557,48 +4152,64 @@ impl HostServer {
                             continue;
                         }
                         let request = PairingRequest::decode(payload)?;
-                        let Some(consent_sender) = &self.config.consent_sender else {
-                            send_pairing_reject(&mut stream, PairingRejectReason::PairingDisabled)?;
-                            continue;
-                        };
                         let (response_tx, response_rx) = mpsc::sync_channel(1);
-                        consent_sender
-                            .send(ConsentPrompt {
-                                client_name: request.name.clone(),
-                                response: response_tx,
-                            })
-                            .map_err(|_| SessionError::ConsentUnavailable)?;
-                        let approved = response_rx
-                            .recv_timeout(
-                                admission_deadline
-                                    .min(
-                                        self.pairing_deadline
-                                            .ok_or(SessionError::ConsentTimeout)?,
-                                    )
-                                    .saturating_duration_since(Instant::now()),
-                            )
-                            .map_err(|_| SessionError::ConsentTimeout)?;
+                        let request_id = Uuid::new_v4().to_string();
+                        self.guests.request(
+                            PendingRequest {
+                                id: request_id.clone(),
+                                name: request.name.clone(),
+                                expires_at: admission_deadline.min(
+                                    self.pairing_deadline.ok_or(SessionError::ConsentTimeout)?,
+                                ),
+                            },
+                            response_tx.clone(),
+                        );
+                        if let Some(consent_sender) = &self.config.consent_sender {
+                            consent_sender
+                                .send(ConsentPrompt {
+                                    client_name: request.name.clone(),
+                                    response: response_tx,
+                                })
+                                .map_err(|_| {
+                                    self.guests.finish_request(&request_id);
+                                    SessionError::ConsentUnavailable
+                                })?;
+                        }
+                        let approval = response_rx.recv_timeout(
+                            admission_deadline
+                                .min(self.pairing_deadline.ok_or(SessionError::ConsentTimeout)?)
+                                .saturating_duration_since(Instant::now()),
+                        );
+                        self.guests.finish_request(&request_id);
+                        let approved = approval.map_err(|_| SessionError::ConsentTimeout)?;
                         if Instant::now() >= admission_deadline || !self.is_pairing_active() {
                             return Err(SessionError::ConsentTimeout);
                         }
-                        if !approved {
+                        let Some(trust) = approved else {
                             send_pairing_reject(&mut stream, PairingRejectReason::DeniedByHost)?;
                             break;
+                        };
+                        trust.encode()?;
+                        if trust != PairingTrust::GuestOnce
+                            && !guests::valid_trust(trust, unix_ms_u64())
+                        {
+                            return Err(SessionError::ConsentTimeout);
                         }
+                        session_trust = trust;
                         let record = PairingRecord {
                             id: Uuid::new_v4().to_string().to_uppercase(),
                             name: request.name,
                             key: random_key(),
                             added_at_unix_ms: unix_ms_u64(),
                         };
-                        self.config.pairing_store.save(record.clone())?;
                         let grant = PairingGrant {
                             pairing_id: record.id.clone(),
                             host_name: self.config.host_name.clone(),
                             key: record.key,
                         };
                         send_tcp_packet(&mut stream, PacketType::PairingGrant, &grant.encode()?)?;
-                        granted_pairing_id = Some(record.id);
+                        granted_pairing_id = Some(record.id.clone());
+                        provisional = Some(record);
                         state = SessionState::PairingGranted;
                     }
                     PacketType::Handshake => {
@@ -3606,11 +4217,26 @@ impl HostServer {
                             return Err(SessionError::AlreadyAuthenticated);
                         }
                         let handshake = Handshake::decode(payload)?;
-                        let record = self
-                            .config
-                            .pairing_store
-                            .load(&handshake.pairing_id)?
-                            .ok_or(SessionError::UnknownPairing)?;
+                        let fresh = provisional.is_some();
+                        let record = if let Some(record) = &provisional {
+                            record.clone()
+                        } else {
+                            self.config
+                                .pairing_store
+                                .load(&handshake.pairing_id)?
+                                .ok_or(SessionError::UnknownPairing)?
+                        };
+                        if !fresh {
+                            let (trust, permissions) =
+                                self.config.pairing_store.authorization(&record.id)?;
+                            if !guests::valid_trust(trust, unix_ms_u64()) {
+                                return Err(SessionError::UnknownPairing);
+                            }
+                            session_trust = trust;
+                            if let Some(permissions) = permissions {
+                                grant_permissions = permissions;
+                            }
+                        }
                         if let Some(identity_pairing_id) =
                             negotiated_identity.strip_prefix(PAIRING_IDENTITY_PREFIX)
                         {
@@ -3632,9 +4258,11 @@ impl HostServer {
                                 maho_proto::CodecError::UnsupportedVersion(handshake.version),
                             ));
                         }
-                        clipboard_sync = handshake
-                            .capabilities
-                            .contains(Capabilities::TEXT_CLIPBOARD_SYNC);
+                        clipboard_sync = host_guest_capabilities()
+                            .contains(Capabilities::TEXT_CLIPBOARD_SYNC)
+                            && handshake
+                                .capabilities
+                                .contains(Capabilities::TEXT_CLIPBOARD_SYNC);
                         if !handshake
                             .capabilities
                             .contains(Capabilities::AUTHENTICATED_UDP_REGISTRATION)
@@ -3656,7 +4284,7 @@ impl HostServer {
                             &handshake.session_salt,
                             Direction::HostToClient,
                         )?);
-                        state = SessionState::Authenticated;
+                        peer_caps = handshake.capabilities;
                         stream
                             .ssl_stream()
                             .get_ref()
@@ -3672,21 +4300,90 @@ impl HostServer {
                             version: PROTOCOL_VERSION,
                             capabilities: Capabilities::STREAM_CONFIGURATION
                                 | Capabilities::AUTHENTICATED_UDP_REGISTRATION
-                                | Capabilities::STREAM_OPTIONS,
+                                | Capabilities::STREAM_OPTIONS
+                                | host_guest_capabilities(),
                             pairing_id: String::new(),
                             session_salt: [0_u8; 16],
                         };
-                        let (media_tx, media_rx) = mpsc::sync_channel(16);
-                        let started = self.media_source.start(media_tx)?;
-                        *pipeline.lock().expect("pipeline slot poisoned") = Some(started);
-                        media_receiver = Some(media_rx);
+                        if !peer_caps.contains(Capabilities::PAIRING_TRUST) {
+                            let (media_tx, media_rx) = mpsc::sync_channel(16);
+                            let started = self.media_source.start(media_tx)?;
+                            sleep_guard = Some(crate::sleep_inhibit::StreamingGuard::acquire());
+                            *pipeline.lock().expect("pipeline slot poisoned") = Some(started);
+                            media_receiver = Some(media_rx);
+                        }
                         send_tcp_packet(&mut stream, PacketType::HandshakeAck, &ack.encode()?)?;
-                        if peer_has_stream_options {
-                            last_sent_policy = self.config.host_policy();
+                        if peer_caps.contains(Capabilities::PAIRING_TRUST) {
+                            if fresh {
+                                let packet = stream
+                                    .read_frame_until(admission_deadline)?
+                                    .ok_or(SessionError::ConsentTimeout)?;
+                                let (header, payload) = split_packet(&packet)?;
+                                if header.packet_type != PacketType::Control
+                                    || !matches!(
+                                        ControlMessage::decode(payload)?,
+                                        ControlMessage::PairingTrustRequest(_)
+                                    )
+                                {
+                                    return Err(SessionError::PreAuth);
+                                }
+                            }
                             send_tcp_control(
                                 &mut stream,
-                                ControlMessage::HostPolicy(last_sent_policy),
+                                ControlMessage::PairingTrustGrant(PairingTrustGrant {
+                                    trust: session_trust,
+                                }),
                             )?;
+                        }
+                        if fresh && session_trust != PairingTrust::GuestOnce {
+                            if !guests::valid_trust(session_trust, unix_ms_u64()) {
+                                send_session_end(
+                                    &mut stream,
+                                    peer_caps,
+                                    SessionEndReason::GuestExpired,
+                                )?;
+                                break;
+                            }
+                            self.config.pairing_store.set_authorization(
+                                &record.id,
+                                session_trust,
+                                Some(grant_permissions),
+                            )?;
+                            self.config.pairing_store.save(record.clone())?;
+                        }
+                        provisional = None;
+                        effective_permissions = guests::intersect(
+                            grant_permissions,
+                            self.permission_ceiling(clipboard_sync),
+                        );
+                        send_permissions(&mut stream, peer_caps, effective_permissions)?;
+                        audio_allowed.store(effective_permissions.audio, Ordering::SeqCst);
+                        let guest = GuestSession {
+                            id: Uuid::new_v4().to_string(),
+                            pairing_id: record.id.clone(),
+                            name: record.name.clone(),
+                            peer: tcp_peer,
+                            trust: session_trust,
+                            connected_at: Instant::now(),
+                        };
+                        let (guard, commands) = self.guests.join(guest.clone());
+                        guest_guard = Some(guard);
+                        guest_commands = Some(commands);
+                        active_guest = Some(guest);
+                        state = SessionState::Authenticated;
+                        if peer_caps.contains(Capabilities::PAIRING_TRUST) {
+                            let (media_tx, media_rx) = mpsc::sync_channel(16);
+                            let started = self.media_source.start(media_tx)?;
+                            sleep_guard = Some(crate::sleep_inhibit::StreamingGuard::acquire());
+                            *pipeline.lock().expect("pipeline slot poisoned") = Some(started);
+                            media_receiver = Some(media_rx);
+                        }
+                        if peer_has_stream_options {
+                            last_sent_policy = HostPolicy {
+                                allow_input: effective_permissions.keyboard
+                                    && effective_permissions.mouse,
+                                allow_clipboard: effective_permissions.clipboard,
+                            };
                             let displays = host_displays(&self.config);
                             send_tcp_control(
                                 &mut stream,
@@ -3704,8 +4401,19 @@ impl HostServer {
                         if state != SessionState::Authenticated {
                             continue;
                         }
-                        let event = InputEvent::decode(payload)?;
-                        if !self.config.allow_input.load(Ordering::SeqCst) {
+                        let mut event = InputEvent::decode(payload)?;
+                        if !effective_permissions.keyboard {
+                            event.modifiers = maho_proto::Modifiers::empty();
+                        }
+                        let gamepad = matches!(
+                            event.event_type,
+                            maho_proto::InputEventType::GamepadAxis
+                                | maho_proto::InputEventType::GamepadButtonDown
+                                | maho_proto::InputEventType::GamepadButtonUp
+                        );
+                        if !guests::allows(effective_permissions, event.event_type)
+                            || (gamepad && !peer_caps.contains(Capabilities::GAMEPAD))
+                        {
                             if !input_disabled_warned {
                                 input_disabled_warned = true;
                                 warn!("input disabled by host policy");
@@ -3740,7 +4448,71 @@ impl HostServer {
                         if state != SessionState::Authenticated {
                             continue;
                         }
-                        match ControlMessage::decode(payload)? {
+                        let control = ControlMessage::decode(payload)?;
+                        if !control.message_type().supported_by(
+                            host_guest_capabilities()
+                                | Capabilities::STREAM_OPTIONS
+                                | Capabilities::STREAM_CONFIGURATION,
+                            peer_caps,
+                        ) {
+                            return Err(SessionError::PreAuth);
+                        }
+                        match control {
+                            ControlMessage::RttPing(probe) => {
+                                send_tcp_control(&mut stream, ControlMessage::RttPong(probe))?
+                            }
+                            ControlMessage::SecureAttentionRequest(request) => {
+                                let result = self.guests.secure_attention(
+                                    active_guest.as_ref().ok_or(SessionError::PreAuth)?,
+                                );
+                                send_tcp_control(
+                                    &mut stream,
+                                    ControlMessage::SecureAttentionResponse(
+                                        SecureAttentionResponse {
+                                            request_id: request.request_id,
+                                            result,
+                                        },
+                                    ),
+                                )?;
+                            }
+                            ControlMessage::PairingTrustRequest(_)
+                            | ControlMessage::PairingTrustGrant(_)
+                            | ControlMessage::GuestPermissions(_)
+                            | ControlMessage::HostStatus(_)
+                            | ControlMessage::SessionEnded(_)
+                            | ControlMessage::RttPong(_)
+                            | ControlMessage::SecureAttentionResponse(_) => {
+                                return Err(SessionError::PreAuth)
+                            }
+                            ControlMessage::ClipboardImageChunk(chunk) => {
+                                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                                if clipboard_sync
+                                    && effective_permissions.clipboard
+                                    && peer_caps.contains(Capabilities::CLIPBOARD_IMAGE)
+                                    && host_guest_capabilities()
+                                        .contains(Capabilities::CLIPBOARD_IMAGE)
+                                {
+                                    match image_assembly.push(chunk, Instant::now()) {
+                                        Ok(Some(bytes)) => {
+                                            if let Some(clipboard) = clipboard.as_mut() {
+                                                if let Err(error) =
+                                                    clipboard.apply_remote_image(&bytes)
+                                                {
+                                                    warn!(%error, "remote image clipboard failed");
+                                                }
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            warn!(%error, "clipboard image transfer rejected")
+                                        }
+                                    }
+                                } else {
+                                    image_assembly.cancel();
+                                }
+                                #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+                                let _ = chunk;
+                            }
                             ControlMessage::RequestKeyFrame => {
                                 let slot = pipeline.lock().expect("pipeline slot poisoned");
                                 if let Some(media) = slot.as_ref() {
@@ -3888,8 +4660,27 @@ impl HostServer {
                                                 continue;
                                             }
                                         };
-                                        let native_w = self.config.display.pixel_width;
-                                        let native_h = self.config.display.pixel_height;
+                                        let selected = &displays[request.display_index as usize];
+                                        #[cfg(target_os = "windows")]
+                                        if request.scale_permille != 1000 {
+                                            send_tcp_control(&mut stream, ControlMessage::StreamConfigReject(StreamConfigurationReject {
+                                                request_id: request.request_id,
+                                                reason: StreamConfigurationErrorCode::UnsupportedDimensions,
+                                                message: "Windows CPU capture does not support scaling".into(),
+                                            }))?;
+                                            continue;
+                                        }
+                                        #[cfg(all(target_os = "macos", not(test)))]
+                                        if request.codec == StreamCodecPreference::H264 {
+                                            send_tcp_control(&mut stream, ControlMessage::StreamConfigReject(StreamConfigurationReject {
+                                                request_id: request.request_id,
+                                                reason: StreamConfigurationErrorCode::RejectedByPeer,
+                                                message: "macOS VideoToolbox source supports HEVC only".into(),
+                                            }))?;
+                                            continue;
+                                        }
+                                        let native_w = selected.width;
+                                        let native_h = selected.height;
                                         let w = (((native_w as u64)
                                             * (request.scale_permille as u64)
                                             / 1000)
@@ -3966,7 +4757,47 @@ impl HostServer {
                                         }
                                         *pipeline.lock().expect("pipeline slot poisoned") =
                                             Some(new_handle);
+                                        #[cfg(target_os = "linux")]
+                                        if let Some(geometry) = probe_linux_input_geometry(
+                                            restart.output_name.as_deref(),
+                                        ) {
+                                            input
+                                                .update_geometry(geometry)
+                                                .map_err(SessionError::Io)?;
+                                        }
+                                        #[cfg(target_os = "macos")]
+                                        if let Some(info) = restart
+                                            .output_name
+                                            .as_deref()
+                                            .and_then(|id| id.parse().ok())
+                                            .and_then(|id| ScreenCapture::display_info_for(id).ok())
+                                        {
+                                            input = InputInjector::with_origin(
+                                                info.logical_width as f32,
+                                                info.logical_height as f32,
+                                                info.desktop_x as f32,
+                                                info.desktop_y as f32,
+                                            );
+                                        }
                                         active_bitrate = bitrate;
+                                        selected_output = restart.output_name.clone();
+                                        active_scale = request.scale_permille;
+                                        active_fps = request.fps as u32;
+                                        active_codec = resolved_codec;
+                                        #[cfg(target_os = "windows")]
+                                        if let Ok(meta) = WindowsCapture::selected_output_metadata(
+                                            request.display_index as usize,
+                                        ) {
+                                            input.update_target(TargetDisplay {
+                                                x: meta.desktop_x,
+                                                y: meta.desktop_y,
+                                                width: meta.pixel_width,
+                                                height: meta.pixel_height,
+                                            });
+                                            input
+                                                .refresh_virtual_desktop()
+                                                .map_err(SessionError::Io)?;
+                                        }
                                         send_tcp_control(
                                             &mut stream,
                                             ControlMessage::StreamOptionsActive(
@@ -3994,8 +4825,10 @@ impl HostServer {
                             ControlMessage::Pong => last_pong = Instant::now(),
                             ControlMessage::ClipboardSyncUpdate(update) => {
                                 #[cfg(any(target_os = "windows", target_os = "linux"))]
+                                image_assembly.cancel();
+                                #[cfg(any(target_os = "windows", target_os = "linux"))]
                                 if clipboard_sync
-                                    && self.config.allow_clipboard.load(Ordering::SeqCst)
+                                    && effective_permissions.clipboard
                                     && matches!(
                                         update.direction,
                                         ClipboardSyncDirection::ClientToHost
@@ -4040,9 +4873,12 @@ impl HostServer {
         // used to run last, that wait leaked the capture and encode workers at
         // full CPU for the rest of the daemon's life.
         drop(media_receiver);
+        audio_allowed.store(false, Ordering::SeqCst);
         if let Some(tx) = stop_sender_tx {
             let _ = tx.send(());
         }
+        // Wake a sender awaiting hotplug recovery as well as one consuming media.
+        drop(swap_tx);
         if let Some(mut media) = pipeline.lock().expect("pipeline slot poisoned").take() {
             media.stop();
         }
@@ -4066,6 +4902,8 @@ impl HostServer {
             inject_input(&reset, |event| input.inject(event));
         }
         state = SessionState::Closed;
+        drop(sleep_guard);
+        drop(guest_guard);
         if let Some(trace) = host_trace::enabled() {
             if let Err(error) = trace.dump() {
                 warn!(%error, "Host diagnostic dump failed");
@@ -6266,6 +7104,270 @@ mod tests {
     }
 
     #[test]
+    fn host_grants_preserve_legacy_owner_and_expiring_permissions() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("keys.json"));
+        assert_eq!(
+            store.authorization("legacy").unwrap(),
+            (PairingTrust::Owner, None)
+        );
+        let permissions = GuestPermissions {
+            keyboard: false,
+            mouse: true,
+            gamepad: false,
+            clipboard: false,
+            audio: false,
+        };
+        let trust = PairingTrust::GuestExpiring {
+            expires_at_unix_ms: 123,
+        };
+        store
+            .set_authorization("guest", trust, Some(permissions))
+            .unwrap();
+        let reloaded = PairingStore::new(directory.path().join("keys.json"));
+        assert_eq!(
+            reloaded.authorization("guest").unwrap(),
+            (trust, Some(permissions))
+        );
+    }
+
+    #[test]
+    fn expired_pairing_is_filtered_before_tls_acceptance() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("keys.json"));
+        store
+            .save(PairingRecord {
+                id: "expired".into(),
+                name: "expired guest".into(),
+                key: [9; 32],
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        store
+            .set_authorization(
+                "expired",
+                PairingTrust::GuestExpiring {
+                    expires_at_unix_ms: 1,
+                },
+                None,
+            )
+            .unwrap();
+        let (consent, _) = mpsc::channel();
+        let server = HostServer::bind_synthetic(test_config(store, consent), 0).unwrap();
+        assert!(!server
+            .current_psks()
+            .unwrap()
+            .iter()
+            .any(|identity| identity.identity() == format!("{PAIRING_IDENTITY_PREFIX}expired")));
+    }
+
+    #[test]
+    fn bootstrap_guest_once_ignores_owner_request_and_never_persists() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("keys.json"));
+        let (consent, prompts) = mpsc::channel();
+        let server = HostServer::bind_with_media(
+            test_config(store.clone(), consent),
+            Arc::new(TrackingMediaSource {
+                started_count: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .unwrap();
+        let addr = server.tcp_addr().unwrap();
+        let worker = thread::spawn(move || server.serve_n(1));
+        let consent_worker = thread::spawn(move || {
+            prompts
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .approve_as(PairingTrust::GuestOnce)
+        });
+        let mut tcp = TlsPskClient::new(PskIdentity::bootstrap("12345678").unwrap())
+            .unwrap()
+            .connect(addr)
+            .unwrap();
+        tcp.ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        send_tcp_packet(
+            &mut tcp,
+            PacketType::PairingRequest,
+            &PairingRequest {
+                name: "one time".into(),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+        let packet = tcp.read_frame().unwrap();
+        let grant = PairingGrant::decode(split_packet(&packet).unwrap().1).unwrap();
+        assert!(store.load_all().unwrap().is_empty());
+        let handshake = Handshake {
+            name: "one time".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::PAIRING_TRUST
+                | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+            pairing_id: grant.pairing_id,
+            session_salt: [7; 16],
+        };
+        send_tcp_packet(
+            &mut tcp,
+            PacketType::Handshake,
+            &handshake.encode().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            split_packet(&tcp.read_frame().unwrap())
+                .unwrap()
+                .0
+                .packet_type,
+            PacketType::HandshakeAck
+        );
+        send_tcp_control(
+            &mut tcp,
+            ControlMessage::PairingTrustRequest(maho_proto::PairingTrustRequest {
+                trust: PairingTrust::Owner,
+            }),
+        )
+        .unwrap();
+        let packet = tcp.read_frame().unwrap();
+        assert!(
+            matches!(ControlMessage::decode(split_packet(&packet).unwrap().1).unwrap(), ControlMessage::PairingTrustGrant(g) if g.trust == PairingTrust::GuestOnce)
+        );
+        send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+        worker.join().unwrap().unwrap();
+        consent_worker.join().unwrap();
+        assert!(store.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn negotiated_guest_controls_roundtrip_and_targeted_kick() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("keys.json"));
+        let key = [42; 32];
+        store
+            .save(PairingRecord {
+                id: "owner".into(),
+                name: "Owner name".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent, _) = mpsc::channel();
+        let server = HostServer::bind_with_media(
+            test_config(store.clone(), consent),
+            Arc::new(TrackingMediaSource {
+                started_count: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .unwrap();
+        let registry = server.guest_registry();
+        let events = registry.subscribe();
+        let addr = server.tcp_addr().unwrap();
+        let worker = thread::spawn(move || server.serve_n(1));
+        let mut tcp = TlsPskClient::new(PskIdentity::pairing("owner", &key).unwrap())
+            .unwrap()
+            .connect(addr)
+            .unwrap();
+        tcp.ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let handshake = Handshake {
+            name: "not authoritative".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: host_guest_capabilities() | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+            pairing_id: "owner".into(),
+            session_salt: [7; 16],
+        };
+        send_tcp_packet(
+            &mut tcp,
+            PacketType::Handshake,
+            &handshake.encode().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            split_packet(&tcp.read_frame().unwrap())
+                .unwrap()
+                .0
+                .packet_type,
+            PacketType::HandshakeAck
+        );
+        let read_control = |tcp: &mut maho_net::TlsPskStream<TcpStream>| {
+            let packet = tcp.read_frame().unwrap();
+            ControlMessage::decode(split_packet(&packet).unwrap().1).unwrap()
+        };
+        assert!(
+            matches!(read_control(&mut tcp), ControlMessage::PairingTrustGrant(g) if g.trust == PairingTrust::Owner)
+        );
+        assert!(matches!(
+            read_control(&mut tcp),
+            ControlMessage::GuestPermissions(_)
+        ));
+        assert!(
+            matches!(read_control(&mut tcp), ControlMessage::HostStatus(s) if s.guest_names == vec!["Owner name"])
+        );
+        let guest = match events.recv_timeout(Duration::from_secs(3)).unwrap() {
+            crate::guests::HostEvent::GuestConnected(g) => g,
+            event => panic!("unexpected event {event:?}"),
+        };
+        send_tcp_control(
+            &mut tcp,
+            ControlMessage::RttPing(maho_proto::RttProbe {
+                timestamp_us: 123456,
+            }),
+        )
+        .unwrap();
+        assert!(
+            matches!(read_control(&mut tcp), ControlMessage::RttPong(p) if p.timestamp_us == 123456)
+        );
+        let permissions = GuestPermissions {
+            keyboard: false,
+            mouse: true,
+            gamepad: false,
+            clipboard: false,
+            audio: false,
+        };
+        registry
+            .set_guest_permissions("owner", permissions)
+            .unwrap();
+        assert!(
+            matches!(read_control(&mut tcp), ControlMessage::GuestPermissions(p) if p == permissions)
+        );
+        assert_eq!(store.authorization("owner").unwrap().1, Some(permissions));
+        assert_eq!(
+            host_guest_capabilities().contains(Capabilities::SECURE_ATTENTION),
+            cfg!(target_os = "windows")
+        );
+        #[cfg(target_os = "windows")]
+        {
+            send_tcp_control(
+                &mut tcp,
+                ControlMessage::SecureAttentionRequest(maho_proto::SecureAttentionRequest {
+                    request_id: 17,
+                }),
+            )
+            .unwrap();
+            assert!(
+                matches!(read_control(&mut tcp), ControlMessage::SecureAttentionResponse(r) if r.request_id == 17 && r.result == maho_proto::SecureAttentionResult::Unsupported)
+            );
+        }
+        assert!(registry.kick(&guest.id));
+        assert!(
+            matches!(read_control(&mut tcp), ControlMessage::SessionEnded(e) if e.reason == SessionEndReason::Kicked)
+        );
+        worker.join().unwrap().unwrap();
+        assert!(registry.sessions().is_empty());
+        assert!(store.load("owner").unwrap().is_some());
+    }
+
+    #[test]
     fn test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input() {
         let directory = tempdir().unwrap();
         let store = PairingStore::new(directory.path().join("pairing-keys.json"));
@@ -7414,7 +8516,7 @@ mod tests {
             policy_msg,
             ControlMessage::HostPolicy(HostPolicy {
                 allow_input: true,
-                allow_clipboard: true,
+                allow_clipboard: false,
             })
         );
 
@@ -7484,7 +8586,7 @@ mod tests {
             ControlMessage::decode(payload).unwrap(),
             ControlMessage::HostPolicy(HostPolicy {
                 allow_input: false,
-                allow_clipboard: true,
+                allow_clipboard: false,
             })
         );
         let _displays = tcp.read_frame().unwrap();

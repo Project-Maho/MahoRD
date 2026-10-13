@@ -346,6 +346,7 @@ fn modifier_events(previous: Modifiers, current: Modifiers) -> Vec<InputEvent> {
 }
 
 pub struct LinuxInputInjector {
+    gamepads: crate::gamepad_linux::Gamepads,
     pointer: VirtualDevice,
     wheel: VirtualDevice,
     keyboard: VirtualDevice,
@@ -422,6 +423,7 @@ impl LinuxInputInjector {
             .build()?;
 
         Ok(Self {
+            gamepads: crate::gamepad_linux::Gamepads::default(),
             pointer,
             wheel,
             keyboard,
@@ -435,8 +437,15 @@ impl LinuxInputInjector {
         })
     }
 
-    pub fn update_geometry(&mut self, geometry: OutputGeometry) {
+    pub fn update_geometry(&mut self, geometry: OutputGeometry) -> io::Result<()> {
+        if self.geometry.desktop_width != geometry.desktop_width
+            || self.geometry.desktop_height != geometry.desktop_height
+        {
+            *self = Self::new(geometry)?;
+            return Ok(());
+        }
         self.geometry = geometry;
+        Ok(())
     }
 
     pub fn inject(&mut self, event: &WireInputEvent) -> io::Result<()> {
@@ -486,10 +495,7 @@ impl LinuxInputInjector {
             }
             InputEventType::GamepadAxis
             | InputEventType::GamepadButtonDown
-            | InputEventType::GamepadButtonUp => {
-                // Gamepad events safely handled; platform virtual gamepad device carries open requirement
-                Ok(())
-            }
+            | InputEventType::GamepadButtonUp => self.gamepads.inject(event),
             InputEventType::RelativeMove => {
                 let dx = event.scroll_dx.round() as i32;
                 let dy = event.scroll_dy.round() as i32;
@@ -515,6 +521,7 @@ impl LinuxInputInjector {
                 }
             }
             InputEventType::Reset => {
+                self.gamepads.reset();
                 let pointer_events = vec![
                     InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.code(), 0),
                     InputEvent::new(EventType::KEY.0, KeyCode::BTN_RIGHT.code(), 0),

@@ -80,6 +80,7 @@ impl SensitiveFormats {
 }
 
 pub struct WindowsClipboard {
+    image: Option<Vec<u8>>,
     suppressor: ClipboardEchoSuppressor,
     formats: SensitiveFormats,
 }
@@ -91,6 +92,7 @@ impl WindowsClipboard {
             suppressor.start(sequence);
         }
         Self {
+            image: None,
             suppressor,
             formats: SensitiveFormats::register(),
         }
@@ -152,6 +154,44 @@ impl WindowsClipboard {
         drop(clipboard);
         self.suppressor.record_remote_write(sequence, text);
         Ok(())
+    }
+
+    pub fn apply_remote_image(&mut self, bytes: &[u8]) -> Result<(), ClipboardError> {
+        crate::clipboard_image::validate_png(bytes)
+            .map_err(|error| ClipboardError::Win32(error.to_string()))?;
+        let format = raw::register_format("PNG")
+            .ok_or_else(|| ClipboardError::Win32("PNG format unavailable".into()))?
+            .get();
+        let _clipboard = win32(Clipboard::new_attempts(10))?;
+        win32(raw::empty())?;
+        win32(raw::set_without_clear(format, bytes))?;
+        self.formats.publish_remote_exclusions()?;
+        self.image = Some(bytes.to_vec());
+        Ok(())
+    }
+
+    pub fn poll_image(&mut self) -> Result<Option<Vec<u8>>, ClipboardError> {
+        let format = raw::register_format("PNG")
+            .ok_or_else(|| ClipboardError::Win32("PNG format unavailable".into()))?
+            .get();
+        let _clipboard = win32(Clipboard::new_attempts(1))?;
+        if self.formats.selection_is_sensitive() || !raw::is_format_avail(format) {
+            return Ok(None);
+        }
+        let size = raw::size(format).map_or(0, |size| size.get());
+        if size == 0 || size > crate::clipboard_image::LIMIT {
+            return Ok(None);
+        }
+        let mut bytes = vec![0; size];
+        let copied = win32(raw::get(format, &mut bytes))?;
+        bytes.truncate(copied);
+        crate::clipboard_image::validate_png(&bytes)
+            .map_err(|error| ClipboardError::Win32(error.to_string()))?;
+        if self.image.as_ref() == Some(&bytes) {
+            return Ok(None);
+        }
+        self.image = Some(bytes.clone());
+        Ok(Some(bytes))
     }
 }
 

@@ -24,7 +24,8 @@ struct Cli {
     #[arg(long, value_name = "generate", conflicts_with = "bootstrap_pin")]
     pin: Option<String>,
 
-    /// List persisted paired devices and exit.
+    /// List persisted paired devices and exit. Active-session listing and kicks
+    /// are API-only via HostServer; this daemon has no local control IPC server.
     #[arg(long, conflicts_with_all = ["revoke", "bootstrap_pin", "pin"])]
     list_paired: bool,
 

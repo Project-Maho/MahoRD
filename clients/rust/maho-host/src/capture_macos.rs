@@ -87,6 +87,7 @@ fn publish_capture(senders: &CaptureSenders, event: CaptureEvent) {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureConfig {
+    pub display_id: Option<u32>,
     pub width: u32,
     pub height: u32,
     /// Zero captures at the display's native refresh rate.
@@ -97,6 +98,7 @@ pub struct CaptureConfig {
 impl CaptureConfig {
     pub fn native(display: DisplayInfo, capture_audio: bool) -> Self {
         Self {
+            display_id: None,
             width: display.pixel_width,
             height: display.pixel_height,
             frames_per_second: 0,
@@ -443,7 +445,11 @@ mod macos {
 
     impl MacScreenCapture {
         pub fn display_info() -> Result<DisplayInfo, CaptureError> {
-            let display = CGDisplay::main();
+            Self::display_info_for(CGDisplay::main().id)
+        }
+
+        pub fn display_info_for(id: u32) -> Result<DisplayInfo, CaptureError> {
+            let display = CGDisplay::new(id);
             let logical = display.bounds().size;
             // Secondary displays live at non-zero (possibly negative) origins in
             // CoreGraphics global coordinates; input normalization needs them.
@@ -489,7 +495,8 @@ mod macos {
             if !unsafe { CGPreflightScreenCaptureAccess() } {
                 return Err(CaptureError::PermissionDenied);
             }
-            let display_info = Self::display_info()?;
+            let selected_id = config.display_id.unwrap_or_else(|| CGDisplay::main().id);
+            let display_info = Self::display_info_for(selected_id)?;
 
             // SAFETY: SCK callback arguments are borrowed only during invocation;
             // retained values own every object crossing the callback boundary.
@@ -521,11 +528,11 @@ mod macos {
                 if displays.count() == 0 {
                     return Err(CaptureError::NoDisplay);
                 }
-                let main_id = CGDisplay::main().id;
+                let main_id = selected_id;
                 let display = (0..displays.count())
                     .map(|index| displays.objectAtIndex(index))
                     .find(|display| display.displayID() == main_id)
-                    .unwrap_or_else(|| displays.objectAtIndex(0));
+                    .ok_or(CaptureError::NoDisplay)?;
 
                 let filter = SCContentFilter::initWithDisplay_excludingWindows(
                     SCContentFilter::alloc(),
@@ -948,6 +955,7 @@ mod tests {
         // Given: cancellation before touching native capture/permission APIs.
         let stop = std::sync::atomic::AtomicBool::new(true);
         let config = CaptureConfig {
+            display_id: None,
             width: 1,
             height: 1,
             frames_per_second: 60,
