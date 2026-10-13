@@ -316,6 +316,7 @@ fn write_command_bounded(
             .map_err(io::Error::from)?;
         let deadline = Instant::now() + timeout;
         let mut offset = 0;
+        let mut write_error = None;
         while offset < input.len() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -323,7 +324,11 @@ fn write_command_bounded(
             }
             let timeout = Timespec::try_from(remaining).map_err(io::Error::other)?;
             let mut fds = [PollFd::new(&stdin, PollFlags::OUT)];
-            poll(&mut fds, Some(&timeout)).map_err(io::Error::from)?;
+            match poll(&mut fds, Some(&timeout)) {
+                Ok(0) | Err(rustix::io::Errno::INTR) => continue,
+                Ok(_) => {}
+                Err(error) => return Err(io::Error::from(error).into()),
+            }
             match stdin.write(&input[offset..]) {
                 Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
                 Ok(count) => offset += count,
@@ -334,6 +339,12 @@ fn write_command_bounded(
                     ) =>
                 {
                     continue
+                }
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                    // A rejected owner can close stdin before reporting why.
+                    // Preserve its exit status and stderr under the same deadline.
+                    write_error = Some(error);
+                    break;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -377,6 +388,7 @@ fn write_command_bounded(
                         Ok(0) => stderr = None,
                         Ok(count) => {
                             if collected.len() < MAX_COMMAND_STDERR_BYTES {
+                                let count = count.min(MAX_COMMAND_STDERR_BYTES - collected.len());
                                 collected.extend_from_slice(&chunk[..count]);
                             }
                         }
@@ -386,6 +398,14 @@ fn write_command_bounded(
                 }
             }
             if let Some(status) = exited {
+                if ready && remaining > Duration::ZERO {
+                    continue;
+                }
+                if status.success() {
+                    if let Some(error) = write_error {
+                        return Err(error.into());
+                    }
+                }
                 return Ok((status, collected));
             }
         }
@@ -587,7 +607,9 @@ mod tests {
         // Regression: this is the exact clipboard shape that wedged the host
         // session thread, leaking the capture and encode workers for 13 hours.
         let mut command = Command::new("sh");
-        command.args(["-c", "sleep 5 & exit 0"]);
+        // The real owner consumes stdin before forking. Exiting before that
+        // races the writer and tests BrokenPipe instead of inherited stderr.
+        command.args(["-c", "cat >/dev/null; sleep 5 & exit 0"]);
         let started = Instant::now();
         write_command_bounded(&mut command, b"payload", Duration::from_secs(10))
             .expect("a forked grandchild must not stall the write");
@@ -615,6 +637,69 @@ mod tests {
             started.elapsed() < Duration::from_secs(3),
             "the deadline must bound the write"
         );
+    }
+
+    #[test]
+    fn write_reports_stderr_when_owner_closes_stdin_before_delivery() {
+        // More than a pipe can hold forces an unfinished write regardless of
+        // whether the parent or child runs first. Closing stdin forces EPIPE;
+        // the owner still gets to publish its error and exit status.
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "exec 0<&-; printf clipboard-refused >&2; printf '%5000s' '' | tr ' ' x >&2; exit 3",
+        ]);
+        match write_command_bounded(
+            &mut command,
+            &vec![b'x'; 1024 * 1024],
+            Duration::from_secs(5),
+        ) {
+            Err(ClipboardError::Command(message)) => {
+                assert!(message.starts_with("clipboard-refused"));
+                assert_eq!(message.len(), MAX_COMMAND_STDERR_BYTES);
+            }
+            other => panic!("expected the owner's complete stderr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_rejects_successful_owner_that_did_not_accept_payload() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec 0<&-; exit 0"]);
+        assert!(matches!(
+            write_command_bounded(
+                &mut command,
+                &vec![b'x'; 1024 * 1024],
+                Duration::from_secs(5)
+            ),
+            Err(ClipboardError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+    }
+
+    #[test]
+    fn write_delivers_payload_larger_than_pipe_capacity() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "[ \"$(wc -c)\" -eq 1048576 ]"]);
+        write_command_bounded(
+            &mut command,
+            &vec![b'x'; 1024 * 1024],
+            Duration::from_secs(5),
+        )
+        .expect("the owner must receive every byte before EOF");
+    }
+
+    #[test]
+    fn write_times_out_when_owner_never_reads_full_pipe() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 300"]);
+        assert!(matches!(
+            write_command_bounded(
+                &mut command,
+                &vec![b'x'; 1024 * 1024],
+                Duration::from_millis(150)
+            ),
+            Err(ClipboardError::Timeout)
+        ));
     }
 
     #[test]
