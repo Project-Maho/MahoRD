@@ -963,6 +963,8 @@ impl ClientSession {
         let events = RuntimeEvents::default();
         let output = events.clone();
         let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let reconnecting = Arc::new(AtomicBool::new(false));
+        let worker_reconnecting = reconnecting.clone();
         let worker = thread::spawn(move || {
             let mut next_probe = std::time::Instant::now();
             loop {
@@ -1020,6 +1022,7 @@ impl ClientSession {
                             break;
                         }
                         let pairing = pairing.expect("eligible stored pairing");
+                        worker_reconnecting.store(true, Ordering::SeqCst);
                         let deadline = std::time::Instant::now() + Duration::from_secs(60);
                         let mut attempt = 0;
                         let mut reason = error.to_string();
@@ -1078,6 +1081,7 @@ impl ClientSession {
                                 }
                             }
                         };
+                        worker_reconnecting.store(false, Ordering::SeqCst);
                         if let Ok(mut state) = session.state.lock() {
                             state.parity.info.reconnect = if recovered {
                                 ReconnectState::Reconnected
@@ -1102,7 +1106,7 @@ impl ClientSession {
             events,
             stop: Some(stop),
             worker: Some(worker),
-            interrupt: Some(self.interrupt_handle()),
+            interrupt: Some((self.interrupt_handle(), reconnecting)),
         })
     }
 
@@ -1692,10 +1696,20 @@ impl ClientSession {
             self.interrupt();
             return Err(SessionError::Unsupported);
         }
-        if (preference.is_some() || trust_negotiated)
-            && pairing.trust != maho_proto::PairingTrust::GuestOnce
-        {
-            self.store.save(pairing.clone())?;
+        if pairing.trust != maho_proto::PairingTrust::GuestOnce {
+            if preference.is_some() {
+                // Fresh bootstrap: persist only after host authorization.
+                self.store.save(pairing.clone())?;
+            } else if trust_negotiated {
+                // Reconnect: record host-authoritative trust on the stored
+                // record without overwriting fields persisted since connect.
+                if let Some(mut stored) = self.store.load(&pairing.id)? {
+                    if stored.trust != pairing.trust {
+                        stored.trust = pairing.trust;
+                        self.store.save(stored)?;
+                    }
+                }
+            }
         }
         {
             let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
@@ -2282,7 +2296,9 @@ pub struct SessionRuntime {
     events: RuntimeEvents,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     worker: Option<thread::JoinHandle<()>>,
-    interrupt: Option<SessionInterruptHandle>,
+    /// Supervisor interrupt, used only to abort an in-flight automatic
+    /// reconnect; the flag is set while that reconnect is running.
+    interrupt: Option<(SessionInterruptHandle, Arc<AtomicBool>)>,
 }
 
 impl SessionRuntime {
@@ -2304,26 +2320,40 @@ impl SessionRuntime {
     }
 
     pub fn stop(&mut self) -> Result<(), SessionError> {
-        if let Some(interrupt) = self.interrupt.take() {
-            interrupt.interrupt();
+        // Stopping the runtime must not cancel the session itself: callers
+        // reconnect the same ClientSession after a stop (worker-respawn
+        // recovery). Interrupt only to abort an in-flight automatic reconnect,
+        // and restore the cancel flag afterwards unless it was already set.
+        let mut restore = None;
+        if let Some((interrupt, reconnecting)) = self.interrupt.take() {
+            if reconnecting.load(Ordering::SeqCst) && !interrupt.is_cancelled() {
+                interrupt.interrupt();
+                restore = Some(interrupt);
+            }
         }
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
-        if let Some(worker) = self.worker.take() {
-            if let Err(payload) = worker.join() {
-                self.events.close();
-                let message = payload
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| {
-                        payload
-                            .downcast_ref::<&str>()
-                            .map(|message| (*message).to_owned())
-                    })
-                    .unwrap_or_else(|| "non-string panic payload".to_owned());
-                return Err(SessionError::TcpRuntimePanicked(message));
-            }
+        let joined = self.worker.take().map(|worker| worker.join());
+        if let Some(interrupt) = restore {
+            interrupt.cancelled.store(false, Ordering::SeqCst);
+            interrupt.cancel_signal.send_if_modified(|cancelled| {
+                *cancelled = false;
+                false
+            });
+        }
+        if let Some(Err(payload)) = joined {
+            self.events.close();
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_owned())
+                })
+                .unwrap_or_else(|| "non-string panic payload".to_owned());
+            return Err(SessionError::TcpRuntimePanicked(message));
         }
         Ok(())
     }

@@ -2966,13 +2966,12 @@ impl HostServer {
         self.guests.set_guest_permissions(pairing_id, permissions)
     }
 
-    fn permission_ceiling(&self, clipboard: bool) -> GuestPermissions {
+    fn permission_ceiling(&self, host_caps: Capabilities, clipboard: bool) -> GuestPermissions {
         let policy = self.config.host_policy();
         GuestPermissions {
             keyboard: policy.allow_input,
             mouse: policy.allow_input,
-            gamepad: policy.allow_input
-                && host_guest_capabilities().contains(Capabilities::GAMEPAD),
+            gamepad: policy.allow_input && host_caps.contains(Capabilities::GAMEPAD),
             clipboard: policy.allow_clipboard
                 && clipboard
                 && cfg!(any(target_os = "linux", target_os = "windows")),
@@ -3555,8 +3554,10 @@ impl HostServer {
         let mut guest_guard = None;
         let mut guest_commands: Option<Receiver<GuestCommand>> = None;
         let mut active_guest = None;
-        let mut grant_permissions = self.permission_ceiling(true);
-        let mut effective_permissions = self.permission_ceiling(false);
+        // Platform probes (uinput, clipboard tools) are costly; resolve once per connection.
+        let host_caps = host_guest_capabilities();
+        let mut grant_permissions = self.permission_ceiling(host_caps, true);
+        let mut effective_permissions = self.permission_ceiling(host_caps, false);
         let audio_allowed = Arc::new(AtomicBool::new(false));
         let mut c2h_cipher = None;
         let mut h2c_cipher = None;
@@ -3867,7 +3868,7 @@ impl HostServer {
                     }
                     let current = guests::intersect(
                         grant_permissions,
-                        self.permission_ceiling(clipboard_sync),
+                        self.permission_ceiling(host_caps, clipboard_sync),
                     );
                     if current != effective_permissions {
                         if (effective_permissions.keyboard && !current.keyboard)
@@ -4039,7 +4040,7 @@ impl HostServer {
                     if clipboard_sync
                         && effective_permissions.clipboard
                         && peer_caps.contains(Capabilities::CLIPBOARD_IMAGE)
-                        && host_guest_capabilities().contains(Capabilities::CLIPBOARD_IMAGE)
+                        && host_caps.contains(Capabilities::CLIPBOARD_IMAGE)
                         && now >= next_image_poll
                     {
                         next_image_poll = now + Duration::from_millis(500);
@@ -4275,8 +4276,7 @@ impl HostServer {
                                 maho_proto::CodecError::UnsupportedVersion(handshake.version),
                             ));
                         }
-                        clipboard_sync = host_guest_capabilities()
-                            .contains(Capabilities::TEXT_CLIPBOARD_SYNC)
+                        clipboard_sync = host_caps.contains(Capabilities::TEXT_CLIPBOARD_SYNC)
                             && handshake
                                 .capabilities
                                 .contains(Capabilities::TEXT_CLIPBOARD_SYNC);
@@ -4318,7 +4318,7 @@ impl HostServer {
                             capabilities: Capabilities::STREAM_CONFIGURATION
                                 | Capabilities::AUTHENTICATED_UDP_REGISTRATION
                                 | Capabilities::STREAM_OPTIONS
-                                | host_guest_capabilities(),
+                                | host_caps,
                             pairing_id: String::new(),
                             session_salt: [0_u8; 16],
                         };
@@ -4371,7 +4371,7 @@ impl HostServer {
                         provisional = None;
                         effective_permissions = guests::intersect(
                             grant_permissions,
-                            self.permission_ceiling(clipboard_sync),
+                            self.permission_ceiling(host_caps, clipboard_sync),
                         );
                         send_permissions(&mut stream, peer_caps, effective_permissions)?;
                         audio_allowed.store(effective_permissions.audio, Ordering::SeqCst);
@@ -4467,7 +4467,7 @@ impl HostServer {
                         }
                         let control = ControlMessage::decode(payload)?;
                         if !control.message_type().supported_by(
-                            host_guest_capabilities()
+                            host_caps
                                 | Capabilities::STREAM_OPTIONS
                                 | Capabilities::STREAM_CONFIGURATION,
                             peer_caps,
@@ -4506,8 +4506,7 @@ impl HostServer {
                                 if clipboard_sync
                                     && effective_permissions.clipboard
                                     && peer_caps.contains(Capabilities::CLIPBOARD_IMAGE)
-                                    && host_guest_capabilities()
-                                        .contains(Capabilities::CLIPBOARD_IMAGE)
+                                    && host_caps.contains(Capabilities::CLIPBOARD_IMAGE)
                                 {
                                     match image_assembly.push(chunk, Instant::now()) {
                                         Ok(Some(bytes)) => {

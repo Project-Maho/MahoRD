@@ -240,6 +240,90 @@ fn terminal_session_reason_survives_eof_and_prevents_reconnect() {
     host.join().unwrap();
 }
 
+#[test]
+fn stopping_runtime_keeps_session_reconnectable() {
+    // Worker-respawn recovery stops the TCP runtime and then reconnects the
+    // same ClientSession; stopping must not leave the session cancelled.
+    let key = [11; 32];
+    let listener = TlsPskServer::new([PskIdentity::pairing("id", &key).unwrap()])
+        .unwrap()
+        .bind("127.0.0.1:0")
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let (end_tx, end_rx) = mpsc::channel::<()>();
+    let host = thread::spawn(move || {
+        let mut first = listener.accept().unwrap();
+        ack(&mut first, Capabilities::AUTHENTICATED_UDP_REGISTRATION);
+        let mut second = listener.accept().unwrap();
+        ack(&mut second, Capabilities::AUTHENTICATED_UDP_REGISTRATION);
+        end_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(first);
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = SessionConfig::direct("127.0.0.1", "client");
+    config.tcp_port = address.port();
+    config.udp_port = udp.local_addr().unwrap().port();
+    config.pairing_store_path = Some(temp.path().join("pairs.json"));
+    let session = ClientSession::new(config).unwrap();
+    let record = PairingRecord::new("id", "fixture", key.to_vec(), 0);
+    session.connect_with_pairing(record.clone()).unwrap();
+    let mut runtime = session.spawn_tcp_runtime().unwrap();
+    runtime.stop().unwrap();
+    assert!(!session.is_cancelled());
+    session.connect_with_pairing(record).unwrap();
+    session.disconnect().unwrap();
+    end_tx.send(()).unwrap();
+    host.join().unwrap();
+}
+
+#[test]
+fn trust_reconnect_does_not_overwrite_stored_pairing_fields() {
+    let key = [12; 32];
+    let listener = TlsPskServer::new([PskIdentity::pairing("id", &key).unwrap()])
+        .unwrap()
+        .bind("127.0.0.1:0")
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let (end_tx, end_rx) = mpsc::channel::<()>();
+    let host = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap();
+        ack(
+            &mut stream,
+            Capabilities::AUTHENTICATED_UDP_REGISTRATION | Capabilities::PAIRING_TRUST,
+        );
+        stream
+            .write_frame(&packet(
+                PacketType::Control,
+                &ControlMessage::PairingTrustGrant(PairingTrustGrant {
+                    trust: PairingTrust::Owner,
+                })
+                .encode()
+                .unwrap(),
+            ))
+            .unwrap();
+        end_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("pairs.json");
+    let store = PairingStore::new(path.clone());
+    let stale = PairingRecord::new("id", "fixture", key.to_vec(), 0);
+    let mut stored = stale.clone();
+    stored.relay_url = Some("wss://relay.example".into());
+    store.save(stored.clone()).unwrap();
+    let mut config = SessionConfig::direct("127.0.0.1", "client");
+    config.tcp_port = address.port();
+    config.udp_port = udp.local_addr().unwrap().port();
+    config.pairing_store_path = Some(path);
+    let session = ClientSession::new(config).unwrap();
+    session.connect_with_pairing(stale).unwrap();
+    assert_eq!(store.load("id").unwrap(), Some(stored));
+    session.disconnect().unwrap();
+    end_tx.send(()).unwrap();
+    host.join().unwrap();
+}
+
 fn bootstrap_grant(trust: PairingTrust) -> (PairingRecord, Vec<PairingRecord>) {
     let listener = TlsPskServer::new([PskIdentity::bootstrap("12345678").unwrap()])
         .unwrap()
