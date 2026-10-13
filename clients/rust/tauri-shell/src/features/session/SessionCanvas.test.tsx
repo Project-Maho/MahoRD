@@ -190,6 +190,75 @@ describe("SessionCanvas", () => {
     mockFrameHeight = 1080;
   });
 
+  it.each([false, true])("keeps one request across refreshes and restart=%s", async (restart) => {
+    const originalRequest = globalThis.requestAnimationFrame;
+    const originalCancel = globalThis.cancelAnimationFrame;
+    const callbacks = new Map<number, FrameRequestCallback>();
+    let nextId = 0;
+    globalThis.requestAnimationFrame = (callback) => {
+      const id = ++nextId;
+      callbacks.set(id, callback);
+      return id;
+    };
+    globalThis.cancelAnimationFrame = (id) => { callbacks.delete(id); };
+    const frame = Promise.withResolvers<ArrayBuffer | null>();
+    const nextFrame = Promise.withResolvers<ArrayBuffer | null>();
+    let polls = 0;
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const refresh = () => {
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      for (const callback of pending) callback(0);
+    };
+    try {
+      act(() => {
+        root.render(React.createElement(SessionCanvas, {
+          active: true,
+          pollFrame: () => { polls++; return frame.promise; },
+        }));
+      });
+      refresh();
+      expect(polls).toBe(1);
+      expect(callbacks.size).toBe(1);
+      refresh();
+      expect(polls).toBe(1);
+      if (restart) {
+        act(() => {
+          root.render(React.createElement(SessionCanvas, {
+            active: false,
+            pollFrame: () => nextFrame.promise,
+          }));
+        });
+        expect(callbacks.size).toBe(0);
+        act(() => {
+          root.render(React.createElement(SessionCanvas, {
+            active: true,
+            pollFrame: () => { polls++; return nextFrame.promise; },
+          }));
+        });
+        refresh();
+        expect(polls).toBe(1);
+      }
+      await act(async () => { frame.resolve(new ArrayBuffer(20)); });
+      expect(renderCallCount).toBe(restart ? 0 : 1);
+      if (restart) {
+        refresh();
+        expect(polls).toBe(2);
+        await act(async () => { nextFrame.resolve(new ArrayBuffer(20)); });
+        expect(renderCallCount).toBe(1);
+      }
+    } finally {
+      act(() => { root.unmount(); });
+      frame.resolve(null);
+      nextFrame.resolve(null);
+      await frame.promise;
+      globalThis.requestAnimationFrame = originalRequest;
+      globalThis.cancelAnimationFrame = originalCancel;
+    }
+    expect(callbacks.size).toBe(0);
+  });
+
   it("drives the drawing buffer from the frame dimensions, not hardcoded JSX attributes", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

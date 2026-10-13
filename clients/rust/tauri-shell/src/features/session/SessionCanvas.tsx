@@ -104,6 +104,7 @@ export function SessionCanvas({
   // Frame polling loop driven by requestAnimationFrame and guarded by generation counter
   const generationRef = useRef<number>(0);
   const rafRef = useRef<number | null>(null);
+  const pollingRef = useRef(false);
 
   useEffect(() => {
     if (!active) {
@@ -136,7 +137,11 @@ export function SessionCanvas({
 
     const step = async () => {
       if (!running || generationRef.current !== generation) return;
-      rafRef.current = null;
+      // Keep the display clock independent of IPC completion. A slow request
+      // skips polling this refresh, not scheduling the next refresh.
+      rafRef.current = requestNext(step);
+      if (pollingRef.current) return;
+      pollingRef.current = true;
 
       try {
         const buf = await pollFrameRef.current();
@@ -183,10 +188,9 @@ export function SessionCanvas({
         if (!running || generationRef.current !== generation) return;
         const message = err instanceof Error ? err.message : String(err);
         onErrorRef.current?.(message);
+      } finally {
+        pollingRef.current = false;
       }
-
-      if (!running || generationRef.current !== generation) return;
-      rafRef.current = requestNext(step);
     };
 
     rafRef.current = requestNext(step);
