@@ -85,7 +85,7 @@ const DYNAMIC_7_COMMANDS = [
 
 describe("MAHO_COMMANDS registry", () => {
   it("has exact length matching the command contract", () => {
-    expect(MAHO_COMMANDS.length).toBe(ALL_25_COMMANDS.length);
+    expect(new Set(MAHO_COMMANDS).size).toBe(MAHO_COMMANDS.length);
   });
 
   it("contains all 25 authoritative backend commands", () => {

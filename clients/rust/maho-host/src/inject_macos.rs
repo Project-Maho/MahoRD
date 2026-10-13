@@ -294,14 +294,23 @@ impl InputInjector {
                 0,
             ),
             InputEventType::KeyDown => {
+                if event.key_code >= 0x100 {
+                    return Ok(None);
+                }
                 self.active_keys.borrow_mut().insert(event.key_code);
                 CGEvent::new_keyboard_event(source()?, event.key_code, true)
             }
             InputEventType::KeyUp => {
+                if event.key_code >= 0x100 {
+                    return Ok(None);
+                }
                 self.active_keys.borrow_mut().remove(&event.key_code);
                 CGEvent::new_keyboard_event(source()?, event.key_code, false)
             }
             InputEventType::FlagsChanged => {
+                if event.key_code >= 0x100 {
+                    return Ok(None);
+                }
                 CGEvent::new_keyboard_event(source()?, event.key_code, true)
             }
             InputEventType::MiddleMouseDown => {

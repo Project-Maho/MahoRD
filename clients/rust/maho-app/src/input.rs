@@ -11,6 +11,7 @@ pub struct InputKeyMap;
 impl InputKeyMap {
     /// Maps Windows virtual-key values to the macOS virtual key codes consumed by the host.
     pub fn to_macos(key: InputKey) -> Option<u16> {
+        use maho_proto::extended_keys::*;
         let InputKey::WindowsVirtualKey(key) = key;
         Some(match key {
             0x41 => 0x00,
@@ -85,6 +86,50 @@ impl InputKeyMap {
             0x79 => 0x6d,
             0x7a => 0x67,
             0x7b => 0x6f,
+            0x7c => 0x69,
+            0x7d => 0x6b,
+            0x7e => 0x71,
+            0x7f => 0x6a,
+            0x80 => 0x40,
+            0x81 => 0x4f,
+            0x82 => 0x50,
+            0x83 => 0x5a,
+            0x84 => F21,
+            0x85 => F22,
+            0x86 => F23,
+            0x87 => F24,
+            0xb3 => MEDIA_PLAY_PAUSE,
+            0xb0 => MEDIA_NEXT,
+            0xb1 => MEDIA_PREVIOUS,
+            0xb2 => MEDIA_STOP,
+            0xa6 => BROWSER_BACK,
+            0xa7 => BROWSER_FORWARD,
+            0xa8 => BROWSER_REFRESH,
+            0xa9 => BROWSER_STOP,
+            0xaa => BROWSER_SEARCH,
+            0xab => BROWSER_FAVORITES,
+            0xac => BROWSER_HOME,
+            0xad => 0x4a,
+            0xae => 0x49,
+            0xaf => 0x48,
+            0x60 => 0x52,
+            0x61 => 0x53,
+            0x62 => 0x54,
+            0x63 => 0x55,
+            0x64 => 0x56,
+            0x65 => 0x57,
+            0x66 => 0x58,
+            0x67 => 0x59,
+            0x68 => 0x5b,
+            0x69 => 0x5c,
+            0x6a => 0x43,
+            0x6b => 0x45,
+            0x6d => 0x4e,
+            0x6e => 0x41,
+            0x6f => 0x4b,
+            0x90 => 0x47,
+            0x92 => 0x51,
+            0x100d => 0x4c,
             0x25 => 0x7b,
             0x27 => 0x7c,
             0x28 => 0x7d,
@@ -150,4 +195,43 @@ pub fn key_event(
         scroll_dx: 0.0,
         scroll_dy: 0.0,
     })
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    #[test]
+    fn keypad_enter_volume_and_extended_functions_preserve_wire_identity() {
+        for (vk, wire) in [
+            (0x0d, 36),
+            (0x100d, 76),
+            (0x60, 82),
+            (0xaf, 72),
+            (0x83, 90),
+            (0x7c, 105),
+        ] {
+            assert_eq!(
+                InputKeyMap::to_macos(InputKey::WindowsVirtualKey(vk)),
+                Some(wire)
+            );
+        }
+        for vk in 0xa6..=0xac {
+            assert_eq!(
+                InputKeyMap::to_macos(InputKey::WindowsVirtualKey(vk)),
+                Some(0x104 + vk - 0xa6)
+            );
+        }
+        for vk in 0xb0..=0xb3 {
+            assert_eq!(
+                InputKeyMap::to_macos(InputKey::WindowsVirtualKey(vk)),
+                Some([0x101, 0x102, 0x103, 0x100][(vk - 0xb0) as usize])
+            );
+        }
+        for vk in 0x84..=0x87 {
+            assert_eq!(
+                InputKeyMap::to_macos(InputKey::WindowsVirtualKey(vk)),
+                Some(0x10b + vk - 0x84)
+            );
+        }
+    }
 }

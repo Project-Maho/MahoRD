@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, type RefObject } from "react";
-import { sendInput, type InputPayload } from "@/lib/ipc";
+import { sendInput, invokeCommand, type InputPayload } from "@/lib/ipc";
 import { canvasDisplayRect, normalizeWheel, sessionShortcut } from "./presentation";
+import { remoteVirtualKey } from "./keyCodes";
 import {
   createHeldInputTracker,
   shouldForwardKeyboardEvent,
@@ -18,6 +19,7 @@ export interface UseRemoteInputOptions {
   scrollSensitivity?: number;
   onShortcut?: (action: "fullscreen" | "overlay" | "keyboard") => void;
   overlayExpanded?: boolean;
+  onNativeCaptureStatus?: (status: string) => void;
 }
 
 export interface RemoteInputHandle {
@@ -87,6 +89,45 @@ export function useRemoteInput(
   });
 
   const heldInputsRef = useRef(createHeldInputTracker());
+  const nativeActive = useRef(false);
+  useEffect(() => {
+    if (!isConnected || options.keyboardCaptured === false || options.inputBlocked || typeof window === "undefined") return;
+    const bridge = (window as unknown as { __TAURI__?: { event?: { listen: <T>(name: string, fn: (event: { payload: T }) => void) => Promise<() => void> } } }).__TAURI__?.event;
+    if (!bridge) return;
+    let disposed = false;
+    let starting = false;
+    const unsubscribers: (() => void)[] = [];
+    const stop = () => { nativeActive.current = false; void invokeCommand("stop_key_capture"); };
+    const start = async () => {
+      const target = document.activeElement as HTMLElement | null;
+      if (disposed || starting || nativeActive.current || !target || !["viewport", "video-canvas", "viewport-container"].includes(target.id)) return;
+      starting = true;
+      try {
+        await invokeCommand("start_key_capture");
+        if (disposed || document.activeElement !== target) stop();
+        else { nativeActive.current = true; optionsRef.current.onNativeCaptureStatus?.("Native system keys captured. Ctrl+Shift+Z releases capture."); }
+      } catch (error) {
+        const reason = typeof error === "object" && error !== null && "reason" in error ? String(error.reason) : String(error);
+        optionsRef.current.onNativeCaptureStatus?.(reason);
+      } finally { starting = false; }
+    };
+    void (async () => {
+      const off = await bridge.listen<{ vkCode: number; extended: boolean; pressed: boolean; repeat: boolean }>("native-key", ({ payload }) => {
+        if (!nativeActive.current || disposed || payload.repeat) return;
+        const code = payload.vkCode === 13 && payload.extended ? 0x100d : payload.vkCode;
+        if (payload.pressed) heldInputsRef.current.keyDown(code, 0); else heldInputsRef.current.keyUp(code);
+        void sendInput({ event_type: payload.pressed ? "KeyDown" : "KeyUp", key_code: code, modifiers: 0, view_width: 1280, view_height: 800 });
+      });
+      if (disposed) { off(); return; } unsubscribers.push(off);
+      const released = await bridge.listen("native-key-capture-released", () => { nativeActive.current = false; optionsRef.current.onNativeCaptureStatus?.("Native capture released"); });
+      if (disposed) { released(); return; } unsubscribers.push(released);
+      document.addEventListener("focusin", start);
+      document.addEventListener("focusout", stop);
+      window.addEventListener("blur", stop);
+      await start();
+    })();
+    return () => { disposed = true; stop(); unsubscribers.forEach(off => off()); document.removeEventListener("focusin", start); document.removeEventListener("focusout", stop); window.removeEventListener("blur", stop); };
+  }, [isConnected, options.keyboardCaptured, options.inputBlocked]);
   const lastPointerRef = useRef({ x: 0, y: 0, viewWidth: 1280, viewHeight: 800 });
   const pendingPointerRef = useRef<InputPayload | null>(null);
   const pointerRafRef = useRef<number | null>(null);
@@ -422,6 +463,7 @@ export function useRemoteInput(
     const localKeys = new Set<string>();
     const localModifierUps = new Set<string>();
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (nativeActive.current) { e.preventDefault?.(); return; }
       const shortcut = sessionShortcut(e);
       if (shortcut || (e.key === "Escape" && optionsRef.current.overlayExpanded)) {
         e.preventDefault?.();
@@ -454,8 +496,7 @@ export function useRemoteInput(
       if (e.altKey) mod |= 4;
       if (e.metaKey) mod |= 8;
 
-      const keyCode =
-        (e.keyCode !== undefined ? e.keyCode : (e.which ?? 0)) || 0;
+      const keyCode = remoteVirtualKey(e);
       heldInputsRef.current.keyDown(keyCode, mod);
 
       const viewWidth =
@@ -475,6 +516,7 @@ export function useRemoteInput(
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
+      if (nativeActive.current) { e.preventDefault?.(); return; }
       if (localKeys.delete(e.key?.toLowerCase()) || localModifierUps.delete(e.key) || sessionShortcut(e)) {
         e.preventDefault?.();
         return;
@@ -491,8 +533,7 @@ export function useRemoteInput(
       if (e.altKey) mod |= 4;
       if (e.metaKey) mod |= 8;
 
-      const keyCode =
-        (e.keyCode !== undefined ? e.keyCode : (e.which ?? 0)) || 0;
+      const keyCode = remoteVirtualKey(e);
       heldInputsRef.current.keyUp(keyCode);
 
       const viewWidth =

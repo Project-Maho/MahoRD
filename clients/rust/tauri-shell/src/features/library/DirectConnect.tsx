@@ -1,4 +1,5 @@
 import type * as React from "react"
+import { useState } from "react"
 import { ArrowRight, CircleAlert, LoaderCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -25,6 +26,7 @@ export function DirectConnect({
   busy = false,
   error = null,
 }: Props) {
+  const [owner, setOwner] = useState(() => localStorage.getItem("maho-pairing-owner") !== "false")
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     onConnect()
@@ -45,6 +47,7 @@ export function DirectConnect({
         noValidate
         className="grid grid-cols-1 gap-2 rounded-panel surface-card p-2 min-[560px]:grid-cols-[minmax(0,1fr)_10rem_auto]"
       >
+        {pin && <label className="col-span-full flex items-start gap-2 p-2 text-xs"><input type="checkbox" checked={owner} onChange={event => { setOwner(event.target.checked); localStorage.setItem("maho-pairing-owner", String(event.target.checked)); }} /><span>{owner ? "This is my computer (always connect without PIN)" : "One-time access"}. The host decides the granted access.</span></label>}
         <Label htmlFor="direct-ip" className="sr-only">
           Host address
         </Label>

@@ -1,4 +1,7 @@
 export type ConnectionPhase =
+  | 'reconnecting'
+  | 'gave-up'
+  | 'ended'
   | 'idle'
   | 'unavailable'
   | 'connecting'
@@ -15,6 +18,12 @@ export interface HostInfo {
 }
 
 export interface ConnectionStats {
+  rtt_latest_ms?: number | null;
+  rtt_smoothed_ms?: number | null;
+  measured_mbps?: number | null;
+  packet_loss_ratio?: number | null;
+  decoder_backend?: string | null;
+  session_info?: import('./ipc').SessionInfo | null;
   connected?: boolean;
   latency_p50_ms?: number | null;
   latency_p99_ms?: number | null;
@@ -23,6 +32,8 @@ export interface ConnectionStats {
 }
 
 export interface ConnectionSnapshot {
+  secureAttention?: boolean;
+  clipboardImage?: boolean;
   phase: ConnectionPhase;
   host: HostInfo | null;
   fieldErrors: Record<string, string>;
@@ -47,6 +58,7 @@ export interface ValidateConnectionOptions {
 }
 
 export interface ValidatedConnectionArgs {
+  owner?: boolean;
   host: string;
   tcpPort: number;
   udpPort: number;
@@ -84,6 +96,7 @@ export function validateConnection({
   tcpPort = null,
   udpPort = null,
   pairingId = null,
+  owner,
 }: ValidateConnectionOptions = {}): ValidationResult {
   host = host.trim();
   pin = pin == null ? '' : pin.trim();
@@ -120,6 +133,7 @@ export function validateConnection({
   const finalUdp = checkPort(udpPort, 'udpPort', 19731);
   const args: ValidatedConnectionArgs = { host, tcpPort: finalTcp as number, udpPort: finalUdp as number, pin: pin || null };
   if (pairingId) args.pairingId = pairingId;
+  if (typeof owner === 'boolean') args.owner = owner;
   return Object.keys(errors).length
     ? { ok: false, errors }
     : { ok: true, args };
@@ -149,6 +163,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
   let pendingConnect: Promise<{ ok: true } | { ok: false; error: string; code: string | null }> | null = null;
   let pendingCleanup: Promise<void> | null = null;
   let pendingStats: Promise<void> | null = null;
+  let connectCapabilities: { secure_attention?: boolean; clipboard_image?: boolean } = {};
 
   function snapshot(): ConnectionSnapshot {
     return {
@@ -173,7 +188,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
   function isCurrent(token: number): boolean {
     return (
       token === state.generation &&
-      (state.phase === 'waiting-video' || state.phase === 'streaming')
+      (state.phase === 'waiting-video' || state.phase === 'streaming' || state.phase === 'reconnecting' || state.phase === 'gave-up' || state.phase === 'ended')
     );
   }
 
@@ -183,6 +198,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
     // disconnect still has to be re-run, so `cleanupError` keeps the path open.
     if (!state.busy && !(retry && state.cleanupError)) return Promise.resolve();
     const connectToSettle = pendingConnect;
+    const interruptReconnect = state.phase === 'reconnecting';
     ++state.generation;
     state.phase = 'disconnecting';
     state.cleanupError = null;
@@ -199,6 +215,9 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
       }
       // Native connect publishes only on settlement: an earlier disconnect
       // cannot cancel it. Its outcome is consumed, never allowed to revive UI.
+      if (connectToSettle || interruptReconnect) {
+        try { await invoke('cancel_connect'); } catch (error) { errors.push(errorText(error)); }
+      }
       if (connectToSettle) await connectToSettle;
       try {
         await invoke('disconnect');
@@ -241,6 +260,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
     clearStats();
     const operation = Promise.resolve()
       .then(() => invoke('connect', validation.args))
+      .then(response => { if (typeof response === 'object' && response !== null) connectCapabilities = response; })
       .then(
         () => ({ ok: true as const }),
         (error: unknown) => ({ ok: false as const, error: errorText(error), code: typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : null })
@@ -251,8 +271,22 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
     if (pendingConnect === operation) pendingConnect = null;
     if (generation !== state.generation) return true;
     if (result.ok) {
+      state.secureAttention = connectCapabilities.secure_attention === true;
+      state.clipboardImage = connectCapabilities.clipboard_image === true;
       state.phase = 'waiting-video';
       emit();
+      if (typeof localStorage !== 'undefined') {
+        try {
+          const stream = await invoke('get_stream_state') as { supported?: boolean } | null;
+          if (generation !== state.generation) return true;
+          if (stream?.supported) {
+            const bitrate = Number(localStorage.getItem('maho-quality-mbps'));
+            if (Number.isInteger(bitrate) && bitrate >= 1 && bitrate <= 300) await invoke('set_bitrate', { bitrateMbps: bitrate });
+            const saved = localStorage.getItem('maho-stream-choices');
+            if (saved) await invoke('set_stream_options', JSON.parse(saved));
+          }
+        } catch (error) { state.statsError = `Saved stream choices: ${errorText(error)}`; emit(); }
+      }
     } else {
       state.error = result.error;
       state.errorCode = result.code;
@@ -271,6 +305,24 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
       try {
         const stats = (await invoke('stats')) as (ConnectionStats & { connected?: boolean }) | null;
         if (!isCurrent(generation)) return;
+        const info = stats?.session_info;
+        if (info?.guest_names && state.host && typeof localStorage !== 'undefined') {
+          localStorage.setItem(`maho-host-occupancy:${state.host.ip}`, JSON.stringify({ names: info.guest_names, at: Date.now() }));
+        }
+        if (info?.ended) {
+          state.stats = stats;
+          state.error = `Session ended: ${info.ended}`;
+          state.phase = 'ended';
+          await releaseInputs();
+          return;
+        }
+        if (info?.reconnect === 'reconnecting' || info?.reconnect === 'gave-up') {
+          state.stats = stats;
+          state.phase = info.reconnect;
+          state.statsStatus = 'ready';
+          return;
+        }
+        if (state.phase === 'reconnecting' && stats?.connected) state.phase = 'waiting-video';
         if (stats && stats.connected === false) {
           state.error = 'Remote session ended.';
           await cleanup();
@@ -311,7 +363,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
     token: () => state.generation,
     isCurrent,
     markFrameRendered(token: number): Promise<void> {
-      if (isCurrent(token) && state.phase !== 'streaming') {
+      if (isCurrent(token) && state.phase === 'waiting-video') {
         state.phase = 'streaming';
         emit();
       }
@@ -319,6 +371,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
     },
     reportFrameError(token: number, error: unknown): Promise<void> {
       if (!isCurrent(token)) return Promise.resolve();
+      if (state.phase === 'reconnecting' || state.phase === 'gave-up' || state.phase === 'ended') return Promise.resolve();
       state.error = errorText(error);
       return cleanup();
     },

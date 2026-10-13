@@ -36,9 +36,12 @@ pub mod hidden_hosts;
 #[cfg(test)]
 mod pairing_tests;
 
+#[cfg(target_os = "macos")]
+mod clipboard_image;
 mod native_desktop;
 mod native_keys;
 mod native_window;
+mod parity;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostItem {
@@ -57,6 +60,8 @@ pub struct HostItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectResponse {
+    pub secure_attention: bool,
+    pub clipboard_image: bool,
     pub pairing_id: String,
     pub host_name: String,
     pub server_name: String,
@@ -73,6 +78,12 @@ pub struct SessionStats {
     pub audio_packets_received: u64,
     pub latency_p50_ms: Option<f64>,
     pub latency_p99_ms: Option<f64>,
+    pub rtt_latest_ms: Option<f64>,
+    pub rtt_smoothed_ms: Option<f64>,
+    pub measured_mbps: Option<f64>,
+    pub packet_loss_ratio: Option<f64>,
+    pub decoder_backend: Option<String>,
+    pub session_info: Option<parity::SessionInfoDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +301,9 @@ pub struct HostStatus {
 const HOST_STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct HostRuntime {
+    pub guests: Mutex<Option<Arc<maho_host::guests::GuestRegistry>>>,
+    pub events: Mutex<Option<std::sync::mpsc::Receiver<maho_host::guests::HostEvent>>>,
+    pub error: Arc<Mutex<Option<String>>>,
     pub running: Arc<AtomicBool>,
     pub pin: Arc<Mutex<String>>,
     pub port: u16,
@@ -306,6 +320,9 @@ pub struct HostRuntime {
 impl Default for HostRuntime {
     fn default() -> Self {
         Self {
+            guests: Mutex::new(None),
+            events: Mutex::new(None),
+            error: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
             pin: Arc::new(Mutex::new(maho_host::random_pin())),
             port: maho_host::session::DEFAULT_TCP_PORT,
@@ -346,6 +363,10 @@ pub fn get_local_ip() -> String {
 }
 
 pub struct AppState {
+    #[cfg(target_os = "macos")]
+    image_clipboard: Arc<Mutex<clipboard_image::ImageClipboard>>,
+    clipboard_image_supported: Arc<AtomicBool>,
+    pub clipboard_enabled: Arc<AtomicBool>,
     lifecycle: tokio::sync::Mutex<()>,
     pub session: Arc<Mutex<Option<ClientSession>>>,
     /// Pairing of the live session, kept so input can re-handshake when the
@@ -701,6 +722,10 @@ impl Drop for AudioRuntime {
 impl Default for AppState {
     fn default() -> Self {
         Self {
+            clipboard_enabled: Arc::new(AtomicBool::new(true)),
+            clipboard_image_supported: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "macos")]
+            image_clipboard: Arc::new(Mutex::new(clipboard_image::ImageClipboard::default())),
             lifecycle: tokio::sync::Mutex::new(()),
             session: Arc::new(Mutex::new(None)),
             active_pairing_id: Arc::new(Mutex::new(None)),
@@ -889,9 +914,6 @@ impl AppState {
                     if approved {
                         tracing::info!(client = %prompt.client_name, "Pairing request auto-approved by host policy");
                         prompt.respond(true);
-                    } else {
-                        tracing::warn!(client = %prompt.client_name, "Pairing request denied: host auto_approve disabled");
-                        prompt.respond(false);
                     }
                 }
             });
@@ -901,17 +923,25 @@ impl AppState {
         config.allow_clipboard = self.host_runtime.allow_clipboard.clone();
 
         let server = maho_host::HostServer::bind(config).map_err(|e| e.to_string())?;
+        *self.host_runtime.guests.lock().map_err(|e| e.to_string())? =
+            Some(server.guest_registry());
+        *self.host_runtime.events.lock().map_err(|e| e.to_string())? =
+            Some(server.subscribe_events());
+        *self.host_runtime.error.lock().map_err(|e| e.to_string())? = None;
 
         self.host_runtime.stop_flag.store(false, Ordering::SeqCst);
         self.host_runtime.running.store(true, Ordering::SeqCst);
 
         let stop_flag = Arc::clone(&self.host_runtime.stop_flag);
         let running_flag = Arc::clone(&self.host_runtime.running);
+        let host_error = self.host_runtime.error.clone();
 
         let handle = std::thread::Builder::new()
             .name("maho-host-server".into())
             .spawn(move || {
-                let _ = server.serve_with_stop(stop_flag);
+                if let Err(error) = server.serve_with_stop(stop_flag) {
+                    *host_error.lock().expect("host error lock poisoned") = Some(error.to_string());
+                }
                 running_flag.store(false, Ordering::SeqCst);
             })
             .map_err(|e| {
@@ -1581,6 +1611,7 @@ pub mod commands {
         udp_port: Option<u16>,
         pin: Option<String>,
         pairing_id: Option<String>,
+        owner: Option<bool>,
     ) -> Result<ConnectResponse, IpcError> {
         let _lifecycle = state.lifecycle.lock().await;
         if let Err(cleanup_err) = disconnect_internal(&state).await {
@@ -1591,6 +1622,7 @@ pub mod commands {
             ));
         }
         state.clear_metrics();
+        state.clipboard_enabled.store(true, Ordering::SeqCst);
 
         if let Some(ref p) = pin {
             let trimmed_pin = p.trim();
@@ -1664,6 +1696,7 @@ pub mod commands {
             udp_port,
             pin.clone(),
             first_id.clone(),
+            owner.unwrap_or(true),
         )
         .await
         {
@@ -1717,6 +1750,7 @@ pub mod commands {
                             udp_port,
                             None,
                             Some(candidate_id),
+                            true,
                         )
                         .await
                         {
@@ -1779,7 +1813,7 @@ pub mod commands {
             })?;
 
         session
-            .connect_with_pairing(record)
+            .connect_with_pairing_cancellable(record, &session.interrupt_handle())
             .map_err(|e| classify_session_error(&e))
     }
 
@@ -1790,6 +1824,7 @@ pub mod commands {
         udp_port: Option<u16>,
         pin: Option<String>,
         pairing_id: Option<String>,
+        owner: bool,
     ) -> Result<ConnectResponse, IpcError> {
         let tcp = tcp_port.unwrap_or(DEFAULT_TCP_PORT);
         let udp = udp_port.unwrap_or(DEFAULT_UDP_PORT);
@@ -1818,6 +1853,18 @@ pub mod commands {
                         format!("Pairing store error: {e}"),
                     )
                 })?;
+                if let Some(pin) = pin_clone.as_deref().filter(|p| !p.trim().is_empty()) {
+                    return session_for_connect
+                        .pair_with_pin_as(
+                            pin,
+                            if owner {
+                                maho_proto::PairingTrust::Owner
+                            } else {
+                                maho_proto::PairingTrust::GuestOnce
+                            },
+                        )
+                        .map_err(|e| classify_session_error(&e));
+                }
                 authenticate_client_session(
                     &session_for_connect,
                     pin_clone.as_deref(),
@@ -1891,6 +1938,7 @@ pub mod commands {
             .spawn(move || {
                 let mut decoder: Option<HevcDecoder> = None;
                 let request_session = session_udp.clone();
+                let decode_session = session_udp.clone();
                 let decode_cursor_target = latest_cursor_target.clone();
                 run_media_pipeline(
                     stop_flag_thread,
@@ -1904,6 +1952,12 @@ pub mod commands {
                     move |message| request_session.send_control(message),
                     move |frame, frame_recv_instant| {
                         for nv12 in decode_media_frame(&mut decoder, &frame)? {
+                            if let Some(decoder) = &decoder {
+                                let _ = decode_session.set_decoder_backend(format!(
+                                    "FFmpeg {:?}",
+                                    decoder.acceleration()
+                                ));
+                            }
                             frames_dec.fetch_add(1, Ordering::Relaxed);
 
                             let latency_ms = frame_recv_instant.elapsed().as_secs_f64() * 1000.0;
@@ -1982,12 +2036,33 @@ pub mod commands {
         }
 
         start_clipboard_monitor(state, &session);
+        state.clipboard_image_supported.store(
+            ready_session
+                .server
+                .capabilities
+                .contains(maho_proto::Capabilities::CLIPBOARD_IMAGE),
+            Ordering::SeqCst,
+        );
+        #[cfg(target_os = "macos")]
+        state
+            .image_clipboard
+            .lock()
+            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Runtime, e.to_string()))?
+            .reset();
 
         if let Ok(mut id) = state.active_pairing_id.lock() {
             *id = Some(ready_session.pairing.id.clone());
         }
 
         Ok(ConnectResponse {
+            secure_attention: ready_session
+                .server
+                .capabilities
+                .contains(maho_proto::Capabilities::SECURE_ATTENTION),
+            clipboard_image: ready_session
+                .server
+                .capabilities
+                .contains(maho_proto::Capabilities::CLIPBOARD_IMAGE),
             pairing_id: ready_session.pairing.id,
             host_name: ready_session.pairing.name,
             server_name: ready_session.server.name,
@@ -2020,7 +2095,10 @@ pub mod commands {
     /// Watches the local pasteboard while connected and pushes changes to the
     /// host. Best effort: clipboard sync failure never blocks a session.
     #[cfg(target_os = "macos")]
-    fn start_clipboard_monitor(state: &AppState, session: &ClientSession) {
+    pub(super) fn start_clipboard_monitor(state: &AppState, session: &ClientSession) {
+        if !state.clipboard_enabled.load(Ordering::SeqCst) {
+            return;
+        }
         if let Ok(mut slot) = state.clipboard_monitor.lock() {
             if let Some(mut stale) = slot.take() {
                 stale.stop();
@@ -2035,6 +2113,14 @@ pub mod commands {
         };
         let session = session.clone();
         let start = monitor.start(move |text| {
+            if !session
+                .effective_permissions()
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.clipboard)
+            {
+                return;
+            }
             let update = ClipboardSyncUpdate {
                 request_id: 0,
                 direction: ClipboardSyncDirection::ClientToHost,
@@ -2057,7 +2143,7 @@ pub mod commands {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn start_clipboard_monitor(_state: &AppState, _session: &ClientSession) {}
+    pub(super) fn start_clipboard_monitor(_state: &AppState, _session: &ClientSession) {}
 
     pub(super) fn stop_clipboard_monitor(state: &AppState) {
         #[cfg(target_os = "macos")]
@@ -2107,11 +2193,34 @@ pub mod commands {
             .as_ref()
             .map(|runtime| runtime.events().clone());
         let frames = state.latest_raw_frame.clone();
+        let session_info = state
+            .session
+            .lock()
+            .map_err(|e| e.to_string())?
+            .as_ref()
+            .and_then(|session| session.session_info().ok());
+        let clipboard_enabled = state.clipboard_enabled.clone();
+        #[cfg(target_os = "macos")]
+        let image_exchange = (
+            state.image_clipboard.clone(),
+            state.clipboard_image_supported.load(Ordering::SeqCst),
+            state.session.lock().map_err(|e| e.to_string())?.clone(),
+        );
         #[cfg(target_os = "macos")]
         let clipboard_monitor = state.clipboard_monitor.clone();
         tokio::task::spawn_blocking(move || {
             let mut clipboard = None;
             let mut errors = Vec::new();
+            #[cfg(target_os = "macos")]
+            if let (clipboard, true, Some(session)) = image_exchange {
+                if let Err(error) = clipboard
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .exchange(&session, clipboard_enabled.load(Ordering::SeqCst))
+                {
+                    tracing::warn!(%error, "clipboard image exchange failed");
+                }
+            }
             if let Some(events) = events {
                 // Three bounded slots plus the empty/closed observation. Bound
                 // work even if the producer refills while this command runs.
@@ -2139,7 +2248,7 @@ pub mod commands {
                     }
                 }
             }
-            if let Some(text) = clipboard {
+            if let Some(text) = clipboard.filter(|_| clipboard_enabled.load(Ordering::SeqCst)) {
                 // The session monitor owns echo suppression: when present it
                 // applies remote text and records the write so the local
                 // pasteboard poller never bounces the text back to the host.
@@ -2159,7 +2268,15 @@ pub mod commands {
                     }
                 }
             }
-            if !errors.is_empty() {
+            let retaining_session = session_info.as_ref().is_some_and(|info| {
+                info.ended.is_some()
+                    || matches!(
+                        info.reconnect,
+                        maho_app::ReconnectState::Reconnecting { .. }
+                            | maho_app::ReconnectState::GaveUp { .. }
+                    )
+            });
+            if !errors.is_empty() && !retaining_session {
                 return Err(errors.join("\n"));
             }
             let frame = frames.lock().map_err(|e| e.to_string())?.take_snapshot();
@@ -2259,6 +2376,14 @@ pub mod commands {
 
     #[tauri::command]
     pub fn stats(state: State<'_, AppState>) -> Result<SessionStats, String> {
+        let session = state.session.lock().map_err(|e| e.to_string())?.clone();
+        let telemetry = session
+            .as_ref()
+            .map(ClientSession::session_stats)
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let session_info = session.as_ref().map(parity::session_info).transpose()?;
         let (connected, state_str) = state
             .session
             .lock()
@@ -2284,6 +2409,14 @@ pub mod commands {
             audio_packets_received: state.audio_packets_received.load(Ordering::Relaxed),
             latency_p50_ms,
             latency_p99_ms,
+            rtt_latest_ms: telemetry.rtt_latest_ms,
+            rtt_smoothed_ms: telemetry.rtt_smoothed_ms,
+            measured_mbps: telemetry
+                .receive_bytes_per_second
+                .map(|v| v * 8.0 / 1_000_000.0),
+            packet_loss_ratio: telemetry.packet_loss_ratio,
+            decoder_backend: telemetry.decoder_backend,
+            session_info,
         })
     }
 
@@ -2843,6 +2976,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            parity::cancel_connect,
+            parity::set_client_clipboard,
+            parity::request_secure_attention,
+            parity::host_guests,
+            parity::host_approve,
+            parity::host_deny,
+            parity::host_kick,
+            parity::host_kick_all,
+            parity::host_guest_permissions,
+            parity::wake_computer,
             native_desktop::get_autostart,
             native_desktop::set_autostart,
             native_desktop::sync_tray_state,

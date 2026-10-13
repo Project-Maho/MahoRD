@@ -46,6 +46,7 @@ function fixture({
     nativeAvailable,
     releaseInputs,
     invoke(command: string, args?: unknown) {
+      if (command === "cancel_connect") return Promise.resolve(undefined);
       const result = deferred<unknown>();
       const call: NativeCall = { command, args, ...result };
       calls.push(call);
@@ -108,6 +109,22 @@ test("PIN and address validation matches backend without losing leading zeros", 
   });
   // An explicit pairing id satisfies the pairing requirement without a PIN.
   expect(validateConnection({ host: "example.test", pairingId: "pair-1" }).ok).toBe(true);
+});
+
+test("reconnect and terminal reasons retain mounted session and reject late frame failures", async () => {
+  const f = fixture();
+  const token = await active(f);
+  for (const [info, phase] of [[{ reconnect: "reconnecting", attempt: 2 }, "reconnecting"], [{ reconnect: "gave-up", reason: "timeout" }, "gave-up"], [{ reconnect: "idle", ended: "Kicked" }, "ended"]] as const) {
+    const arrival = f.next("stats");
+    const done = f.connection.refreshStats();
+    (await arrival).resolve({ connected: false, session_info: info });
+    await done;
+    expect(f.connection.snapshot().phase).toBe(phase);
+    await f.connection.reportFrameError(token, new Error("late runtime error"));
+    expect(f.connection.snapshot().phase).toBe(phase);
+    expect(f.connection.snapshot().host?.name).toBe("Example");
+  }
+  expect(f.calls.some(call => call.command === "disconnect")).toBe(false);
 });
 
 test("connect passes custom ports through invoke", async () => {

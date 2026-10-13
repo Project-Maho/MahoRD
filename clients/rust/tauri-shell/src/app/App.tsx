@@ -4,6 +4,7 @@ import { Sidebar, type AppView } from "@/features/shell/Sidebar"
 import { SettingsPage } from "@/features/settings/SettingsPage"
 import { ComputersPage } from "@/features/library/ComputersPage"
 import { SessionView } from "@/features/session/SessionView"
+import { HostActivity } from "@/features/settings/HostActivity"
 import {
   createConnection,
   type ConnectionInstance,
@@ -62,6 +63,7 @@ export function App(props: AppProps = {}) {
     snapshot.phase === "connecting" ||
     snapshot.phase === "waiting-video" ||
     snapshot.phase === "streaming"
+    || snapshot.phase === "reconnecting" || snapshot.phase === "gave-up" || snapshot.phase === "ended"
 
   if (isSessionActive) {
     return (
@@ -71,6 +73,7 @@ export function App(props: AppProps = {}) {
           snapshot={snapshot}
           onError={setSessionError}
         />
+        <HostActivity />
       </div>
     )
   }
@@ -81,6 +84,7 @@ export function App(props: AppProps = {}) {
       data-app-shell
     >
       <Sidebar active={activeView} onSelect={setActiveView} />
+      <HostActivity />
       <main
         className="canvas-glow h-full min-w-0 flex-1 overflow-y-auto bg-background px-10 py-9 max-[1040px]:px-6 max-[1040px]:py-7 max-[720px]:px-4 max-[720px]:py-5"
         id="main-view"

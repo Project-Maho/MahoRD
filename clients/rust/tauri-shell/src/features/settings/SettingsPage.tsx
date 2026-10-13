@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { CircleAlert } from "lucide-react"
 import { ThisComputerCard } from "@/features/host/ThisComputerCard"
 import { StartupSettings } from "@/features/settings/StartupSettings"
+import { HostActivity } from "./HostActivity"
 import { SavedCredentials } from "@/features/library/SavedCredentials"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -17,6 +18,7 @@ import {
   stopHost,
   setAutoApprove,
   setHostPolicy,
+  invokeCommand,
   type PairingSummary,
   type HostStatus,
 } from "@/lib/ipc"
@@ -76,6 +78,13 @@ export function SettingsPage({ connection }: SettingsPageProps) {
   }
   const [hostStatus, setHostStatus] = useState<HostStatus | null>(null)
   const [hostBusy, setHostBusy] = useState(false)
+  const [hostingError, setHostingError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!native) return;
+    let active = true;
+    const timer = setInterval(() => { getHostStatus().then(s => { if (active) setHostStatus(s); }).catch(e => { if (active) setHostingError(String(e)); }); }, 1000);
+    return () => { active = false; clearInterval(timer); };
+  }, [native]);
   const [pairings, setPairings] = useState<PairingSummary[]>([])
   const [hiddenHosts, setHiddenHosts] = useState<string[]>([])
   const [hiddenBusy, setHiddenBusy] = useState(false)
@@ -138,12 +147,14 @@ export function SettingsPage({ connection }: SettingsPageProps) {
   const handleToggleSharing = async () => {
     if (!native) return
     setHostBusy(true)
+    setHostingError(null)
     try {
       const isRunning = hostStatus ? hostStatus.running : true
       const next = isRunning ? await stopHost() : await startHost()
       if (next) setHostStatus(next)
+      await invokeCommand("sync_tray_state")
     } catch (err) {
-      console.error("Failed to toggle sharing:", err)
+      setHostingError(err instanceof Error ? err.message : String(err))
     } finally {
       setHostBusy(false)
     }
@@ -278,6 +289,8 @@ export function SettingsPage({ connection }: SettingsPageProps) {
           onToggleSharing={handleToggleSharing}
           onCopyInfo={handleCopyInfo}
         />
+        {hostingError && <p role="alert" className="text-sm text-destructive">{hostingError}</p>}
+        <HostActivity panel />
 
         <div className="rounded-panel surface-card p-4 space-y-3">
           <div className="flex items-center justify-between gap-4">

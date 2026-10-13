@@ -1,5 +1,26 @@
 use std::ops::{BitOr, BitOrAssign};
 
+/// MahoRD extended key codes in the existing u16 key_code field. The range
+/// 0x0100..=0x010e does not overlap Apple virtual key codes. Hosts without a
+/// platform equivalent must ignore these values, never truncate to an Apple key.
+pub mod extended_keys {
+    pub const MEDIA_PLAY_PAUSE: u16 = 0x0100;
+    pub const MEDIA_NEXT: u16 = 0x0101;
+    pub const MEDIA_PREVIOUS: u16 = 0x0102;
+    pub const MEDIA_STOP: u16 = 0x0103;
+    pub const BROWSER_BACK: u16 = 0x0104;
+    pub const BROWSER_FORWARD: u16 = 0x0105;
+    pub const BROWSER_REFRESH: u16 = 0x0106;
+    pub const BROWSER_STOP: u16 = 0x0107;
+    pub const BROWSER_SEARCH: u16 = 0x0108;
+    pub const BROWSER_FAVORITES: u16 = 0x0109;
+    pub const BROWSER_HOME: u16 = 0x010a;
+    pub const F21: u16 = 0x010b;
+    pub const F22: u16 = 0x010c;
+    pub const F23: u16 = 0x010d;
+    pub const F24: u16 = 0x010e;
+}
+
 use crate::{
     codec::{push_f32, push_u16, Decoder},
     CodecError, WireCodec,

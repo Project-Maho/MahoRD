@@ -94,7 +94,23 @@ pub fn map_normalized_to_output(
 /// The wire key code intentionally remains the existing macOS key code so all
 /// hosts interoperate with the current clients.
 pub fn macos_keycode_to_evdev(key_code: u16) -> Option<KeyCode> {
+    use maho_proto::extended_keys::*;
     Some(match key_code {
+        MEDIA_PLAY_PAUSE => KeyCode::KEY_PLAYPAUSE,
+        MEDIA_NEXT => KeyCode::KEY_NEXTSONG,
+        MEDIA_PREVIOUS => KeyCode::KEY_PREVIOUSSONG,
+        MEDIA_STOP => KeyCode::KEY_STOPCD,
+        BROWSER_BACK => KeyCode::KEY_BACK,
+        BROWSER_FORWARD => KeyCode::KEY_FORWARD,
+        BROWSER_REFRESH => KeyCode::KEY_REFRESH,
+        BROWSER_STOP => KeyCode::KEY_STOP,
+        BROWSER_SEARCH => KeyCode::KEY_SEARCH,
+        BROWSER_FAVORITES => KeyCode::KEY_BOOKMARKS,
+        BROWSER_HOME => KeyCode::KEY_HOMEPAGE,
+        F21 => KeyCode::KEY_F21,
+        F22 => KeyCode::KEY_F22,
+        F23 => KeyCode::KEY_F23,
+        F24 => KeyCode::KEY_F24,
         0 => KeyCode::KEY_A,
         1 => KeyCode::KEY_S,
         2 => KeyCode::KEY_D,
@@ -403,7 +419,7 @@ impl LinuxInputInjector {
             .build()?;
 
         let mut keyboard_keys = AttributeSet::<KeyCode>::new();
-        for code in 0..=126 {
+        for code in (0..=126).chain(0x100..=0x10e) {
             if let Some(key) = macos_keycode_to_evdev(code) {
                 keyboard_keys.insert(key);
             }
@@ -938,6 +954,28 @@ mod tests {
 
     #[test]
     fn maps_volume_and_extended_function_keys() {
+        for (index, key) in [
+            KeyCode::KEY_PLAYPAUSE,
+            KeyCode::KEY_NEXTSONG,
+            KeyCode::KEY_PREVIOUSSONG,
+            KeyCode::KEY_STOPCD,
+            KeyCode::KEY_BACK,
+            KeyCode::KEY_FORWARD,
+            KeyCode::KEY_REFRESH,
+            KeyCode::KEY_STOP,
+            KeyCode::KEY_SEARCH,
+            KeyCode::KEY_BOOKMARKS,
+            KeyCode::KEY_HOMEPAGE,
+            KeyCode::KEY_F21,
+            KeyCode::KEY_F22,
+            KeyCode::KEY_F23,
+            KeyCode::KEY_F24,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(macos_keycode_to_evdev(0x100 + index as u16), Some(key));
+        }
         for (code, key) in [
             (72, KeyCode::KEY_VOLUMEUP),
             (73, KeyCode::KEY_VOLUMEDOWN),

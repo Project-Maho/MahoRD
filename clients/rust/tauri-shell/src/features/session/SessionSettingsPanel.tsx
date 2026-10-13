@@ -12,6 +12,9 @@ import {
   type DesktopAudioDevice,
   type StreamState,
   type StreamCodec,
+  setClientClipboard,
+  requestSecureAttention,
+  type SessionInfo,
 } from "@/lib/ipc";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -108,6 +111,8 @@ export async function refreshAudioDeviceList(
 }
 
 export interface SessionSettingsPanelProps {
+  secureAttention?: boolean;
+  sessionInfo?: SessionInfo | null;
   isConnected?: boolean;
   onReleaseInputs?: () => Promise<void> | void;
   onError?: (error: string) => void;
@@ -139,6 +144,8 @@ export function confirmedStreamConfig(state: StreamState) {
 }
 
 export function SessionSettingsPanel({
+  secureAttention = false,
+  sessionInfo,
   isConnected = true,
   onReleaseInputs,
   onError,
@@ -146,6 +153,8 @@ export function SessionSettingsPanel({
   // Quality / Bitrate state
   const [bitrate, setBitrateState] = useState<number>(savedBitrateMbps);
   const [qualityError, setQualityError] = useState<string | null>(null);
+  const [clipboardEnabled, setClipboardEnabled] = useState(true);
+  const [sasRequest, setSasRequest] = useState<number | null>(null);
 
   // Stream state
   const [streamState, setStreamState] = useState<StreamState | null>(null);
@@ -212,12 +221,14 @@ export function SessionSettingsPanel({
         return;
       }
       if (typeof setStreamOptions === "function") {
-        await setStreamOptions({
+        const choices = {
           scale: editedRef.current.scale ? streamScale : confirmed?.scale ?? streamScale,
           fps: editedRef.current.fps ? streamFps : confirmed?.fps ?? streamFps,
           codec: editedRef.current.codec ? streamCodec : confirmed?.codec ?? streamCodec,
           displayIndex: selectedDisplayIndex,
-        });
+        };
+        await setStreamOptions(choices);
+        localStorage.setItem("maho-stream-choices", JSON.stringify(choices));
       }
       // Re-fetch stream state immediately after applying
       if (typeof getStreamState === "function") {
@@ -429,6 +440,9 @@ export function SessionSettingsPanel({
 
   return (
     <div className="flex flex-col gap-3">
+      <label className="flex items-center justify-between gap-3 text-sm"><span>Share clipboard</span><input type="checkbox" checked={clipboardEnabled} disabled={!isConnected || sessionInfo?.permissions?.clipboard === false} onChange={async event => { const enabled = event.target.checked; try { await setClientClipboard(enabled); setClipboardEnabled(enabled); } catch (e) { setQualityError(e instanceof Error ? e.message : String(e)); } }} /></label>
+      {secureAttention && sessionInfo?.trust === "Owner" && sessionInfo.permissions?.keyboard && <Button variant="secondary" disabled={!isConnected} onClick={async () => { try { setSasRequest(await requestSecureAttention()); } catch (e) { setQualityError(e instanceof Error ? e.message : String(e)); } }}>Send Ctrl+Alt+Del</Button>}
+      {sasRequest !== null && <p role="status" className="text-xs">{sessionInfo?.sas_request_id === sasRequest ? sessionInfo.sas_result : "Waiting for host response"}</p>}
       {/* Stream Options Section */}
       <Separator />
 

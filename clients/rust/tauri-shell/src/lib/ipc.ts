@@ -37,6 +37,9 @@ export const MAHO_COMMANDS = [
   "set_host_policy",
   "set_stream_options",
   "get_stream_state",
+  "cancel_connect", "set_client_clipboard", "request_secure_attention",
+  "host_guests", "host_approve", "host_deny", "host_kick", "host_kick_all",
+  "host_guest_permissions", "wake_computer", "start_key_capture", "stop_key_capture", "sync_tray_state",
 ] as const;
 
 export type MahoCommand = (typeof MAHO_COMMANDS)[number];
@@ -83,6 +86,8 @@ export interface PairingSummary {
  * Result returned upon successful session authentication and handshake.
  */
 export interface ConnectResponse {
+  secure_attention: boolean;
+  clipboard_image: boolean;
   pairing_id: string;
   host_name: string;
   server_name: string;
@@ -120,7 +125,44 @@ export interface SessionStats {
   audio_packets_received: number;
   latency_p50_ms?: number | null;
   latency_p99_ms?: number | null;
+  rtt_latest_ms?: number | null;
+  rtt_smoothed_ms?: number | null;
+  measured_mbps?: number | null;
+  packet_loss_ratio?: number | null;
+  decoder_backend?: string | null;
+  session_info?: SessionInfo | null;
 }
+
+export interface GuestPermissions {
+  keyboard: boolean; mouse: boolean; gamepad: boolean; clipboard: boolean; audio: boolean;
+}
+export interface SessionInfo {
+  guest_names: string[] | null;
+  permissions: GuestPermissions | null;
+  ended: string | null;
+  trust: string | null;
+  reconnect: "idle" | "reconnecting" | "reconnected" | "gave-up";
+  attempt: number | null;
+  next_retry_ms: number | null;
+  reason: string | null;
+  sas_request_id: number | null;
+  sas_result: string | null;
+}
+export interface HostGuests {
+  sessions: { id: string; pairing_id: string; name: string; trust: string; connected_seconds: number; permissions: GuestPermissions | null }[];
+  pending: { id: string; name: string; expires_in_ms: number }[];
+  events: string[];
+  error: string | null;
+}
+export const hostGuests = (drainEvents = true) => invokeCommand<HostGuests>("host_guests", { drainEvents });
+export const hostApprove = (id: string, owner: boolean) => invokeCommand<boolean>("host_approve", { id, owner });
+export const hostDeny = (id: string) => invokeCommand<boolean>("host_deny", { id });
+export const hostKick = (id: string) => invokeCommand<boolean>("host_kick", { id });
+export const hostKickAll = () => invokeCommand<number>("host_kick_all");
+export const hostGuestPermissions = (pairingId: string, permissions: GuestPermissions) => invokeCommand<void>("host_guest_permissions", { pairingId, permissions });
+export const wakeComputer = (mac: string) => invokeCommand<void>("wake_computer", { mac });
+export const setClientClipboard = (enabled: boolean) => invokeCommand<void>("set_client_clipboard", { enabled });
+export const requestSecureAttention = () => invokeCommand<number>("request_secure_attention");
 
 /**
  * Daemon status for embedded host server.

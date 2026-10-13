@@ -276,6 +276,7 @@ export function ComputersPage({
       host,
       name: host,
       pin,
+      owner: localStorage.getItem("maho-pairing-owner") !== "false",
       tcpPort: ports.tcpPort ?? null,
       udpPort: ports.udpPort ?? null,
       pairingId: null,

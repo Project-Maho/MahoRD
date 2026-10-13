@@ -409,11 +409,40 @@ const KEY_MAP: &[(u16, u16)] = &[
     (124, 0x27),
     (125, 0x28),
     (126, 0x26),
+    (maho_proto::extended_keys::MEDIA_PLAY_PAUSE, 0xB3),
+    (maho_proto::extended_keys::MEDIA_NEXT, 0xB0),
+    (maho_proto::extended_keys::MEDIA_PREVIOUS, 0xB1),
+    (maho_proto::extended_keys::MEDIA_STOP, 0xB2),
+    (maho_proto::extended_keys::BROWSER_BACK, 0xA6),
+    (maho_proto::extended_keys::BROWSER_FORWARD, 0xA7),
+    (maho_proto::extended_keys::BROWSER_REFRESH, 0xA8),
+    (maho_proto::extended_keys::BROWSER_STOP, 0xA9),
+    (maho_proto::extended_keys::BROWSER_SEARCH, 0xAA),
+    (maho_proto::extended_keys::BROWSER_FAVORITES, 0xAB),
+    (maho_proto::extended_keys::BROWSER_HOME, 0xAC),
+    (maho_proto::extended_keys::F21, 0x84),
+    (maho_proto::extended_keys::F22, 0x85),
+    (maho_proto::extended_keys::F23, 0x86),
+    (maho_proto::extended_keys::F24, 0x87),
 ];
 
 #[cfg(test)]
 mod input_identity_tests {
     use super::*;
+    #[test]
+    fn maho_extended_keys_round_trip() {
+        for (index, vk) in [
+            0xB3, 0xB0, 0xB1, 0xB2, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0x84, 0x85, 0x86,
+            0x87,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let wire = 0x100 + index as u16;
+            assert_eq!(macos_keycode_to_vk(wire), Some(vk));
+            assert_eq!(vk_to_macos_keycode(vk), Some(wire));
+        }
+    }
 
     #[test]
     fn keypad_enter_preserves_extended_identity() {

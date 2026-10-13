@@ -3,6 +3,7 @@ import { ArrowRight, Hash, KeyRound, Monitor, Trash2, Star, Pencil } from "lucid
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { wakeComputer } from "@/lib/ipc"
 
 export interface Host {
   id: string;
@@ -44,6 +45,8 @@ export function HostGrid({
 }: Props) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState("")
+  const [wakeError, setWakeError] = useState<string | null>(null)
+  const [macs, setMacs] = useState<Record<string, string>>(() => { try { return JSON.parse(localStorage.getItem("maho-computer-macs") ?? "{}"); } catch { return {}; } })
   return (
     <section className="space-y-3" aria-labelledby="library-heading">
       <h2
@@ -129,6 +132,10 @@ export function HostGrid({
                 </div>
 
                 {!available && <p className="text-xs text-muted-foreground">Last seen: {host.lastSeen ? new Date(host.lastSeen).toLocaleString() : "Not observed on this client"}</p>}
+                {(() => { try { const status = JSON.parse(localStorage.getItem(`maho-host-occupancy:${host.ip}`) ?? "null"); return status && Date.now() - status.at < 60000 ? <p className="text-xs">Authenticated status: {status.names.length ? `In use by ${status.names.join(", ")}` : "No connected guests"}</p> : <p className="text-xs text-muted-foreground">Occupancy unknown</p>; } catch { return null; } })()}
+                <label className="text-xs text-muted-foreground">MAC address (LAN only)<input aria-label={`MAC address for ${host.name}`} value={macs[host.id] ?? ""} placeholder="00:11:22:33:44:55" className="mt-1 w-full rounded border border-border bg-background px-2 py-1 font-mono" onChange={event => { const next = { ...macs, [host.id]: event.target.value }; setMacs(next); localStorage.setItem("maho-computer-macs", JSON.stringify(next)); }} /></label>
+                {!!macs[host.id] && <Button size="sm" variant="secondary" onClick={async () => { setWakeError(null); try { await wakeComputer(macs[host.id]); } catch (e) { setWakeError(e instanceof Error ? e.message : String(e)); } }}>Wake (LAN only)</Button>}
+                {wakeError && <p role="alert" className="text-xs text-destructive">{wakeError}</p>}
                 <div className="flex flex-wrap gap-1">
                   {onFavorite && <Button variant="ghost" size="sm" aria-pressed={Boolean(host.favorite)} aria-label={host.favorite ? `Unpin ${host.name}` : `Pin ${host.name}`} onClick={() => onFavorite(host.id)}><Star className={host.favorite ? "fill-current" : ""} aria-hidden="true" />{host.favorite ? "Pinned" : "Pin"}</Button>}
                   {onRename && <Button variant="ghost" size="sm" aria-label={`Rename ${host.name}`} onClick={() => { setDraft(host.name); setEditing(host.id) }}><Pencil aria-hidden="true" />Rename</Button>}

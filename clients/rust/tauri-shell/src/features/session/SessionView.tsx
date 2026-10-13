@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { SessionCanvas } from "./SessionCanvas";
 import { SessionSettingsPanel } from "./SessionSettingsPanel";
+import { sustainedQuality, type QualitySample } from "./quality";
 
 import { useRemoteInput } from "./useRemoteInput";
 import { savedScrollSensitivity, SCROLL_STORAGE_KEY, toolbarPinned, type PresentationMode, type CursorMode } from "./presentation";
@@ -51,6 +52,7 @@ export function SessionView({
 }: SessionViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [keyboardCaptured, setKeyboardCaptured] = useState(true);
+  const [nativeCaptureStatus, setNativeCaptureStatus] = useState<string | null>(null);
   const [toolbarVisible, setToolbarVisible] = useState(true);
   const [toolbarHovered, setToolbarHovered] = useState(false);
   const [toolbarFocused, setToolbarFocused] = useState(false);
@@ -62,6 +64,7 @@ export function SessionView({
   const [pendingExit, setPendingExit] = useState<"home" | "disconnect" | null>(null);
   const [skipConfirmation, setSkipConfirmation] = useState(() => typeof window !== "undefined" && window.localStorage?.getItem("maho-skip-disconnect-confirm") === "true");
   const [rememberExit, setRememberExit] = useState(false);
+  const [qualitySamples, setQualitySamples] = useState<QualitySample[]>([]);
 
   // Derive initial snapshot from prop or connection instance
   const [snapshot, setSnapshot] = useState<ConnectionSnapshot>(() => {
@@ -98,6 +101,11 @@ export function SessionView({
   }, [propSnapshot, propState]);
 
   // Overlay state ported model from @/lib/overlay
+  useEffect(() => {
+    if (snapshot.statsStatus === "ready" && snapshot.stats) setQualitySamples(old => [...old.slice(-4), { rtt_smoothed_ms: snapshot.stats?.rtt_smoothed_ms, packet_loss_ratio: snapshot.stats?.packet_loss_ratio }]);
+  }, [snapshot.stats]);
+  const quality = sustainedQuality(qualitySamples, snapshot.phase);
+  const info = snapshot.stats?.session_info;
   const overlayStateRef = useRef(createOverlayState());
   const [expanded, setExpanded] = useState(() => overlayStateRef.current.getExpanded());
   const [fullscreenActive, setFullscreenActive] = useState(() =>
@@ -161,9 +169,10 @@ export function SessionView({
 
   // Forward remote input through useRemoteInput hook
   const remoteInput = useRemoteInput({
+    onNativeCaptureStatus: setNativeCaptureStatus,
     isConnected,
     keyboardCaptured,
-    inputBlocked: pendingExit !== null || expanded,
+    inputBlocked: pendingExit !== null || expanded || snapshot.stats?.session_info?.permissions?.keyboard === false,
     overlayExpanded: expanded,
     scrollSensitivity,
     onShortcut: (action) => {
@@ -311,6 +320,10 @@ export function SessionView({
   const optionButton = `rounded-lg px-2 py-1.5 text-xs text-muted-foreground aria-pressed:bg-white/10 aria-pressed:text-foreground hover:bg-white/5 ${focusRing}`;
 
   const metrics: Array<{ label: string; id?: string; value: string }> = [
+    { label: "Control RTT", value: ms(snapshot.stats?.rtt_smoothed_ms) },
+    { label: "Measured Mbps", value: snapshot.stats?.measured_mbps?.toFixed(2) ?? "Unknown" },
+    { label: "Packet loss", value: snapshot.stats?.packet_loss_ratio == null ? "Unknown" : `${(snapshot.stats.packet_loss_ratio * 100).toFixed(2)}%` },
+    { label: "Decoder", value: snapshot.stats?.decoder_backend ?? "Unknown" },
     { label: "Rendered FPS", value: fpsValue },
     { label: "Decode p50", id: "session-stat-p50", value: ms(snapshot.stats?.latency_p50_ms) },
     { label: "Decode p99", id: "session-stat-p99", value: ms(snapshot.stats?.latency_p99_ms) },
@@ -341,6 +354,10 @@ export function SessionView({
       className="fixed inset-0 w-full h-full overflow-hidden bg-black select-none z-[1000]"
       data-phase={snapshot.phase}
     >
+      {(snapshot.phase === "reconnecting" || snapshot.phase === "gave-up" || snapshot.phase === "ended") && <div role="status" className="absolute bottom-8 left-1/2 z-[1400] w-[min(30rem,calc(100%-32px))] -translate-x-1/2 rounded-xl border border-white/20 bg-background p-4 text-foreground">
+        <p>{snapshot.phase === "reconnecting" ? `Reconnecting (attempt ${info?.attempt ?? 1})…` : snapshot.phase === "gave-up" ? `Connection failed: ${info?.reason ?? "Unknown reason"}` : `Session ended: ${info?.ended ?? "Host disconnected"}`}</p>
+        <div className="mt-3 flex gap-3"><button onClick={() => void connection?.cancel()}>Cancel</button>{snapshot.phase === "gave-up" && <button onClick={async () => { const host = snapshot.host; await connection?.disconnect(); if (host) await connection?.connect({ host: host.ip, name: host.name }); }}>Retry</button>}</div>
+      </div>}
       <div
         id="session-overlay"
         data-ui-scope
@@ -360,7 +377,8 @@ export function SessionView({
           className="launcher-bar surface-glass pointer-events-auto flex w-full min-h-12 items-center gap-1 rounded-[14px] p-1.5 pl-3"
         >
           <div className="overlay-badge flex min-w-0 flex-1 items-center gap-2.5">
-            <span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${statusDot}`} />
+            <span className="text-[11px] capitalize" data-quality={quality} title="Quality from sustained control RTT and packet loss">{quality}</span>
+            <span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${quality === "good" ? "bg-success" : quality === "poor" ? "bg-destructive" : quality === "degraded" ? "bg-warning" : "bg-subtle-foreground"}`} />
             <span
               id="session-host-name"
               className="truncate text-[13px] font-semibold text-foreground"
@@ -457,6 +475,8 @@ export function SessionView({
             )}
 
             <dl className="grid grid-cols-2 gap-2">
+              {info?.guest_names && <p className="col-span-2 text-xs">{info.guest_names.length ? `In use by ${info.guest_names.join(", ")}` : "No connected guests"}</p>}
+              {info?.trust && <p className="col-span-2 text-xs">Granted access: {info.trust}</p>}
               <div className="col-span-2 flex items-center justify-between rounded-lg bg-white/[0.04] px-3 py-2.5 ring-1 ring-inset ring-white/[0.06]">
                 <dt className="text-[11px] font-medium text-muted-foreground">State</dt>
                 <dd className="flex items-center gap-2 text-[13px] font-medium">
@@ -485,10 +505,13 @@ export function SessionView({
             <div className="h-px bg-white/[0.06]" />
 
             <SessionSettingsPanel
+              secureAttention={snapshot.secureAttention}
+              sessionInfo={info}
               isConnected={snapshot.phase === "streaming"}
               onError={onError}
               onReleaseInputs={remoteInput.releaseAll}
             />
+            {nativeCaptureStatus && <p role="status" className="text-xs text-muted-foreground">{nativeCaptureStatus}</p>}
 
             <div role="group" aria-label="Display mode" className="flex flex-wrap gap-1 rounded-lg bg-white/5 p-1">{(["fit", "stretch", "native"] as const).map(mode => <button key={mode} type="button" className={optionButton} aria-pressed={presentation === mode} onClick={() => setPresentation(mode)}>{mode === "native" ? "1:1 (edge pan)" : mode === "fit" ? "Fit (height first)" : "Stretch"}</button>)}</div>
             <div role="group" aria-label="Cursor presentation" className="flex flex-wrap gap-1 rounded-lg bg-white/5 p-1">{(["local", "remote", "hidden"] as const).map(mode => <button key={mode} type="button" className={optionButton} aria-pressed={cursorMode === mode} onClick={() => setCursorMode(mode)}>{mode} cursor</button>)}</div>
