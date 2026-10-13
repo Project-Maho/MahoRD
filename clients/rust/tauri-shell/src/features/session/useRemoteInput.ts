@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, type RefObject } from "react";
 import { sendInput, type InputPayload } from "@/lib/ipc";
+import { canvasDisplayRect, normalizeWheel, sessionShortcut } from "./presentation";
 import {
   createHeldInputTracker,
   shouldForwardKeyboardEvent,
@@ -12,6 +13,11 @@ export interface UseRemoteInputOptions {
   canvas?: HTMLCanvasElement | RefObject<HTMLCanvasElement | null> | null;
   overlay?: HTMLElement | RefObject<HTMLElement | null> | null;
   onEscape?: () => void;
+  keyboardCaptured?: boolean;
+  inputBlocked?: boolean;
+  scrollSensitivity?: number;
+  onShortcut?: (action: "fullscreen" | "overlay" | "keyboard") => void;
+  overlayExpanded?: boolean;
 }
 
 export interface RemoteInputHandle {
@@ -153,30 +159,13 @@ export function useRemoteInput(
         eventType === "RightMouseDragged";
       if (!isMotion) flushPointerMotion();
 
-      const rect = canvas?.getBoundingClientRect?.();
+      const rect = canvas ? canvasDisplayRect(canvas) : null;
       if (!rect || rect.width <= 0 || rect.height <= 0) return;
 
-      const canvasWidth = canvas?.width || 1920;
-      const canvasHeight = canvas?.height || 1080;
-      const videoAspect =
-        canvasWidth > 0 && canvasHeight > 0
-          ? canvasWidth / canvasHeight
-          : 16 / 9;
-      const canvasAspect = rect.width / rect.height;
       let displayW = rect.width;
       let displayH = rect.height;
       let offsetX = 0;
       let offsetY = 0;
-
-      if (canvasAspect > videoAspect) {
-        displayH = rect.height;
-        displayW = displayH * videoAspect;
-        offsetX = (rect.width - displayW) / 2;
-      } else {
-        displayW = rect.width;
-        displayH = displayW / videoAspect;
-        offsetY = (rect.height - displayH) / 2;
-      }
 
       const rawX = e.clientX - rect.left - offsetX;
       const rawY = e.clientY - rect.top - offsetY;
@@ -286,7 +275,7 @@ export function useRemoteInput(
 
     // lines 1352-1361 viewport mousedown
     const handleMouseDown = (e: MouseEvent) => {
-      if (!isConnectedRef.current) return;
+      if (!isConnectedRef.current || optionsRef.current.inputBlocked) return;
       viewport?.focus?.();
       canvas?.focus?.();
       const button = mapMouseButton(e.button);
@@ -323,15 +312,27 @@ export function useRemoteInput(
       releaseLocalInputs();
     };
 
+    let restoreRemoteFocus = false;
     const handleBlur = () => {
+      restoreRemoteFocus = shouldForwardKeyboardEvent({ target: document.activeElement });
       releasePointerLock();
       releaseLocalInputs();
     };
 
+    const handleFocus = () => {
+      const target = document.activeElement;
+      const localControl = target && target !== document.body && !shouldForwardKeyboardEvent({ target });
+      if (restoreRemoteFocus && !localControl && optionsRef.current.keyboardCaptured !== false && !optionsRef.current.inputBlocked && !optionsRef.current.overlayExpanded) {
+        viewport?.focus();
+      }
+      restoreRemoteFocus = false;
+    };
+
     const handleVisibilityChange = () => {
       if (typeof document !== "undefined" && document.hidden) {
-        releasePointerLock();
-        releaseLocalInputs();
+        handleBlur();
+      } else {
+        handleFocus();
       }
     };
 
@@ -349,6 +350,7 @@ export function useRemoteInput(
     };
 
     const handleMouseMove = (e: MouseEvent) => {
+      if (optionsRef.current.inputBlocked) return;
       const isLocked =
         typeof document !== "undefined" &&
         (document.pointerLockElement === canvas ||
@@ -377,9 +379,9 @@ export function useRemoteInput(
 
     // lines 1413-1432 viewport wheel
     const handleWheel = (e: WheelEvent) => {
-      if (!isConnectedRef.current) return;
+      if (!isConnectedRef.current || optionsRef.current.inputBlocked) return;
       e.preventDefault?.();
-      const rect = canvas?.getBoundingClientRect?.() ?? {
+      const rect = canvas ? canvasDisplayRect(canvas) : {
         left: 0,
         top: 0,
         width: 1280,
@@ -389,26 +391,10 @@ export function useRemoteInput(
       const rectHeight = rect.height > 0 ? rect.height : 800;
       // Same aspect-ratio letterbox projection as sendPointerEvent: scroll
       // coordinates must map onto the video content, not the letterbox.
-      const canvasWidth = canvas?.width || 1920;
-      const canvasHeight = canvas?.height || 1080;
-      const videoAspect =
-        canvasWidth > 0 && canvasHeight > 0
-          ? canvasWidth / canvasHeight
-          : 16 / 9;
-      const canvasAspect = rectWidth / rectHeight;
       let displayW = rectWidth;
       let displayH = rectHeight;
       let offsetX = 0;
       let offsetY = 0;
-      if (canvasAspect > videoAspect) {
-        displayH = rectHeight;
-        displayW = displayH * videoAspect;
-        offsetX = (rectWidth - displayW) / 2;
-      } else {
-        displayW = rectWidth;
-        displayH = displayW / videoAspect;
-        offsetY = (rectHeight - displayH) / 2;
-      }
       const rawX = Math.max(0, Math.min(e.clientX - rect.left - offsetX, displayW));
       const rawY = Math.max(0, Math.min(e.clientY - rect.top - offsetY, displayH));
 
@@ -425,15 +411,31 @@ export function useRemoteInput(
         view_width: displayW,
         view_height: displayH,
         modifiers: mod,
-        scroll_dx: e.deltaX,
-        scroll_dy: e.deltaY,
+        scroll_dx: normalizeWheel(e.deltaX, e.deltaMode, viewport?.clientWidth || displayW, optionsRef.current.scrollSensitivity ?? 1),
+        scroll_dy: normalizeWheel(e.deltaY, e.deltaMode, viewport?.clientHeight || displayH, optionsRef.current.scrollSensitivity ?? 1),
       }).catch((err) => {
         console.error("send_input wheel error:", err);
       });
     };
 
     // lines 1434-1489 window keydown/keyup
+    const localKeys = new Set<string>();
+    const localModifierUps = new Set<string>();
     const handleKeyDown = (e: KeyboardEvent) => {
+      const shortcut = sessionShortcut(e);
+      if (shortcut || (e.key === "Escape" && optionsRef.current.overlayExpanded)) {
+        e.preventDefault?.();
+        localKeys.add(e.key.toLowerCase());
+        if (e.ctrlKey) localModifierUps.add("Control");
+        if (e.shiftKey) localModifierUps.add("Shift");
+        releaseLocalInputs();
+        if (!e.repeat) {
+          if (shortcut) optionsRef.current.onShortcut?.(shortcut);
+          else optionsRef.current.onEscape?.();
+        }
+        return;
+      }
+      if (optionsRef.current.keyboardCaptured === false || optionsRef.current.inputBlocked) return;
       const target = e.target as { tagName?: unknown; id?: unknown } | null;
       if (!shouldForwardKeyboardEvent({ target })) {
         if (e.key === "Escape") {
@@ -473,6 +475,11 @@ export function useRemoteInput(
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
+      if (localKeys.delete(e.key?.toLowerCase()) || localModifierUps.delete(e.key) || sessionShortcut(e)) {
+        e.preventDefault?.();
+        return;
+      }
+      if (optionsRef.current.keyboardCaptured === false || optionsRef.current.inputBlocked) return;
       const target = e.target as { tagName?: unknown; id?: unknown } | null;
       if (!shouldForwardKeyboardEvent({ target })) return;
       if (!isConnectedRef.current) return;
@@ -526,6 +533,7 @@ export function useRemoteInput(
       window.addEventListener("keydown", handleKeyDown as EventListener);
       window.addEventListener("keyup", handleKeyUp as EventListener);
       window.addEventListener("blur", handleBlur as EventListener);
+      window.addEventListener("focus", handleFocus as EventListener);
     }
 
     if (typeof document !== "undefined") {
@@ -571,6 +579,7 @@ export function useRemoteInput(
         window.removeEventListener("keydown", handleKeyDown as EventListener);
         window.removeEventListener("keyup", handleKeyUp as EventListener);
         window.removeEventListener("blur", handleBlur as EventListener);
+        window.removeEventListener("focus", handleFocus as EventListener);
       }
 
       if (typeof document !== "undefined") {

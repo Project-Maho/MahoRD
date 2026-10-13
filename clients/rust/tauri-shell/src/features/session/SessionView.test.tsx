@@ -524,6 +524,23 @@ describe("SessionView", () => {
     expect(agentReleaseAllCalls).toBeGreaterThanOrEqual(1);
   });
 
+  for (const action of ["home", "disconnect"]) {
+    it(`confirms ${action} before invoking the session exit callback`, async () => {
+      globalThis.localStorage?.removeItem("maho-skip-disconnect-confirm");
+      const container = document.createElement("div");
+      const root = createRoot(container);
+      let exits = 0;
+      await act(async () => root.render(React.createElement(SessionView, { connection: createMockConnection("streaming"), onHome: () => exits++, onDisconnect: () => exits++ })));
+      await act(async () => triggerClick(findElements(container, el => el.getAttribute("id") === `btn-${action}`)[0]));
+      expect(exits).toBe(0);
+      expect(findElements(container, el => el.getAttribute("id") === "exit-title").length).toBe(1);
+      const confirm = findElements(container, el => el.tagName === "BUTTON" && getAllText(el) === "End session")[0];
+      await act(async () => triggerClick(confirm));
+      expect(exits).toBe(1);
+      await act(async () => root.unmount());
+    });
+  }
+
   describe("App phase routing", () => {
     it("renders the launcher when connection phase is idle", async () => {
       const container = document.createElement("div");

@@ -127,6 +127,17 @@ export const STREAM_CODEC_OPTIONS: { label: string; value: StreamCodec }[] = [
   { label: "HEVC", value: "hevc" },
 ];
 
+export function confirmedStreamConfig(state: StreamState) {
+  const active = state.active;
+  if (!active) return null;
+  const display = state.displays.find(d => d.index === active.displayIndex);
+  const scale = display && display.width > 0 && display.height > 0
+    ? Math.min(active.width / display.width, active.height / display.height)
+    : null;
+  const codec: StreamCodec | null = active.codec === "auto" ? "auto" : active.codec === "h264" ? "h264" : active.codec === "hevc" ? "hevc" : null;
+  return { scale, fps: active.fps, codec, displayIndex: active.displayIndex };
+}
+
 export function SessionSettingsPanel({
   isConnected = true,
   onReleaseInputs,
@@ -144,6 +155,16 @@ export function SessionSettingsPanel({
   const [selectedDisplayIndex, setSelectedDisplayIndex] = useState<number>(0);
   const [streamApplying, setStreamApplying] = useState(false);
   const [streamApplyError, setStreamApplyError] = useState<string | null>(null);
+  const editedRef = useRef({ scale: false, fps: false, codec: false, display: false });
+  const syncStream = (state: StreamState) => {
+    setStreamState(state);
+    const confirmed = confirmedStreamConfig(state);
+    if (!confirmed) return;
+    if (!editedRef.current.scale && confirmed.scale !== null) setStreamScale(confirmed.scale);
+    if (!editedRef.current.fps) setStreamFps(confirmed.fps);
+    if (!editedRef.current.codec && confirmed.codec !== null) setStreamCodec(confirmed.codec);
+    if (!editedRef.current.display) setSelectedDisplayIndex(confirmed.displayIndex);
+  };
 
   // Audio state
   const [audioState, setAudioState] = useState<DesktopAudioStatus | null>(null);
@@ -167,7 +188,7 @@ export function SessionSettingsPanel({
       try {
         const state = await getStreamState();
         if (!mounted || !state) return;
-        setStreamState(state);
+        syncStream(state);
       } catch (err: any) {
         if (!mounted) return;
       }
@@ -185,18 +206,23 @@ export function SessionSettingsPanel({
     setStreamApplying(true);
     setStreamApplyError(null);
     try {
+      const confirmed = streamState ? confirmedStreamConfig(streamState) : null;
+      if ((!editedRef.current.scale && confirmed?.scale == null) || (!editedRef.current.codec && confirmed?.codec == null)) {
+        setStreamApplyError("Current scale or codec is unknown. Select them explicitly before applying; display-only switching cannot preserve unknown settings.");
+        return;
+      }
       if (typeof setStreamOptions === "function") {
         await setStreamOptions({
-          scale: streamScale,
-          fps: streamFps,
-          codec: streamCodec,
+          scale: editedRef.current.scale ? streamScale : confirmed?.scale ?? streamScale,
+          fps: editedRef.current.fps ? streamFps : confirmed?.fps ?? streamFps,
+          codec: editedRef.current.codec ? streamCodec : confirmed?.codec ?? streamCodec,
           displayIndex: selectedDisplayIndex,
         });
       }
       // Re-fetch stream state immediately after applying
       if (typeof getStreamState === "function") {
         const state = await getStreamState();
-        if (state) setStreamState(state);
+        if (state) syncStream(state);
       }
     } catch (err: any) {
       const errStr = String(err?.message ?? err ?? "Failed to apply stream options");
@@ -205,7 +231,7 @@ export function SessionSettingsPanel({
     } finally {
       setStreamApplying(false);
     }
-  }, [streamScale, streamFps, streamCodec, selectedDisplayIndex, onError]);
+  }, [streamScale, streamFps, streamCodec, selectedDisplayIndex, streamState, onError]);
 
   // Handle bitrate change: persists to localStorage and calls setBitrate when connected
   const handleBitrateChange = useCallback(
@@ -395,7 +421,7 @@ export function SessionSettingsPanel({
     ? ({ auto: "Auto", h264: "H.264", hevc: "HEVC" } as Record<string, string>)[activeStream.codec] ?? activeStream.codec
     : "";
   const activeStatusText = activeStream
-    ? `Host: ${activeStream.width}x${activeStream.height} · ${activeStream.fps} fps · ${activeCodecLabel} · display ${activeStream.displayIndex}`
+    ? `Host: ${activeStream.width}x${activeStream.height} · ${activeStream.fps} fps · ${activeCodecLabel} · display ${activeStream.displayIndex} · confirmed target ${activeStream.bitrate == null ? "unknown" : `${(activeStream.bitrate / 1_000_000).toFixed(1)} Mbps`}`
     : "Waiting for host confirmation";
 
   const displays = streamState?.displays ?? [];
@@ -437,7 +463,7 @@ export function SessionSettingsPanel({
                 type="button"
                 aria-pressed={pressed}
                 disabled={streamControlsDisabled}
-                onClick={() => setStreamScale(opt.value)}
+                onClick={() => { editedRef.current.scale = true; setStreamScale(opt.value); }}
                 className={`rounded-lg text-[12.5px] font-medium tabular-nums transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring disabled:opacity-50 ${
                   pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
                 }`}
@@ -469,7 +495,7 @@ export function SessionSettingsPanel({
                 type="button"
                 aria-pressed={pressed}
                 disabled={streamControlsDisabled}
-                onClick={() => setStreamFps(fpsVal)}
+                onClick={() => { editedRef.current.fps = true; setStreamFps(fpsVal); }}
                 className={`rounded-lg text-[12.5px] font-medium tabular-nums transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring disabled:opacity-50 ${
                   pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
                 }`}
@@ -501,7 +527,7 @@ export function SessionSettingsPanel({
                 type="button"
                 aria-pressed={pressed}
                 disabled={streamControlsDisabled}
-                onClick={() => setStreamCodec(codecOpt.value)}
+                onClick={() => { editedRef.current.codec = true; setStreamCodec(codecOpt.value); }}
                 className={`rounded-lg text-[12.5px] font-medium transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring disabled:opacity-50 ${
                   pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
                 }`}
@@ -534,7 +560,7 @@ export function SessionSettingsPanel({
                   type="button"
                   aria-pressed={pressed}
                   disabled={streamControlsDisabled}
-                  onClick={() => setSelectedDisplayIndex(disp.index)}
+                  onClick={() => { editedRef.current.display = true; setSelectedDisplayIndex(disp.index); }}
                   className={`h-8 truncate rounded-lg px-2.5 text-left text-[12.5px] font-medium transition-colors duration-150 outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring disabled:opacity-50 ${
                     pressed ? "surface-raised text-foreground" : "text-muted-foreground hover:text-foreground"
                   }`}

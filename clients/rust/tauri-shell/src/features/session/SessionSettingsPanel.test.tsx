@@ -17,7 +17,7 @@ let currentStreamState = {
     fps: 60,
     codec: "h264",
     displayIndex: 0,
-    bitrate: 50,
+    bitrate: 50_000_000,
   } as any,
   displays: [
     { index: 0, name: "Display 1", width: 1920, height: 1080, primary: true },
@@ -123,6 +123,14 @@ if (typeof document !== "undefined" && typeof document.createElement === "functi
   document.createElement = function (tagName: string, options?: any) {
     const el = origCreateElement(tagName, options);
     if (el) {
+      // The shared lightweight DOM needs recursive textContent, like real DOM.
+      if (Array.isArray(el.childNodes) && !Object.getOwnPropertyDescriptor(el, "textContent")?.get) {
+        Object.defineProperty(el, "textContent", {
+          configurable: true,
+          get() { return this._textContent ?? this.childNodes.map((child: { textContent?: string }) => child.textContent ?? "").join(""); },
+          set(value: string) { this._textContent = String(value); this.childNodes = [document.createTextNode(value)]; },
+        });
+      }
       if (typeof (el as any).querySelectorAll !== "function") {
         (el as any).querySelectorAll = function (selector: string) {
           const matches: any[] = [];
@@ -221,6 +229,7 @@ import {
   toggleAudioMuted,
   applyAudioDeviceSelection,
   refreshAudioDeviceList,
+  confirmedStreamConfig,
 } from "./SessionSettingsPanel";
 
 describe("SessionSettingsPanel", () => {
@@ -456,6 +465,11 @@ describe("SessionSettingsPanel", () => {
         root.unmount();
       });
     }
+  });
+
+  it("a display-only switch preserves confirmed scale fps and codec", async () => {
+    currentStreamState.active = { width: 960, height: 540, fps: 30, codec: "hevc", displayIndex: 0, bitrate: 25_000_000 };
+    expect(confirmedStreamConfig(currentStreamState)).toEqual({ scale: 0.5, fps: 30, codec: "hevc", displayIndex: 0 });
   });
 
   it("renders rejection alert when lastReject is present and displays waiting text when active is null", async () => {

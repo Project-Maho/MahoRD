@@ -13,6 +13,7 @@ import { SessionCanvas } from "./SessionCanvas";
 import { SessionSettingsPanel } from "./SessionSettingsPanel";
 
 import { useRemoteInput } from "./useRemoteInput";
+import { savedScrollSensitivity, SCROLL_STORAGE_KEY, toolbarPinned, type PresentationMode, type CursorMode } from "./presentation";
 import {
   pollFrameRaw,
   agentReleaseAll,
@@ -49,6 +50,18 @@ export function SessionView({
   onError,
 }: SessionViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [keyboardCaptured, setKeyboardCaptured] = useState(true);
+  const [toolbarVisible, setToolbarVisible] = useState(true);
+  const [toolbarHovered, setToolbarHovered] = useState(false);
+  const [toolbarFocused, setToolbarFocused] = useState(false);
+  const [presentation, setPresentation] = useState<PresentationMode>("fit");
+  const [cursorMode, setCursorMode] = useState<CursorMode>("remote");
+  const [scrollSensitivity, setScrollSensitivity] = useState(savedScrollSensitivity);
+  const [pointerLocked, setPointerLocked] = useState(false);
+  const [pointerError, setPointerError] = useState<string | null>(null);
+  const [pendingExit, setPendingExit] = useState<"home" | "disconnect" | null>(null);
+  const [skipConfirmation, setSkipConfirmation] = useState(() => typeof window !== "undefined" && window.localStorage?.getItem("maho-skip-disconnect-confirm") === "true");
+  const [rememberExit, setRememberExit] = useState(false);
 
   // Derive initial snapshot from prop or connection instance
   const [snapshot, setSnapshot] = useState<ConnectionSnapshot>(() => {
@@ -147,13 +160,26 @@ export function SessionView({
   const isConnected = snapshot.phase === "streaming";
 
   // Forward remote input through useRemoteInput hook
-  useRemoteInput({
+  const remoteInput = useRemoteInput({
     isConnected,
+    keyboardCaptured,
+    inputBlocked: pendingExit !== null || expanded,
+    overlayExpanded: expanded,
+    scrollSensitivity,
+    onShortcut: (action) => {
+      if (action === "fullscreen") void handleToggleFullscreen();
+      if (action === "overlay") handleToggleExpand();
+      if (action === "keyboard") {
+        void remoteInput.releaseAll();
+        if (document.pointerLockElement) document.exitPointerLock();
+        setKeyboardCaptured(!keyboardCaptured);
+        if (!keyboardCaptured) getDomElement("viewport")?.focus();
+      }
+    },
     onEscape: () => {
       if (overlayStateRef.current.getExpanded()) {
         overlayStateRef.current.setExpanded(false);
-        const btnExpand = getDomElement("btn-expand");
-        btnExpand?.focus();
+        getDomElement("viewport")?.focus();
       }
     },
   });
@@ -179,6 +205,22 @@ export function SessionView({
   }, []);
 
   const handleHome = () => {
+    if (!skipConfirmation && isConnected) {
+      void remoteInput.releaseAll();
+      setPendingExit("home");
+      return;
+    }
+    finishExit("home");
+  };
+
+  const finishExit = (action: "home" | "disconnect") => {
+    void remoteInput.releaseAll();
+    if (document.pointerLockElement) document.exitPointerLock();
+    if (action === "disconnect") {
+      if (onDisconnect) onDisconnect();
+      else if (connection) void connection.disconnect();
+      return;
+    }
     if (onHome) {
       onHome();
     } else if (connection) {
@@ -187,15 +229,20 @@ export function SessionView({
   };
 
   const handleDisconnect = () => {
-    if (onDisconnect) {
-      onDisconnect();
-    } else if (connection) {
-      connection.disconnect();
+    if (!skipConfirmation && isConnected) {
+      void remoteInput.releaseAll();
+      setPendingExit("disconnect");
+      return;
     }
+    finishExit("disconnect");
   };
 
   const handleToggleExpand = () => {
+    void remoteInput.releaseAll();
+    if (document.pointerLockElement && typeof document.exitPointerLock === "function") document.exitPointerLock();
+    setToolbarVisible(true);
     overlayStateRef.current.toggleExpanded();
+    if (!overlayStateRef.current.getExpanded()) getDomElement("viewport")?.focus();
   };
 
   const handleToggleFullscreen = async () => {
@@ -206,7 +253,8 @@ export function SessionView({
         await containerRef.current.requestFullscreen();
       }
     } catch (err) {
-      console.error("Fullscreen toggle failed:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      setPointerError(`Fullscreen toggle failed: ${message}`);
     }
   };
 
@@ -219,6 +267,29 @@ export function SessionView({
 
   const showConnectingModal =
     snapshot.phase === "connecting" || snapshot.phase === "waiting-video";
+  useEffect(() => {
+    if (toolbarPinned(expanded, toolbarHovered, toolbarFocused, showConnectingModal, pendingExit !== null)) {
+      setToolbarVisible(true);
+      return;
+    }
+    const timer = setTimeout(() => setToolbarVisible(false), 2500);
+    return () => clearTimeout(timer);
+  }, [expanded, toolbarHovered, toolbarFocused, showConnectingModal, pendingExit, toolbarVisible]);
+
+  useEffect(() => {
+    const changed = () => setPointerLocked(Boolean(document.pointerLockElement));
+    const failed = () => setPointerError("Relative mouse unavailable. Click Resume relative mouse to retry.");
+    document.addEventListener("pointerlockchange", changed);
+    document.addEventListener("pointerlockerror", failed);
+    return () => {
+      document.removeEventListener("pointerlockchange", changed);
+      document.removeEventListener("pointerlockerror", failed);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (pendingExit) getDomElement("exit-cancel")?.focus();
+  }, [pendingExit]);
   const isActive =
     snapshot.phase === "waiting-video" || snapshot.phase === "streaming";
   const isWaiting = snapshot.phase === "waiting-video";
@@ -237,6 +308,7 @@ export function SessionView({
   const focusRing =
     "outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring";
   const glassIcon = `inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-white/[0.08] hover:text-foreground ${focusRing}`;
+  const optionButton = `rounded-lg px-2 py-1.5 text-xs text-muted-foreground aria-pressed:bg-white/10 aria-pressed:text-foreground hover:bg-white/5 ${focusRing}`;
 
   const metrics: Array<{ label: string; id?: string; value: string }> = [
     { label: "Rendered FPS", value: fpsValue },
@@ -274,10 +346,17 @@ export function SessionView({
         data-ui-scope
         role="group"
         aria-label="Session controls"
+        onMouseEnter={() => { setToolbarHovered(true); setToolbarVisible(true); }}
+        onMouseLeave={() => setToolbarHovered(false)}
+        onFocusCapture={() => { setToolbarFocused(true); setToolbarVisible(true); }}
+        onBlurCapture={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setToolbarFocused(false); }}
         className="@container absolute top-3 left-1/2 -translate-x-1/2 z-[1100] flex flex-col items-center gap-2 pointer-events-none w-[min(44rem,calc(100%-24px))]"
       >
+        {!toolbarVisible && <button type="button" className="surface-glass pointer-events-auto rounded-full px-3 py-1 text-xs text-foreground" aria-label="Reveal session controls (Ctrl+Shift+M)" onClick={() => setToolbarVisible(true)}>Session controls</button>}
         <div
           id="launcher-bar"
+          hidden={!toolbarVisible}
+          style={{ display: toolbarVisible ? undefined : "none" }}
           className="launcher-bar surface-glass pointer-events-auto flex w-full min-h-12 items-center gap-1 rounded-[14px] p-1.5 pl-3"
         >
           <div className="overlay-badge flex min-w-0 flex-1 items-center gap-2.5">
@@ -311,6 +390,7 @@ export function SessionView({
           </div>
 
           <span aria-hidden="true" className="mx-1 h-5 w-px shrink-0 bg-white/10" />
+          <button type="button" aria-pressed={keyboardCaptured} aria-label={keyboardCaptured ? "Keyboard captured" : "Keyboard released"} title="Ctrl+Shift+Z: capture/release keyboard" className={`shrink-0 px-2 text-xs text-foreground ${focusRing}`} onClick={() => { void remoteInput.releaseAll(); if (document.pointerLockElement) document.exitPointerLock(); setKeyboardCaptured(!keyboardCaptured); if (!keyboardCaptured) getDomElement("viewport")?.focus(); }}><span className="@max-[34rem]:hidden">Keyboard </span>{keyboardCaptured ? "Captured" : "Released"}</button>
 
           <button
             type="button"
@@ -407,7 +487,21 @@ export function SessionView({
             <SessionSettingsPanel
               isConnected={snapshot.phase === "streaming"}
               onError={onError}
+              onReleaseInputs={remoteInput.releaseAll}
             />
+
+            <div role="group" aria-label="Display mode" className="flex flex-wrap gap-1 rounded-lg bg-white/5 p-1">{(["fit", "stretch", "native"] as const).map(mode => <button key={mode} type="button" className={optionButton} aria-pressed={presentation === mode} onClick={() => setPresentation(mode)}>{mode === "native" ? "1:1 (edge pan)" : mode === "fit" ? "Fit (height first)" : "Stretch"}</button>)}</div>
+            <div role="group" aria-label="Cursor presentation" className="flex flex-wrap gap-1 rounded-lg bg-white/5 p-1">{(["local", "remote", "hidden"] as const).map(mode => <button key={mode} type="button" className={optionButton} aria-pressed={cursorMode === mode} onClick={() => setCursorMode(mode)}>{mode} cursor</button>)}</div>
+            <div role="group" aria-label="Scroll sensitivity" className="flex flex-wrap items-center gap-1 rounded-lg bg-white/5 p-1 text-xs">Scroll{[0.25, 0.5, 1, 2, 4].map(v => <button key={v} type="button" className={optionButton} aria-pressed={scrollSensitivity === v} onClick={() => { setScrollSensitivity(v); window.localStorage.setItem(SCROLL_STORAGE_KEY, String(v)); }}>{v}x</button>)}</div>
+            <button type="button" className={optionButton} disabled={!isConnected} aria-pressed={pointerLocked} onClick={async () => {
+              if (pointerLocked) { document.exitPointerLock(); return; }
+              const viewport = getDomElement("viewport");
+              if (!viewport?.requestPointerLock) { setPointerError("Relative mouse is unavailable in this webview."); return; }
+              try { await viewport.requestPointerLock(); setPointerError(null); overlayStateRef.current.setExpanded(false); viewport.focus(); }
+              catch (error) { setPointerError(error instanceof Error ? error.message : String(error)); }
+            }}>{pointerLocked ? "Release relative mouse" : "Resume relative mouse"}</button>
+            {pointerError && <p role="alert" className="text-xs text-destructive">{pointerError}</p>}
+            <p className="text-xs text-muted-foreground">Ctrl+Shift+F: fullscreen. Ctrl+Shift+M: controls. Ctrl+Shift+Z: capture/release keyboard. Escape: close controls / release relative mouse. Ctrl shortcuts also apply on macOS.</p>
 
             <div className="h-px bg-white/[0.06]" />
 
@@ -516,10 +610,14 @@ export function SessionView({
         </div>
       )}
 
+      {pendingExit && <div role="dialog" aria-modal="true" aria-labelledby="exit-title" data-ui-scope className="absolute inset-0 z-[1300] flex items-center justify-center bg-black/65" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setPendingExit(null); getDomElement("viewport")?.focus(); } }}><div className="surface-glass rounded-xl p-5 text-foreground"><h2 id="exit-title">End this session?</h2><label><input type="checkbox" checked={rememberExit} onChange={(e) => setRememberExit(e.target.checked)} /> Don't ask again</label><div className="flex gap-3 pt-4"><button id="exit-cancel" type="button" onClick={() => { setPendingExit(null); getDomElement("viewport")?.focus(); }}>Cancel</button><button type="button" onClick={() => { if (rememberExit) { window.localStorage.setItem("maho-skip-disconnect-confirm", "true"); setSkipConfirmation(true); } const action = pendingExit; setPendingExit(null); finishExit(action); }}>End session</button></div></div></div>}
+
       <SessionCanvas
         active={isActive && !renderError}
         pollFrame={handlePollFrame}
         onError={handleCanvasError}
+        presentation={presentation}
+        cursorMode={cursorMode}
       />
     </div>
   );

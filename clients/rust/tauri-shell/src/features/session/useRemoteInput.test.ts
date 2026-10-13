@@ -268,6 +268,65 @@ describe("useRemoteInput", () => {
     sentInputs = [];
   });
 
+  for (const [key, action] of [["f", "fullscreen"], ["m", "overlay"], ["z", "keyboard"]] as const) {
+    it(`consumes ${action} shortcut and its keyup before remote forwarding`, async () => {
+      const container = document.createElement("div");
+      const root = createRoot(container);
+      const actions: string[] = [];
+      const viewport = createFakeDomTarget("viewport");
+      await act(async () => root.render(React.createElement(HookTestRig, { viewport, canvas: createFakeDomTarget("video-canvas", "canvas"), onShortcut: value => actions.push(value) })));
+      for (const type of ["keydown", "keyup"]) {
+        const event = new Event(type);
+        Object.assign(event, { key, keyCode: key.toUpperCase().charCodeAt(0), ctrlKey: true, shiftKey: true });
+        Object.defineProperty(event, "target", { value: viewport });
+        window.dispatchEvent(event);
+      }
+      expect(actions).toEqual([action]);
+      expect(sentInputs).toEqual([]);
+      await act(async () => root.unmount());
+    });
+  }
+
+  it("closes expanded controls with Escape from remote focus without forwarding", async () => {
+    const root = createRoot(document.createElement("div"));
+    const viewport = createFakeDomTarget("viewport");
+    let closed = 0;
+    await act(async () => root.render(React.createElement(HookTestRig, { viewport, overlayExpanded: true, onEscape: () => closed++ })));
+    const event = new Event("keydown");
+    Object.assign(event, { key: "Escape", keyCode: 27 });
+    Object.defineProperty(event, "target", { value: viewport });
+    window.dispatchEvent(event);
+    expect(closed).toBe(1);
+    expect(sentInputs).toEqual([]);
+    await act(async () => root.unmount());
+  });
+
+  it("does not forward ordinary keyboard input while detached", async () => {
+    const root = createRoot(document.createElement("div"));
+    const viewport = createFakeDomTarget("viewport");
+    await act(async () => root.render(React.createElement(HookTestRig, { viewport, keyboardCaptured: false })));
+    const event = new Event("keydown");
+    Object.assign(event, { key: "a", keyCode: 65 });
+    Object.defineProperty(event, "target", { value: viewport });
+    window.dispatchEvent(event);
+    expect(sentInputs).toEqual([]);
+    await act(async () => root.unmount());
+  });
+
+  it("restores remote viewport focus after blur when remote owned it", async () => {
+    const root = createRoot(document.createElement("div"));
+    const viewport = createFakeDomTarget("viewport");
+    const oldActive = document.activeElement;
+    await act(async () => root.render(React.createElement(HookTestRig, { viewport })));
+    Object.defineProperty(document, "activeElement", { value: viewport, configurable: true });
+    window.dispatchEvent(new Event("blur"));
+    Object.defineProperty(document, "activeElement", { value: document.body, configurable: true });
+    window.dispatchEvent(new Event("focus"));
+    expect(viewport.focusCalls).toBe(1);
+    Object.defineProperty(document, "activeElement", { value: oldActive, configurable: true });
+    await act(async () => root.unmount());
+  });
+
   it("keydown with repeat true is forwarded so held keys repeat on the host", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

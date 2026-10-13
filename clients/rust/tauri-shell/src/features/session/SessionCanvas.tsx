@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { canvasDisplayRect, displayRect, type PresentationMode, type CursorMode } from "./presentation";
 import {
   createRenderer,
   parseFrame,
@@ -10,6 +11,8 @@ export interface Props {
   pollFrame: () => Promise<ArrayBuffer | null>;
   onCursor?: (c: { x: number; y: number; visible: boolean } | null) => void;
   onError?: (message: string) => void;
+  presentation?: PresentationMode;
+  cursorMode?: CursorMode;
 }
 
 export type SessionCanvasProps = Props;
@@ -29,28 +32,10 @@ export function updateRemoteCursor(
     cursorEl.style.display = "none";
     return;
   }
-  const rect = canvas.getBoundingClientRect();
+  const rect = canvasDisplayRect(canvas);
   if (rect.width <= 0 || rect.height <= 0) return;
-  const videoAspect =
-    canvas.width > 0 && canvas.height > 0 ? canvas.width / canvas.height : 16 / 9;
-  const canvasAspect = rect.width / rect.height;
-  let displayW = rect.width;
-  let displayH = rect.height;
-  let offsetX = 0;
-  let offsetY = 0;
-
-  if (canvasAspect > videoAspect) {
-    displayH = rect.height;
-    displayW = displayH * videoAspect;
-    offsetX = (rect.width - displayW) / 2;
-  } else {
-    displayW = rect.width;
-    displayH = displayW / videoAspect;
-    offsetY = (rect.height - displayH) / 2;
-  }
-
-  const px = rect.left + offsetX + cx * displayW;
-  const py = rect.top + offsetY + cy * displayH;
+  const px = rect.left + cx * rect.width;
+  const py = rect.top + cy * rect.height;
   cursorEl.style.display = "block";
   cursorEl.style.transform = `translate(${px}px, ${py}px)`;
 }
@@ -60,6 +45,8 @@ export function SessionCanvas({
   pollFrame,
   onCursor,
   onError,
+  presentation = "fit",
+  cursorMode = "remote",
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const cursorRef = useRef<HTMLDivElement | null>(null);
@@ -68,6 +55,27 @@ export function SessionCanvas({
   const pollFrameRef = useRef(pollFrame);
   const onCursorRef = useRef(onCursor);
   const onErrorRef = useRef(onError);
+  const presentationRef = useRef(presentation);
+  const cursorModeRef = useRef(cursorMode);
+  presentationRef.current = presentation;
+  cursorModeRef.current = cursorMode;
+  const panRef = useRef({ x: 0.5, y: 0.5 });
+
+  const sizeCanvas = () => {
+    const canvas = canvasRef.current;
+    const viewport = canvas?.parentElement;
+    if (!canvas || !viewport || !viewport.clientWidth || !viewport.clientHeight) return;
+    const rect = displayRect(viewport.clientWidth, viewport.clientHeight, canvas.width || 1920, canvas.height || 1080, presentationRef.current, panRef.current.x, panRef.current.y);
+    Object.assign(canvas.style, { position: "absolute", maxWidth: "none", maxHeight: "none", width: `${rect.width}px`, height: `${rect.height}px`, left: `${rect.left}px`, top: `${rect.top}px` });
+  };
+
+  useEffect(() => {
+    sizeCanvas();
+    if (typeof ResizeObserver === "undefined" || !canvasRef.current?.parentElement) return;
+    const observer = new ResizeObserver(sizeCanvas);
+    observer.observe(canvasRef.current.parentElement);
+    return () => observer.disconnect();
+  }, [presentation]);
 
   useEffect(() => {
     pollFrameRef.current = pollFrame;
@@ -169,6 +177,7 @@ export function SessionCanvas({
             if (canvas && frame.width > 0 && frame.height > 0) {
               if (canvas.width !== frame.width) canvas.width = frame.width;
               if (canvas.height !== frame.height) canvas.height = frame.height;
+              sizeCanvas();
             }
           }
           if (frame?.cursor) {
@@ -177,10 +186,11 @@ export function SessionCanvas({
               cursorRef.current,
               frame.cursor.x,
               frame.cursor.y,
-              frame.cursor.visible
+              frame.cursor.visible && cursorModeRef.current === "remote"
             );
             onCursorRef.current?.(frame.cursor);
           } else if (frame) {
+            if (cursorRef.current) cursorRef.current.style.display = "none";
             onCursorRef.current?.(null);
           }
         }
@@ -210,6 +220,13 @@ export function SessionCanvas({
       id="viewport"
       tabIndex={0}
       className="relative w-full h-full flex items-center justify-center overflow-hidden"
+      style={{ cursor: cursorMode === "local" ? "default" : "none" }}
+      onMouseMove={(e) => {
+        if (presentation !== "native") return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        panRef.current = { x: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)) };
+        sizeCanvas();
+      }}
     >
       <canvas
         id="video-canvas"
@@ -224,7 +241,7 @@ export function SessionCanvas({
         className="remote-cursor"
         aria-hidden="true"
         style={{
-          position: "absolute",
+          position: "fixed",
           width: "18px",
           height: "18px",
           pointerEvents: "none",
