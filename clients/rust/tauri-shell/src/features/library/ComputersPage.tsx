@@ -6,12 +6,15 @@ import { cn } from "@/lib/utils"
 import { LibraryToolbar } from "@/features/library/LibraryToolbar"
 import { HostGrid } from "@/features/library/HostGrid"
 import { DirectConnect } from "@/features/library/DirectConnect"
+import { ConnectRecovery, connectionAttempts } from "@/features/library/ConnectRecovery"
 import {
   isNativeAvailable,
   invokeCommand,
   agentReleaseAll,
   forgetPairing,
   hideHost,
+  listPairings,
+  listHiddenHosts,
   type HostItem,
   type MahoCommand,
 } from "@/lib/ipc"
@@ -19,11 +22,13 @@ import {
   createLibrary,
   type Library,
   type LibrarySnapshot,
+  selectHosts,
 } from "@/lib/library"
 import {
   createConnection,
   type ConnectionInstance,
   type ConnectionSnapshot,
+  type ValidateConnectionOptions,
 } from "@/lib/connection"
 
 export interface LibraryHost extends HostItem {
@@ -50,6 +55,11 @@ export function ComputersPage({
         invokeCommand(cmd as MahoCommand, args[0] as Record<string, unknown> | undefined),
       storage: typeof window !== "undefined" ? window.localStorage : null,
       nativeAvailable: native,
+      hiddenNames: listHiddenHosts,
+      savedHosts: async () => (await listPairings()).flatMap(pairing => pairing.lastEndpoint ? [{
+        id: pairing.id, name: pairing.hostName, ip: pairing.lastEndpoint.host,
+        os: "", online: false, paired: true, tcp_port: pairing.lastEndpoint.tcpPort, udp_port: pairing.lastEndpoint.udpPort,
+      }] : []),
     })
   }, [native])
 
@@ -79,6 +89,21 @@ export function ComputersPage({
   )
 
   const [refreshing, setRefreshing] = useState(false)
+  const lastRequest = useRef<ValidateConnectionOptions | null>(connectionAttempts.get(connection) || null)
+  const connectRequest = async (request: ValidateConnectionOptions) => {
+    if (connection.snapshot().busy) return false
+    lastRequest.current = { ...request }
+    connectionAttempts.set(connection, { ...request })
+    const pending = connection.connect(request)
+    const generation = connection.snapshot().generation
+    const ok = await pending
+    const state = connection.snapshot()
+    if (ok && state.generation === generation && !state.error && (state.phase === "waiting-video" || state.phase === "streaming")) {
+      const known = library.snapshot().hosts.find(host => host.id === request.pairingId || host.ip === request.host)
+      library.recordConnection(known || { id: request.host || "", name: request.name || request.host || "", ip: request.host || "", os: "", paired: false, online: true })
+    }
+    return ok
+  }
 
   const [removeTarget, setRemoveTarget] = useState<{
     id: string;
@@ -202,7 +227,7 @@ export function ComputersPage({
     if (!native) return
     const raw = libSnapshot.hosts.find((h) => h.id === host.id)
     if (raw && isPairedHost(raw)) {
-      await connection.connect({
+      await connectRequest({
         host: host.ip,
         name: host.name,
         pairingId: host.id,
@@ -211,7 +236,7 @@ export function ComputersPage({
       })
     } else {
       if (connection.snapshot().busy) return
-      await connection.connect({
+      await connectRequest({
         host: host.ip, name: host.name, pin: null, pairingId: null,
         tcpPort: raw?.tcp_port ?? null, udpPort: raw?.udp_port ?? null,
       })
@@ -247,7 +272,7 @@ export function ComputersPage({
     setDirectError(null)
     const ports = selectedPorts.tcpPort ? selectedPorts : {}
 
-    const ok = await connection.connect({
+    const ok = await connectRequest({
       host,
       name: host,
       pin,
@@ -285,18 +310,21 @@ export function ComputersPage({
     return "No matching computers."
   }
 
-  const displayHosts = libSnapshot.visibleHosts
+  const displayHosts = selectHosts(libSnapshot.visibleHosts, { sort: libSnapshot.sort, nicknames: libSnapshot.nicknames, lastConnected: libSnapshot.lastConnected })
 
   const formattedHosts = useMemo(() => {
     return displayHosts.map((h) => ({
       id: h.id,
-      name: h.name || h.ip,
+      name: libSnapshot.nicknames[h.id] || h.name || h.ip,
+      hostname: h.name || h.ip,
+      lastSeen: libSnapshot.lastSeen[h.id],
+      favorite: libSnapshot.favoriteIds.includes(h.id) || libSnapshot.favoriteIps.includes(h.ip.trim().toLowerCase()),
       ip: h.ip,
       os: h.os ?? null,
       online: typeof h.online === "boolean" ? h.online : Boolean(h.online),
       paired: isPairedHost(h),
     }))
-  }, [displayHosts, isPairedHost])
+  }, [displayHosts, isPairedHost, libSnapshot.nicknames, libSnapshot.lastSeen, libSnapshot.favoriteIds, libSnapshot.favoriteIps])
 
   const directCombinedError =
     directError ||
@@ -331,6 +359,25 @@ export function ComputersPage({
           />
         </Button>
       </header>
+      {libSnapshot.preferenceError && <p role="alert" className="text-sm text-destructive">{libSnapshot.preferenceError}</p>}
+
+      <ConnectRecovery error={connSnapshot.error} code={connSnapshot.errorCode} busy={connSnapshot.busy}
+        paired={Boolean(lastRequest.current?.pairingId)}
+        onRetry={() => { if (lastRequest.current) void connectRequest(lastRequest.current) }}
+        onCleanup={() => void connection.retryCleanup()}
+        onPin={() => { setDirectIp(lastRequest.current?.host || ""); setDirectPin(""); document.getElementById("direct-pin")?.focus() }}
+        onForget={() => {
+          const host = libSnapshot.hosts.find(host => host.id === lastRequest.current?.pairingId)
+          if (host) handleRemoveRequest({ id: host.id, name: host.name || host.ip, ip: host.ip })
+        }} />
+
+      {Object.keys(libSnapshot.lastConnected).length > 0 && <section aria-labelledby="recent-heading" className="space-y-3">
+        <h2 id="recent-heading" className="text-sm font-medium text-muted-foreground">Recent connections</h2>
+        <ul className="space-y-2">{selectHosts(libSnapshot.visibleHosts.filter(host => libSnapshot.lastConnected[host.id]), { sort: "last-connected", lastConnected: libSnapshot.lastConnected }).slice(0, 5).map(host => <li key={host.id} className="flex flex-wrap items-center justify-between gap-2 rounded-panel surface-card p-3">
+          <div><p className="text-sm font-medium">{libSnapshot.nicknames[host.id] || host.name || host.ip}</p><p className="text-xs text-muted-foreground">{new Date(libSnapshot.lastConnected[host.id]).toLocaleString()} · {host.online ? "Available" : "Offline"}</p></div>
+          <Button size="sm" variant="secondary" disabled={connSnapshot.busy || !native || !host.online} onClick={() => handleConnectHost({ id: host.id, ip: host.ip, name: host.name || host.ip })}>Connect</Button>
+        </li>)}</ul>
+      </section>}
 
       <div className="flex flex-col gap-4">
         {libSnapshot.hosts.length > 0 ? (
@@ -338,6 +385,8 @@ export function ComputersPage({
             query={libSnapshot.query}
             onQueryChange={(q) => library.setQuery(q)}
             onClearSearch={() => library.setQuery("")}
+            availableOnly={libSnapshot.availableOnly} favoritesOnly={libSnapshot.favoritesOnly} sort={libSnapshot.sort}
+            onAvailableChange={value => library.setAvailableOnly(value)} onFavoritesChange={value => library.setFavoritesOnly(value)} onSortChange={value => library.setSort(value)}
           />
         ) : null}
 
@@ -346,6 +395,8 @@ export function ComputersPage({
           busy={connSnapshot.busy || !native}
           onConnect={handleConnectHost}
           onRemove={handleRemoveRequest}
+          onRename={(id, value) => library.setNickname(id, value)}
+          onFavorite={id => library.toggleFavorite(id)}
           removeBusy={removing}
           statusMessage={getStatusMessage()}
         />

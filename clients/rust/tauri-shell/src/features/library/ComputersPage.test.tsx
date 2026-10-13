@@ -43,6 +43,8 @@ mock.module("@/lib/ipc", () => ({
     hostsFixture = hostsFixture.filter(host => host.name !== name);
   },
   agentReleaseAll: async () => {},
+  listPairings: async () => [],
+  listHiddenHosts: async () => hideCalls,
 }));
 
 if (typeof globalThis.document === "undefined") {
@@ -338,6 +340,53 @@ describe("ComputersPage paired-machine removal", () => {
       expect(ip.value).toBe(code === "pairing-required" ? "10.0.0.7" : "");
     }
     act(() => root.unmount());
+  });
+
+  it("retries the exact failed paired request without prompting for PIN or deleting credentials", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const requests: unknown[] = [];
+    const connection = createConnection({ nativeAvailable: true, releaseInputs: async () => {}, invoke: async (command, args) => {
+      if (command === "connect") { requests.push(args); throw { code: "credential-rejected", message: "Rejected" }; }
+    } });
+    await act(async () => root.render(React.createElement(ComputersPage, { connection })));
+    await act(async () => findElements(container, el => el.getAttribute("data-action") === "connect")[0].onClick());
+    // The real App leaves the launcher during connect and mounts it again
+    // on failure, so retry ownership must survive that boundary.
+    act(() => root.unmount());
+    const retriedRoot = createRoot(container);
+    await act(async () => retriedRoot.render(React.createElement(ComputersPage, { connection })));
+    await act(async () => findElements(container, el => el.getAttribute("data-action") === "retry-connect")[0].onClick());
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual(requests[0]);
+    expect(requests[0]).toMatchObject({ pairingId: "host-1", pin: null });
+    expect(forgetCalls).toEqual([]);
+    act(() => retriedRoot.unmount());
+  });
+
+  it("records recent connections only after an authenticated connect and keeps nickname identity separate", async () => {
+    const originalStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
+    const values = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", { configurable: true, value: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) } });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    let failing = true;
+    const connection = createConnection({ nativeAvailable: true, releaseInputs: async () => {}, invoke: async (command) => {
+      if (command === "connect" && failing) throw { code: "network-unreachable", message: "Offline" };
+    } });
+    try {
+      await act(async () => root.render(React.createElement(ComputersPage, { connection })));
+      await act(async () => findElements(container, el => el.getAttribute("data-action") === "connect")[0].onClick());
+      expect(JSON.parse(values.get("mahord.library.v2") || "{}").lastConnected).toEqual({});
+      failing = false;
+      await act(async () => findElements(container, el => el.getAttribute("data-action") === "retry-connect")[0].onClick());
+      expect(JSON.parse(values.get("mahord.library.v2") || "{}").lastConnected["host-1"]).toBeGreaterThan(0);
+      expect(findElements(container, el => el.getAttribute("id") === "recent-heading")).toHaveLength(1);
+    } finally {
+      act(() => root.unmount());
+      if (originalStorage) Object.defineProperty(window, "localStorage", originalStorage);
+      else delete (window as any).localStorage;
+    }
   });
 
   it("polls visible pages silently and clears its interval on unmount", async () => {

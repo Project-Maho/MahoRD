@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { CircleAlert } from "lucide-react"
 import { ThisComputerCard } from "@/features/host/ThisComputerCard"
 import { SavedCredentials } from "@/features/library/SavedCredentials"
@@ -19,7 +19,9 @@ import {
   type PairingSummary,
   type HostStatus,
 } from "@/lib/ipc"
-import type { ConnectionInstance } from "@/lib/connection"
+import type { ConnectionInstance, ValidateConnectionOptions } from "@/lib/connection"
+import { createLibrary } from "@/lib/library"
+import { ConnectRecovery, connectionAttempts } from "@/features/library/ConnectRecovery"
 
 export const RELAY_URL_STORAGE_KEY = "maho-relay-url"
 
@@ -54,6 +56,23 @@ async function copyText(text: string): Promise<boolean> {
 
 export function SettingsPage({ connection }: SettingsPageProps) {
   const native = isNativeAvailable()
+  const [connSnapshot, setConnSnapshot] = useState(() => connection.snapshot())
+  const lastRequest = useRef<ValidateConnectionOptions | null>(connectionAttempts.get(connection) || null)
+  const [forgetTarget, setForgetTarget] = useState<string | null>(null)
+  const [connectActionError, setConnectActionError] = useState<string | null>(null)
+  const connectSavedRequest = async (request: ValidateConnectionOptions) => {
+    if (connection.snapshot().busy) return
+    lastRequest.current = { ...request }
+    connectionAttempts.set(connection, { ...request })
+    const pending = connection.connect(request)
+    const generation = connection.snapshot().generation
+    await pending
+    const state = connection.snapshot()
+    if (state.generation === generation && !state.error && (state.phase === "waiting-video" || state.phase === "streaming")) {
+      const library = createLibrary({ nativeAvailable: native, invoke: async () => [], storage: typeof window === "undefined" ? null : window.localStorage })
+      library.recordConnection({ id: request.pairingId || request.host || "", name: request.name, ip: request.host || "", online: true, paired: true, tcp_port: request.tcpPort, udp_port: request.udpPort })
+    }
+  }
   const [hostStatus, setHostStatus] = useState<HostStatus | null>(null)
   const [hostBusy, setHostBusy] = useState(false)
   const [pairings, setPairings] = useState<PairingSummary[]>([])
@@ -90,7 +109,7 @@ export function SettingsPage({ connection }: SettingsPageProps) {
   const [policyBusy, setPolicyBusy] = useState(false)
   const [policyError, setPolicyError] = useState<string | null>(null)
 
-  useEffect(() => connection.subscribe((s) => setConnBusy(s.busy)), [connection])
+  useEffect(() => connection.subscribe((s) => { setConnBusy(s.busy); setConnSnapshot(s) }), [connection])
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.localStorage) return
@@ -209,7 +228,7 @@ export function SettingsPage({ connection }: SettingsPageProps) {
     if (!native) return
     const pairing = pairings.find((p) => p.id === id)
     if (!pairing?.lastEndpoint?.host) return
-    await connection.connect({
+    await connectSavedRequest({
       host: pairing.lastEndpoint.host,
       name: pairing.hostName,
       pairingId: pairing.id,
@@ -384,6 +403,19 @@ export function SettingsPage({ connection }: SettingsPageProps) {
         onForget={handleForget}
         onRefresh={refreshPairings}
       />
+      <ConnectRecovery error={connSnapshot.error} code={connSnapshot.errorCode} paired busy={connBusy}
+        onRetry={() => { if (lastRequest.current) void connectSavedRequest(lastRequest.current) }}
+        onCleanup={() => void connection.retryCleanup()}
+        onForget={() => setForgetTarget(lastRequest.current?.pairingId || null)} />
+      {forgetTarget && <section role="alertdialog" aria-label="Confirm forgetting saved pairing" className="space-y-3 rounded-panel surface-card p-4">
+        <p className="text-sm">Forget this saved pairing? Your own computer will need authorization again. This does not repair network failures.</p>
+        {connectActionError && <p role="alert" className="text-sm text-destructive">{connectActionError}</p>}
+        <Button size="sm" variant="destructive" disabled={connBusy} onClick={async () => {
+          try { await forgetPairing(forgetTarget); setForgetTarget(null); setConnectActionError(null); await refreshPairings() }
+          catch (err) { setConnectActionError(err instanceof Error ? err.message : String(err)) }
+        }}>Confirm forget pairing</Button>
+        <Button size="sm" variant="ghost" onClick={() => setForgetTarget(null)}>Cancel</Button>
+      </section>}
 
       <section id="hidden-computers-section" className="space-y-3" aria-labelledby="hidden-computers-heading">
         <h2 id="hidden-computers-heading" className="text-[15px] font-semibold text-foreground">Hidden computers <span className="text-muted-foreground">{hiddenHosts.length}</span></h2>

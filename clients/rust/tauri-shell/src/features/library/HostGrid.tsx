@@ -1,4 +1,5 @@
-import { ArrowRight, Hash, KeyRound, Monitor, Trash2 } from "lucide-react"
+import { useState } from "react"
+import { ArrowRight, Hash, KeyRound, Monitor, Trash2, Star, Pencil } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -10,17 +11,15 @@ export interface Host {
   os?: string | null;
   online?: boolean | null;
   paired?: boolean | null;
+  hostname?: string;
+  lastSeen?: number;
+  favorite?: boolean;
 }
 
 export interface Props {
-  hosts: Array<{
-    id: string;
-    name: string;
-    ip: string;
-    os?: string | null;
-    online?: boolean | null;
-    paired?: boolean | null;
-  }>;
+  hosts: Host[];
+  onRename?: (id: string, value: string) => void;
+  onFavorite?: (id: string) => void;
   busy?: boolean;
   onConnect: (host: { id: string; ip: string; name: string }) => void;
   /** Present only where the page owns the pairing-removal flow. */
@@ -41,7 +40,10 @@ export function HostGrid({
   onRemove,
   removeBusy = false,
   statusMessage,
+  onRename, onFavorite,
 }: Props) {
+  const [editing, setEditing] = useState<string | null>(null)
+  const [draft, setDraft] = useState("")
   return (
     <section className="space-y-3" aria-labelledby="library-heading">
       <h2
@@ -104,16 +106,32 @@ export function HostGrid({
                     />
                   </div>
                   <div className="min-w-0 flex-1 pt-0.5">
-                    <h3
+                    {editing === host.id ? <form onSubmit={event => {
+                      event.preventDefault(); onRename?.(host.id, draft); setEditing(null)
+                    }} className="space-y-2">
+                      <input autoFocus aria-label="Computer nickname" value={draft}
+                        onChange={event => setDraft(event.target.value)}
+                        onKeyDown={event => { if (event.key === "Escape") setEditing(null) }}
+                        className="w-full rounded-md border border-border bg-background px-2 py-1 text-sm" />
+                      <Button type="submit" size="sm">Save</Button>
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setEditing(null)}>Cancel</Button>
+                    </form> : <h3
                       className="line-clamp-2 break-all text-[15px] font-semibold leading-5 text-foreground"
                       title={host.name}
                     >
                       {host.name}
-                    </h3>
+                    </h3>}
+                    {host.hostname && host.hostname !== host.name && <p className="truncate text-xs text-muted-foreground">{host.hostname}</p>}
                     <p className="mt-0.5 truncate select-text font-mono text-[12.5px] text-muted-foreground">
                       {host.ip}
                     </p>
                   </div>
+                </div>
+
+                {!available && <p className="text-xs text-muted-foreground">Last seen: {host.lastSeen ? new Date(host.lastSeen).toLocaleString() : "Not observed on this client"}</p>}
+                <div className="flex flex-wrap gap-1">
+                  {onFavorite && <Button variant="ghost" size="sm" aria-pressed={Boolean(host.favorite)} aria-label={host.favorite ? `Unpin ${host.name}` : `Pin ${host.name}`} onClick={() => onFavorite(host.id)}><Star className={host.favorite ? "fill-current" : ""} aria-hidden="true" />{host.favorite ? "Pinned" : "Pin"}</Button>}
+                  {onRename && <Button variant="ghost" size="sm" aria-label={`Rename ${host.name}`} onClick={() => { setDraft(host.name); setEditing(host.id) }}><Pencil aria-hidden="true" />Rename</Button>}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -156,7 +174,7 @@ export function HostGrid({
                         size="sm"
                         data-action="remove-host"
                         disabled={removeBusy}
-                        onClick={() => onRemove?.({ id: host.id, ip: host.ip, name: host.name })}
+                        onClick={() => onRemove?.({ id: host.id, ip: host.ip, name: host.hostname || host.name })}
                         title="Remove this computer from the list"
                         className="gap-1.5 hover:bg-destructive/10 hover:text-destructive"
                       >

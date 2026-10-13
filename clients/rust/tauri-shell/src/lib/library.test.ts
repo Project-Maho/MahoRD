@@ -138,7 +138,8 @@ test('non-default favorites persist across reload and changed pairing IDs, not m
   await second.refresh();
   expect(second.snapshot().visibleHosts).toEqual([paired]);
   expect(second.snapshot().favoriteIps).toEqual(['10.0.0.2', 'missing']);
-  expect([...storage.values]).toEqual([[key, '["10.0.0.2","missing"]']]);
+  expect(storage.values.get(key)).toBe('["10.0.0.2","missing"]');
+  expect(second.snapshot().favoriteIds).toContain('new-pairing-id');
 });
 
 test('filter changes emit synchronously; All clears flags but not query; snapshots isolate arrays', async () => {
@@ -205,7 +206,7 @@ test('read/write storage failure is visible while session choices survive refres
   }
   const model = library({
     storage: {
-      getItem: () => '["10.0.0.2"]',
+      getItem: (name: string) => name === key ? '["10.0.0.2"]' : null,
       setItem() {
         throw new Error('quota exceeded');
       },
@@ -265,7 +266,7 @@ test('loading/error retain prior inventory; empty success and unavailable remain
   const empty = model.refresh();
   requests[2].resolve([]);
   await empty;
-  expect(model.snapshot()).toMatchObject({ status: 'ready', hosts: [], error: null });
+  expect(model.snapshot()).toMatchObject({ status: 'ready', hosts: [{ ...hosts[0], online: false }], error: null });
   let calls = 0;
   const unavailable = library({
     nativeAvailable: false,
@@ -297,7 +298,7 @@ test('silent refresh retains ready inventory and ignores stale responses', async
   await newest;
   requests[1].resolve([]);
   await old;
-  expect(model.snapshot().hosts).toEqual([hosts[0]]);
+  expect(model.snapshot().hosts).toEqual([hosts[0], ...hosts.slice(1).map(host => ({ ...host, online: false }))]);
   expect(states).toEqual(['ready']);
 });
 
@@ -318,4 +319,74 @@ test('newest error cannot be erased by an older successful refresh', async () =>
   await older;
   expect(model.snapshot()).toMatchObject({ status: 'error', hosts: [] });
   expect(typeof model.snapshot().error).toBe('string');
+});
+
+test('retains observed computers offline across refresh and reload with local last seen', async () => {
+  const storage = memory();
+  let result = [hosts[0]];
+  const model = library({ storage, invoke: async () => result });
+  await model.refresh();
+  const seen = model.snapshot().lastSeen[hosts[0].id];
+  expect(seen).toBeGreaterThan(0);
+  result = [];
+  await model.refresh();
+  expect(model.snapshot().hosts).toEqual([{ ...hosts[0], online: false }]);
+  const reloaded = library({ storage });
+  expect(reloaded.snapshot().lastSeen[hosts[0].id]).toBe(seen);
+  expect(reloaded.snapshot().hosts[0].online).toBe(false);
+});
+
+test('merges undiscovered saved endpoints and excludes explicitly hidden computers', async () => {
+  const model = library({ invoke: async () => [], savedHosts: async () => [hosts[1]], hiddenNames: async () => [] });
+  await model.refresh();
+  expect(model.snapshot().hosts).toEqual([hosts[1]]);
+  const hidden = library({ invoke: async () => hosts, hiddenNames: async () => ['Studio'] });
+  await hidden.refresh();
+  expect(hidden.snapshot().hosts.some(host => host.name === 'Studio')).toBe(false);
+});
+
+test('nickname persists and is searchable without changing original identity', async () => {
+  const storage = memory();
+  const model = library({ storage });
+  await model.refresh();
+  model.setNickname('b', '  Workstation  ');
+  model.setQuery('workstation');
+  expect(model.snapshot().visibleHosts).toEqual([hosts[1]]);
+  expect(library({ storage }).snapshot().nicknames.b).toBe('Workstation');
+  expect(model.snapshot().hosts[1].name).toBe('Office');
+  model.setNickname('b', '');
+  expect(model.snapshot().visibleHosts).toEqual([]);
+});
+
+test('stable favorite survives IP change and legacy IP favorites migrate', async () => {
+  const storage = memory('["10.0.0.2"]');
+  let result = [hosts[1]];
+  const model = library({ storage, invoke: async () => result });
+  await model.refresh();
+  model.setFavoritesOnly(true);
+  result = [{ ...hosts[1], ip: '10.0.0.99' }];
+  await model.refresh();
+  expect(model.snapshot().visibleHosts).toEqual(result);
+  model.toggleFavorite('b');
+  expect(model.snapshot().visibleHosts).toEqual([]);
+});
+
+test('sort selection persists and supports nickname, recency and status ordering', async () => {
+  const storage = memory();
+  const model = library({ storage });
+  model.setSort('last-connected');
+  expect(library({ storage }).snapshot().sort).toBe('last-connected');
+  expect(selectHosts(hosts, { sort: 'name' }).map(host => host.id)).toEqual(['b', 'd', 'unpaired-a', 'c']);
+  expect(selectHosts(hosts, { sort: 'last-connected', lastConnected: { c: 20, b: 10 } }).map(host => host.id).slice(0, 2)).toEqual(['c', 'b']);
+  expect(selectHosts(hosts, { sort: 'status' }).at(-1)?.id).toBe('b');
+});
+
+test('successful connection history retains exact timestamp and offline recent inventory', () => {
+  const storage = memory();
+  const model = library({ storage });
+  model.recordConnection(hosts[0], 1234);
+  expect(model.snapshot().lastConnected[hosts[0].id]).toBe(1234);
+  const reloaded = library({ storage });
+  expect(reloaded.snapshot().lastConnected[hosts[0].id]).toBe(1234);
+  expect(reloaded.snapshot().hosts[0].online).toBe(false);
 });
