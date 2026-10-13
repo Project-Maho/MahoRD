@@ -97,15 +97,14 @@ test("PIN and address validation matches backend without losing leading zeros", 
       validateConnection({ host: "example.test", pin: "00123456", udpPort: badUdp as unknown as number })
     ).toEqual({ ok: false, errors: { udpPort: "invalid-port" } });
   }
-  // The backend requires a PIN or a stored pairing id; both absent is a local
-  // validation error, not a connect call that is guaranteed to fail natively.
+  // Direct connection with a blank PIN is allowed: blank PIN = use saved pairing for this computer.
   expect(validateConnection({ host: "example.test" })).toEqual({
-    ok: false,
-    errors: { pin: "required" },
+    ok: true,
+    args: { host: "example.test", tcpPort: 19730, udpPort: 19731, pin: null },
   });
   expect(validateConnection({ host: "example.test", pin: "" })).toEqual({
-    ok: false,
-    errors: { pin: "required" },
+    ok: true,
+    args: { host: "example.test", tcpPort: 19730, udpPort: 19731, pin: null },
   });
   // An explicit pairing id satisfies the pairing requirement without a PIN.
   expect(validateConnection({ host: "example.test", pairingId: "pair-1" }).ok).toBe(true);

@@ -232,7 +232,8 @@ describe("HostGrid", () => {
       container,
       (el) => el.getAttribute("role") === "list"
     );
-    expect(listContainers.length).toBe(1);
+    expect(listContainers.length).toBe(2);
+    expect(listContainers.map(el => el.getAttribute("id"))).toEqual(["host-grid", "host-grid-offline"]);
     const gridContainer = listContainers[0];
     expect(gridContainer.getAttribute("role")).toBe("list");
 
@@ -310,6 +311,119 @@ describe("HostGrid", () => {
     // Message text IS rendered
     const allText = collectText(container);
     expect(allText).toContain("No hosts discovered on network");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("offers Remove on every card, including offline", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const removeCalls: Array<{ id: string; ip: string; name: string }> = [];
+
+    const hosts: Host[] = [
+      {
+        id: "paired-online",
+        name: "Studio",
+        ip: "10.0.0.5",
+        os: "macOS",
+        online: true,
+        paired: true,
+      },
+      {
+        id: "paired-offline",
+        name: "Garage",
+        ip: "10.0.0.6",
+        os: "Linux",
+        online: false,
+        paired: true,
+      },
+      {
+        id: "unpaired",
+        name: "Lab",
+        ip: "10.0.0.7",
+        os: "Windows",
+        online: true,
+        paired: false,
+      },
+    ];
+
+    act(() => {
+      root.render(
+        React.createElement(HostGrid, {
+          hosts,
+          busy: false,
+          onConnect: () => {},
+          onRemove: (host) => removeCalls.push(host),
+        })
+      );
+    });
+
+    const removeControls = findElements(
+      container,
+      (el) => el.getAttribute("data-action") === "remove-host"
+    );
+    expect(removeControls.length).toBe(3);
+
+    const connectControls = findElements(
+      container,
+      (el) => el.getAttribute("data-action") === "connect"
+    );
+    expect(connectControls.length).toBe(3);
+
+    const disabled = (el: any) =>
+      el.disabled === true || el.getAttribute("disabled") !== null;
+
+    expect(disabled(removeControls[0])).toBe(false);
+    expect(disabled(removeControls[1])).toBe(false);
+    expect(disabled(connectControls[2])).toBe(true);
+
+    expect(typeof removeControls[2].onClick).toBe("function");
+    removeControls[2].onClick();
+    expect(removeCalls).toEqual([
+      { id: "paired-offline", ip: "10.0.0.6", name: "Garage" },
+    ]);
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("disables Remove while a removal is pending", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        React.createElement(HostGrid, {
+          hosts: [
+            {
+              id: "paired-online",
+              name: "Studio",
+              ip: "10.0.0.5",
+              os: "macOS",
+              online: true,
+              paired: true,
+            },
+          ],
+          busy: false,
+          onConnect: () => {},
+          onRemove: () => {},
+          removeBusy: true,
+        })
+      );
+    });
+
+    const removeControls = findElements(
+      container,
+      (el) => el.getAttribute("data-action") === "remove-host"
+    );
+    expect(removeControls.length).toBe(1);
+    const pending = removeControls[0];
+    expect(pending.disabled === true || pending.getAttribute("disabled") !== null).toBe(
+      true
+    );
 
     act(() => {
       root.unmount();

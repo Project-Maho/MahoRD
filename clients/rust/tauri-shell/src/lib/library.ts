@@ -46,10 +46,14 @@ export interface LibraryOptions<T extends Host = Host> {
   nativeAvailable: boolean;
 }
 
+export interface RefreshOptions {
+  silent?: boolean;
+}
+
 export interface Library<T extends Host = Host> {
   snapshot(): LibrarySnapshot<T>;
   subscribe(listener: LibraryListener<T>): () => boolean;
-  refresh(): Promise<void>;
+  refresh(options?: RefreshOptions): Promise<void>;
   setQuery(value: string): void;
   setAvailableOnly(value: boolean): void;
   setFavoritesOnly(value: boolean): void;
@@ -154,18 +158,22 @@ export function createLibrary<T extends Host = Host>({
     for (const listener of listeners) listener(snapshot());
   }
 
-  async function refresh(): Promise<void> {
+  async function refresh(options?: RefreshOptions): Promise<void> {
     if (!nativeAvailable) return;
     const current = ++requestId;
-    status = 'loading';
-    error = null;
-    emit();
+    const silent = Boolean(options?.silent);
+    if (!silent) {
+      status = 'loading';
+      error = null;
+      emit();
+    }
     try {
       const result = await invoke('list_hosts');
       if (current !== requestId) return;
       if (!Array.isArray(result)) throw new Error('Computer list response was not an array.');
       hosts = result.slice() as T[];
       status = 'ready';
+      error = null;
     } catch (err) {
       if (current !== requestId) return;
       status = 'error';

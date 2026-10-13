@@ -4,9 +4,12 @@ import { ThisComputerCard } from "@/features/host/ThisComputerCard"
 import { SavedCredentials } from "@/features/library/SavedCredentials"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Button } from "@/components/ui/button"
 import {
   isNativeAvailable,
   listPairings,
+  listHiddenHosts,
+  unhideHost,
   forgetPairing,
   getHostStatus,
   startHost,
@@ -54,6 +57,29 @@ export function SettingsPage({ connection }: SettingsPageProps) {
   const [hostStatus, setHostStatus] = useState<HostStatus | null>(null)
   const [hostBusy, setHostBusy] = useState(false)
   const [pairings, setPairings] = useState<PairingSummary[]>([])
+  const [hiddenHosts, setHiddenHosts] = useState<string[]>([])
+  const [hiddenBusy, setHiddenBusy] = useState(false)
+  const [hiddenError, setHiddenError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!native) return
+    let active = true
+    listHiddenHosts().then(names => { if (active) setHiddenHosts(names) })
+      .catch(err => { if (active) setHiddenError(String(err?.message ?? err)) })
+    return () => { active = false }
+  }, [native])
+  const restoreHost = async (name: string) => {
+    if (hiddenBusy) return
+    setHiddenBusy(true)
+    setHiddenError(null)
+    try {
+      await unhideHost(name)
+      setHiddenHosts(names => names.filter(item => item !== name))
+    } catch (err) {
+      setHiddenError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setHiddenBusy(false)
+    }
+  }
   const [connBusy, setConnBusy] = useState(() => connection.snapshot().busy)
   const [relayUrl, setRelayUrl] = useState(() => {
     if (typeof window === "undefined" || !window.localStorage) return ""
@@ -358,6 +384,19 @@ export function SettingsPage({ connection }: SettingsPageProps) {
         onForget={handleForget}
         onRefresh={refreshPairings}
       />
+
+      <section id="hidden-computers-section" className="space-y-3" aria-labelledby="hidden-computers-heading">
+        <h2 id="hidden-computers-heading" className="text-[15px] font-semibold text-foreground">Hidden computers <span className="text-muted-foreground">{hiddenHosts.length}</span></h2>
+        {hiddenError && <p role="alert" className="text-sm text-destructive">{hiddenError}</p>}
+        {!hiddenHosts.length ? <p className="rounded-panel border border-dashed border-white/10 px-4 py-4 text-sm text-muted-foreground">No hidden computers.</p> : (
+          <div id="hidden-computers-list" role="list" className="divide-y divide-white/[0.06] overflow-hidden rounded-panel surface-card">
+            {hiddenHosts.map(name => <div key={name} role="listitem" className="flex items-center gap-3 px-4 py-3">
+              <span className="min-w-0 flex-1 break-all text-sm font-semibold">{name}</span>
+              <Button size="sm" variant="ghost" data-action="restore-host" disabled={hiddenBusy || !native} onClick={() => restoreHost(name)}>Restore</Button>
+            </div>)}
+          </div>
+        )}
+      </section>
 
       <section className="space-y-3" aria-labelledby="relay-heading">
         <h2 id="relay-heading" className="text-[13px] font-medium text-muted-foreground">

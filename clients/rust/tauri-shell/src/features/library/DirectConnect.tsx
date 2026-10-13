@@ -35,8 +35,8 @@ export function DirectConnect({
       <h2 id="direct-heading" className="text-[13px] font-medium text-muted-foreground">
         Direct connection
       </h2>
-      <p id="direct-help" className="sr-only">
-        Enter a host address. For a new pairing, add the host's eight-digit PIN.
+      <p id="direct-help" className="text-xs text-subtle-foreground">
+        Leave PIN blank to use the saved pairing for this computer. New computers need the host's eight-digit PIN.
       </p>
 
       <form

@@ -1,4 +1,4 @@
-import { ArrowRight, Hash, KeyRound, Monitor } from "lucide-react"
+import { ArrowRight, Hash, KeyRound, Monitor, Trash2 } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -23,6 +23,9 @@ export interface Props {
   }>;
   busy?: boolean;
   onConnect: (host: { id: string; ip: string; name: string }) => void;
+  /** Present only where the page owns the pairing-removal flow. */
+  onRemove?: (host: { id: string; ip: string; name: string }) => void;
+  removeBusy?: boolean;
   statusMessage?: string | null;
 }
 
@@ -35,6 +38,8 @@ export function HostGrid({
   hosts,
   busy = false,
   onConnect,
+  onRemove,
+  removeBusy = false,
   statusMessage,
 }: Props) {
   return (
@@ -63,16 +68,25 @@ export function HostGrid({
           </div>
           <p className="max-w-sm text-sm text-muted-foreground">{statusMessage}</p>
         </div>
-      ) : (
+      ) : null}
+      {!statusMessage && hosts.length > 0 && [true, false].map(online => {
+        const sectionHosts = hosts.filter(host => (host.online === true) === online)
+        if (!online && !sectionHosts.length) return null
+        return <section key={String(online)} aria-labelledby={online ? "available-heading" : "offline-heading"} className="space-y-3">
+          <h3 id={online ? "available-heading" : "offline-heading"} className="text-sm font-medium text-muted-foreground">
+            {online ? "Available" : "Offline"} <span id={online ? "available-count" : "offline-count"}>{sectionHosts.length}</span>
+          </h3>
+          {online && !sectionHosts.length && hosts.length > 0 && <p className="text-sm text-muted-foreground">No computers are available right now.</p>}
         <div
-          id="host-grid"
+          id={online ? "host-grid" : "host-grid-offline"}
           role="list"
           aria-busy={busy}
           className="grid grid-cols-[repeat(auto-fill,minmax(min(17rem,100%),1fr))] gap-3"
         >
-          {hosts.map((host) => {
+          {sectionHosts.map((host) => {
             const available = host.online === true
             const canConnect = available && !busy
+            const showRemove = Boolean(onRemove)
 
             return (
               <Card
@@ -134,33 +148,51 @@ export function HostGrid({
                   <span className="truncate text-xs text-subtle-foreground">
                     {host.os || "Unknown OS"}
                   </span>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    data-action="connect"
-                    disabled={!canConnect}
-                    onClick={() => onConnect({ id: host.id, ip: host.ip, name: host.name })}
-                    title={
-                      !available
-                        ? "Offline discovery record. Use Direct connection to try an address explicitly."
-                        : undefined
-                    }
-                    className={cn(
-                      "gap-1.5",
-                      canConnect &&
-                        "group-hover:border-transparent group-hover:bg-primary group-hover:text-primary-foreground group-hover:shadow-cta group-focus-within:border-transparent group-focus-within:bg-primary group-focus-within:text-primary-foreground group-focus-within:shadow-cta hover:border-transparent hover:bg-primary-hover"
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {showRemove && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        data-action="remove-host"
+                        disabled={removeBusy}
+                        onClick={() => onRemove?.({ id: host.id, ip: host.ip, name: host.name })}
+                        title="Remove this computer from the list"
+                        className="gap-1.5 hover:bg-destructive/10 hover:text-destructive"
+                      >
+                        <Trash2 aria-hidden="true" />
+                        Remove
+                      </Button>
                     )}
-                  >
-                    Connect
-                    <ArrowRight className="size-3.5" aria-hidden="true" />
-                  </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      data-action="connect"
+                      disabled={!canConnect}
+                      onClick={() => onConnect({ id: host.id, ip: host.ip, name: host.name })}
+                      title={
+                        !available
+                          ? "Offline discovery record. Use Direct connection to try an address explicitly."
+                          : undefined
+                      }
+                      className={cn(
+                        "gap-1.5",
+                        canConnect &&
+                          "group-hover:border-transparent group-hover:bg-primary group-hover:text-primary-foreground group-hover:shadow-cta group-focus-within:border-transparent group-focus-within:bg-primary group-focus-within:text-primary-foreground group-focus-within:shadow-cta hover:border-transparent hover:bg-primary-hover"
+                      )}
+                    >
+                      Connect
+                      <ArrowRight className="size-3.5" aria-hidden="true" />
+                    </Button>
+                  </div>
                 </div>
               </Card>
             );
           })}
         </div>
-      )}
+        </section>
+      })}
     </section>
   );
 }

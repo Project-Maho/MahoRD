@@ -27,6 +27,7 @@ export interface ConnectionSnapshot {
   host: HostInfo | null;
   fieldErrors: Record<string, string>;
   error: string | null;
+  errorCode?: string | null;
   cleanupError: string | null;
   stats: ConnectionStats | null;
   statsStatus: StatsStatus;
@@ -90,9 +91,7 @@ export function validateConnection({
   const errors: Record<string, string> = {};
   if (!host) errors.host = 'required';
   if (pin && !/^[0-9]{8}$/.test(pin)) errors.pin = 'invalid-pin';
-  // The backend requires either a PIN or a stored pairing id; reject an
-  // unpairable request locally instead of round-tripping a guaranteed failure.
-  if (!pin && !pairingId) errors.pin = 'required';
+  // Blank PIN is allowed: backend resolves saved pairing for this computer by address/name.
 
   function checkPort(val: unknown, fieldName: string, defaultPort: number): number | null {
     if (val === null || val === undefined || val === '') return defaultPort;
@@ -147,7 +146,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
     busy: false,
   };
   const listeners = new Set<(snapshot: ConnectionSnapshot) => void>();
-  let pendingConnect: Promise<{ ok: true } | { ok: false; error: string }> | null = null;
+  let pendingConnect: Promise<{ ok: true } | { ok: false; error: string; code: string | null }> | null = null;
   let pendingCleanup: Promise<void> | null = null;
   let pendingStats: Promise<void> | null = null;
 
@@ -236,6 +235,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
     state.host = { ip: validation.args.host, name: request.name || validation.args.host };
     state.fieldErrors = {};
     state.error = null;
+    state.errorCode = null;
     state.cleanupError = null;
     state.busy = true;
     clearStats();
@@ -243,7 +243,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
       .then(() => invoke('connect', validation.args))
       .then(
         () => ({ ok: true as const }),
-        (error: unknown) => ({ ok: false as const, error: errorText(error) })
+        (error: unknown) => ({ ok: false as const, error: errorText(error), code: typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : null })
       );
     pendingConnect = operation;
     emit();
@@ -255,6 +255,7 @@ export function createConnection({ invoke, nativeAvailable, releaseInputs }: Con
       emit();
     } else {
       state.error = result.error;
+      state.errorCode = result.code;
       await cleanup();
     }
     return true;

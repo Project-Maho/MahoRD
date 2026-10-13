@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo, useCallback } from "react"
-import { RefreshCw } from "lucide-react"
+import { useState, useEffect, useMemo, useCallback, useRef } from "react"
+import { CircleAlert, LoaderCircle, RefreshCw, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { LibraryToolbar } from "@/features/library/LibraryToolbar"
 import { HostGrid } from "@/features/library/HostGrid"
@@ -9,6 +10,8 @@ import {
   isNativeAvailable,
   invokeCommand,
   agentReleaseAll,
+  forgetPairing,
+  hideHost,
   type HostItem,
   type MahoCommand,
 } from "@/lib/ipc"
@@ -77,6 +80,18 @@ export function ComputersPage({
 
   const [refreshing, setRefreshing] = useState(false)
 
+  const [removeTarget, setRemoveTarget] = useState<{
+    id: string;
+    name: string;
+    ip: string;
+  } | null>(null)
+  const [removing, setRemoving] = useState(false)
+  const [removeError, setRemoveError] = useState<string | null>(null)
+  // Pairings deleted here but not yet re-read from list_hosts: their cards must
+  // stop offering pairing-based connect until a refresh confirms the new truth.
+  const [stalePairingIds, setStalePairingIds] = useState<string[]>([])
+  const removeInFlight = useRef(false)
+
   const [directIp, setDirectIp] = useState("")
   const [directPin, setDirectPin] = useState("")
   const [directError, setDirectError] = useState<string | null>(null)
@@ -114,12 +129,79 @@ export function ComputersPage({
 
   useEffect(() => {
     refreshHosts()
-  }, [refreshHosts])
+    const poll = () => {
+      if (document.visibilityState !== "hidden") void library.refresh({ silent: true })
+    }
+    const timer = setInterval(poll, 4000)
+    document.addEventListener("visibilitychange", poll)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener("visibilitychange", poll)
+    }
+  }, [refreshHosts, library])
+
+  const isPairedHost = useCallback(
+    (host: { id: string; paired?: boolean | null }) =>
+      Boolean(host.paired) && !stalePairingIds.includes(host.id),
+    [stalePairingIds]
+  )
+
+  const focusRemovePanel = useCallback((node: HTMLDialogElement | null) => {
+    node?.showModal?.()
+  }, [])
+
+  const handleRemoveRequest = (host: { id: string; ip: string; name: string }) => {
+    if (removeTarget || removeInFlight.current) return
+    setRemoveError(null)
+    setRemoveTarget(host)
+  }
+
+  const handleRemoveCancel = () => {
+    if (removeInFlight.current) return
+    setRemoveTarget(null)
+    setRemoveError(null)
+  }
+
+  const handleRemoveConfirm = async (forget = false) => {
+    const target = removeTarget
+    if (!native || !target || removeInFlight.current) return
+    removeInFlight.current = true
+    setRemoving(true)
+    setRemoveError(null)
+    try {
+      if (forget && !stalePairingIds.includes(target.id)) {
+        await forgetPairing(target.id)
+        setStalePairingIds(prev =>
+          prev.includes(target.id) ? prev : [...prev, target.id]
+        )
+      }
+      await hideHost(target.name)
+      setRemoveTarget(null)
+      // refreshHosts swallows its own failures; status below tells us whether
+      // the list is fresh again or still showing the pre-removal snapshot.
+      await refreshHosts()
+      if (library.snapshot().status === "ready") setStalePairingIds([])
+    } catch (err) {
+      const detail =
+        err instanceof Error
+          ? err.message
+          : typeof err === "object" &&
+              err !== null &&
+              "message" in err &&
+              typeof err.message === "string"
+            ? err.message
+            : String(err)
+      setRemoveError(detail)
+    } finally {
+      removeInFlight.current = false
+      setRemoving(false)
+    }
+  }
 
   const handleConnectHost = async (host: { id: string; ip: string; name: string }) => {
     if (!native) return
     const raw = libSnapshot.hosts.find((h) => h.id === host.id)
-    if (raw?.paired) {
+    if (raw && isPairedHost(raw)) {
       await connection.connect({
         host: host.ip,
         name: host.name,
@@ -128,13 +210,19 @@ export function ComputersPage({
         udpPort: raw.udp_port ?? null,
       })
     } else {
+      if (connection.snapshot().busy) return
+      await connection.connect({
+        host: host.ip, name: host.name, pin: null, pairingId: null,
+        tcpPort: raw?.tcp_port ?? null, udpPort: raw?.udp_port ?? null,
+      })
+      if (connection.snapshot().errorCode !== "pairing-required") return
       setSelectedPorts({
         tcpPort: raw?.tcp_port ?? null,
         udpPort: raw?.udp_port ?? null,
       })
       setDirectIp(host.ip)
       setDirectPin("")
-      setDirectError(null)
+      setDirectError("A PIN is needed for this new computer.")
       const pinEl = document.getElementById("direct-pin")
       pinEl?.focus()
       pinEl?.scrollIntoView?.({ behavior: "smooth", block: "center" })
@@ -206,9 +294,9 @@ export function ComputersPage({
       ip: h.ip,
       os: h.os ?? null,
       online: typeof h.online === "boolean" ? h.online : Boolean(h.online),
-      paired: Boolean(h.paired),
+      paired: isPairedHost(h),
     }))
-  }, [displayHosts])
+  }, [displayHosts, isPairedHost])
 
   const directCombinedError =
     directError ||
@@ -257,9 +345,114 @@ export function ComputersPage({
           hosts={formattedHosts}
           busy={connSnapshot.busy || !native}
           onConnect={handleConnectHost}
+          onRemove={handleRemoveRequest}
+          removeBusy={removing}
           statusMessage={getStatusMessage()}
         />
       </div>
+
+      {removeTarget && (
+        <dialog
+          ref={focusRemovePanel}
+          aria-labelledby="remove-pairing-title"
+          aria-describedby="remove-pairing-body"
+          className="fixed inset-0 m-auto w-[min(420px,calc(100%-32px))] max-h-[calc(100%-32px)] overflow-y-auto bg-transparent p-0 text-foreground backdrop:bg-black/65 backdrop:backdrop-blur-md"
+          onCancel={(event) => {
+            event.preventDefault()
+            handleRemoveCancel()
+          }}
+        >
+          <Card
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="remove-pairing-title"
+            aria-describedby="remove-pairing-body"
+            data-testid="remove-pairing-confirm"
+            tabIndex={-1}
+            className="w-[min(420px,100%)] animate-panel-in outline-none"
+          >
+            <div className="flex items-start gap-3">
+              <div className="grid size-9 shrink-0 place-items-center rounded-[9px] surface-raised">
+                <Trash2 className="size-4 text-destructive" aria-hidden="true" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <h2
+                  id="remove-pairing-title"
+                  className="text-[15px] font-semibold leading-5 tracking-[-0.01em] text-foreground"
+                >
+                  Remove this computer?
+                </h2>
+                <p id="remove-pairing-body" className="text-sm text-muted-foreground">
+                  Hide this computer from the list. You can restore it in Settings.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-white/[0.04] px-3 py-2 ring-1 ring-inset ring-white/[0.06]">
+              <p
+                className="truncate text-[13px] font-semibold text-foreground"
+                title={removeTarget.name}
+              >
+                {removeTarget.name}
+              </p>
+              <p className="break-all select-text font-mono text-xs text-muted-foreground">
+                {removeTarget.ip}
+              </p>
+            </div>
+
+            {removeError && (
+              <p
+                id="remove-pairing-error"
+                role="alert"
+                className="flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-[13px] text-destructive"
+              >
+                <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <span>Could not remove this computer. {removeError}</span>
+              </p>
+            )}
+
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {libSnapshot.hosts.some(h => h.id === removeTarget.id && isPairedHost(h)) && (
+                <Button type="button" variant="destructive" size="sm"
+                  data-action="confirm-forget-paired" disabled={removing}
+                  onClick={() => handleRemoveConfirm(true)}>
+                  {removing ? "Removing" : "Remove and forget pairing"}
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-action="cancel-remove-paired"
+                disabled={removing}
+                onClick={handleRemoveCancel}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                data-action="confirm-remove-paired"
+                disabled={removing}
+                aria-busy={removing}
+                onClick={() => handleRemoveConfirm()}
+                className="gap-1.5"
+              >
+                {removing ? (
+                  <LoaderCircle
+                    className="size-3.5 animate-spin motion-reduce:animate-none"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Trash2 className="size-3.5" aria-hidden="true" />
+                )}
+                {removing ? "Removing" : "Remove from list"}
+              </Button>
+            </div>
+          </Card>
+        </dialog>
+      )}
 
       {showDirect && (
         <DirectConnect

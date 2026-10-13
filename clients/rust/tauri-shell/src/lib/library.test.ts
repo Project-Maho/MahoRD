@@ -279,6 +279,28 @@ test('loading/error retain prior inventory; empty success and unavailable remain
   expect(unavailable.snapshot()).toMatchObject({ status: 'unavailable', hosts: [], visibleHosts: [] });
 });
 
+test('silent refresh retains ready inventory and ignores stale responses', async () => {
+  const requests: any[] = [];
+  const model = library({ invoke: () => {
+    const request = deferred(); requests.push(request); return request.promise;
+  } });
+  const initial = model.refresh();
+  requests[0].resolve(hosts);
+  await initial;
+  const states: string[] = [];
+  model.subscribe(snapshot => states.push(snapshot.status));
+  const old = model.refresh({ silent: true });
+  expect(model.snapshot()).toMatchObject({ status: 'ready', hosts });
+  expect(states).toEqual([]);
+  const newest = model.refresh({ silent: true });
+  requests[2].resolve([hosts[0]]);
+  await newest;
+  requests[1].resolve([]);
+  await old;
+  expect(model.snapshot().hosts).toEqual([hosts[0]]);
+  expect(states).toEqual(['ready']);
+});
+
 test('newest error cannot be erased by an older successful refresh', async () => {
   const requests: any[] = [];
   const model = library({

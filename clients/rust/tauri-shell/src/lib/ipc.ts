@@ -1,6 +1,6 @@
 /**
  * Single typed boundary through which the entire frontend calls Tauri.
- * Covers all 22 backend commands declared in src-tauri/src/lib.rs.
+ * Registry of backend commands used by the desktop frontend.
  */
 
 // =============================================================================
@@ -30,6 +30,13 @@ export const MAHO_COMMANDS = [
   "get_host_status",
   "start_host",
   "stop_host",
+  "hide_host",
+  "unhide_host",
+  "list_hidden_hosts",
+  "set_auto_approve",
+  "set_host_policy",
+  "set_stream_options",
+  "get_stream_state",
 ] as const;
 
 export type MahoCommand = (typeof MAHO_COMMANDS)[number];
@@ -399,6 +406,15 @@ export const listPairings = () =>
 export const forgetPairing = (id: string) =>
   invokeCommand<void>("forget_pairing", { id });
 
+export const hideHost = (name: string) =>
+  invokeCommand<void>("hide_host", { name });
+
+export const unhideHost = (name: string) =>
+  invokeCommand<void>("unhide_host", { name });
+
+export const listHiddenHosts = () =>
+  invokeCommand<string[]>("list_hidden_hosts");
+
 export const stats = () => invokeCommand<SessionStats>("stats");
 
 export const sendInput = (event: InputPayload) =>
@@ -430,24 +446,22 @@ export const startHost = () => invokeCommand<HostStatus>("start_host");
 
 export const stopHost = () => invokeCommand<HostStatus>("stop_host");
 
-// set_auto_approve is registered in the Rust invoke handler but kept out of
-// MAHO_COMMANDS, whose exact 22-entry contract is pinned by ipc.test.ts.
 export const setAutoApprove = (enabled: boolean) =>
-  invokeCommand<HostStatus>("set_auto_approve" as MahoCommand, { enabled });
+  invokeCommand<HostStatus>("set_auto_approve", { enabled });
 
 export const setHostPolicy = (args: SetHostPolicyArgs) =>
   invokeCommand<HostStatus>(
-    "set_host_policy" as MahoCommand,
+    "set_host_policy",
     args as unknown as Record<string, unknown>
   );
 
 export const setStreamOptions = (args: SetStreamOptionsArgs) =>
   invokeCommand<void>(
-    "set_stream_options" as MahoCommand,
+    "set_stream_options",
     args as unknown as Record<string, unknown>
   );
 
 export const getStreamState = () =>
-  invokeCommand<StreamState>("get_stream_state" as MahoCommand);
+  invokeCommand<StreamState>("get_stream_state");
 
 

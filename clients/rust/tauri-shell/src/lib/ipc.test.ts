@@ -25,6 +25,9 @@ import {
   getHostStatus,
   startHost,
   stopHost,
+  hideHost,
+  unhideHost,
+  listHiddenHosts,
 } from "./ipc";
 import type {
   HostItem,
@@ -38,7 +41,7 @@ import type {
   AgentAction,
 } from "./ipc";
 
-const ALL_22_COMMANDS = [
+const ALL_25_COMMANDS = [
   "list_hosts",
   "connect",
   "get_cursor_position",
@@ -61,6 +64,13 @@ const ALL_22_COMMANDS = [
   "get_host_status",
   "start_host",
   "stop_host",
+  "hide_host",
+  "unhide_host",
+  "list_hidden_hosts",
+  "set_auto_approve",
+  "set_host_policy",
+  "set_stream_options",
+  "get_stream_state",
 ] as const;
 
 const DYNAMIC_7_COMMANDS = [
@@ -74,12 +84,12 @@ const DYNAMIC_7_COMMANDS = [
 ] as const;
 
 describe("MAHO_COMMANDS registry", () => {
-  it("has exact length of 22 commands", () => {
-    expect(MAHO_COMMANDS.length).toBe(22);
+  it("has exact length matching the command contract", () => {
+    expect(MAHO_COMMANDS.length).toBe(ALL_25_COMMANDS.length);
   });
 
-  it("contains all 22 authoritative backend commands", () => {
-    for (const cmd of ALL_22_COMMANDS) {
+  it("contains all 25 authoritative backend commands", () => {
+    for (const cmd of ALL_25_COMMANDS) {
       expect(MAHO_COMMANDS).toContain(cmd);
     }
   });
@@ -260,6 +270,8 @@ describe("named thin wrappers", () => {
                 return mockAudioStatus;
               case "list_pairings":
                 return [mockPairing];
+              case "list_hidden_hosts":
+                return ["Desk-PC"];
               case "stats":
                 return mockStats;
               case "agent_get_screen_info":
@@ -414,6 +426,25 @@ describe("named thin wrappers", () => {
     await stopHost();
     expect(invoked[invoked.length - 1]).toEqual({
       cmd: "stop_host",
+      args: undefined,
+    });
+
+    await hideHost("Desk-PC");
+    expect(invoked[invoked.length - 1]).toEqual({
+      cmd: "hide_host",
+      args: { name: "Desk-PC" },
+    });
+
+    await unhideHost("Desk-PC");
+    expect(invoked[invoked.length - 1]).toEqual({
+      cmd: "unhide_host",
+      args: { name: "Desk-PC" },
+    });
+
+    const hidden = await listHiddenHosts();
+    expect(hidden).toEqual(["Desk-PC"]);
+    expect(invoked[invoked.length - 1]).toEqual({
+      cmd: "list_hidden_hosts",
       args: undefined,
     });
   });

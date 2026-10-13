@@ -308,6 +308,23 @@ Saved credentials (`SavedCredentials.tsx`):
   "Connect once with a host PIN to save one." (fg-3).
 - No uppercase badges.
 
+Host list and removal (owned by `ComputersPage.tsx`, rendered by `HostGrid.tsx`):
+
+- The page refreshes on mount, then silently every 4 s while visible (and on
+  `visibilitychange` to visible); background polls never flash the loading
+  state.
+- Hosts render in two sections: `Available` (online) first, then `Offline`
+  (omitted when empty). While `statusMessage` is shown, no sections render.
+- Every card shows a ghost `Remove` action (Trash2 + label, `sm`,
+  `hover:text-destructive hover:bg-destructive/10`), disabled while
+  `removeBusy`. The confirmation (`role="alertdialog"`, `Card`, no portal)
+  names the machine and address. `Remove from list` hides the name
+  (`hide_host`, restorable in Settings > Hidden computers); paired cards also
+  offer `Remove and forget pairing`. Failures use the inline-error recipe.
+- Connect on an unpaired card first tries a PIN-less connect (the backend
+  resolves a saved pairing by address or name); only a `pairing-required`
+  error prefills Direct connection and asks for a PIN.
+
 Direct connection (`DirectConnect.tsx`):
 
 - `surface-card rounded-panel p-5` card. Header: a Cable icon tile (fg-2
@@ -395,6 +412,12 @@ carries its ID or `data-action`.
     offline or busy.
   - `#library-status` (`role="status"`) replaces the grid and contains the
     message.
+  - Sections: `#host-grid` (available) and `#host-grid-offline`.
+  - Removal: `[data-action="remove-host"]` on every card; confirmation
+    `[data-testid="remove-pairing-confirm"]`, failure `#remove-pairing-error`,
+    actions `[data-action="confirm-remove-paired"]` (Remove from list),
+    `[data-action="confirm-forget-paired"]` (paired only) and
+    `[data-action="cancel-remove-paired"]`.
 - Toolbar: `#host-search` (`type="search"`); `#btn-clear-search` present while
   the query is non-empty, and clicking it clears. `#filter-all`,
   `#filter-available`, `#filter-favorites` keep `aria-pressed` "true" or
