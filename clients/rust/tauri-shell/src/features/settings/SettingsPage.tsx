@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { CircleAlert } from "lucide-react"
 import { ThisComputerCard } from "@/features/host/ThisComputerCard"
+import { StartupSettings } from "@/features/settings/StartupSettings"
 import { SavedCredentials } from "@/features/library/SavedCredentials"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -264,6 +265,8 @@ export function SettingsPage({ connection }: SettingsPageProps) {
       <h1 className="text-[26px] font-semibold leading-8 tracking-[-0.02em] text-foreground">
         Settings
       </h1>
+
+      <StartupSettings />
 
       <section className="space-y-3" aria-label="Sharing">
         <h2 className="text-[13px] font-medium text-muted-foreground">Sharing</h2>

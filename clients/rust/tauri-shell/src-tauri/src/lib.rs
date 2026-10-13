@@ -36,6 +36,10 @@ pub mod hidden_hosts;
 #[cfg(test)]
 mod pairing_tests;
 
+mod native_desktop;
+mod native_keys;
+mod native_window;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostItem {
     pub id: String,
@@ -2825,7 +2829,11 @@ pub fn run() {
     }
     tauri::Builder::default()
         .manage(state)
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .setup(|app| {
+            native_desktop::setup(app)?;
+            native_window::setup(app)?;
+            native_keys::setup(app);
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Some(state) = handle.try_state::<AppState>() {
@@ -2835,6 +2843,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            native_desktop::get_autostart,
+            native_desktop::set_autostart,
+            native_desktop::sync_tray_state,
+            native_keys::start_key_capture,
+            native_keys::stop_key_capture,
             commands::list_hosts,
             commands::hide_host,
             commands::unhide_host,

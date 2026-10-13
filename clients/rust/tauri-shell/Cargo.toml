@@ -18,7 +18,8 @@ maho-host = { path = "../maho-host" }
 maho-net = { path = "../maho-net" }
 maho-proto = { path = "../maho-proto" }
 maho-render = { path = "../maho-render" }
-tauri = { version = "2", default-features = false, features = ["wry"] }
+tauri = { version = "2", default-features = false, features = ["wry", "tray-icon"] }
+tauri-plugin-autostart = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 tokio.workspace = true
 serde.workspace = true
