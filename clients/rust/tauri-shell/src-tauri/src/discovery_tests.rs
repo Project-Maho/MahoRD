@@ -75,6 +75,27 @@ fn record(id: &str, name: &str) -> maho_app::PairingRecord {
     }
 }
 
+fn record_with_endpoints(
+    id: &str,
+    name: &str,
+    last_ep_ip: Option<&str>,
+    alias_ips: &[&str],
+) -> maho_app::PairingRecord {
+    maho_app::PairingRecord {
+        id: id.into(),
+        name: name.into(),
+        key: vec![0; 32],
+        added_at_unix_ms: 0,
+        last_endpoint: last_ep_ip.map(|ip| maho_app::PairingEndpoint::new(ip, 19730, 19731)),
+        endpoint_aliases: alias_ips
+            .iter()
+            .map(|ip| maho_app::PairingEndpoint::new(*ip, 19730, 19731))
+            .collect(),
+        relay_url: None,
+        relay_host_id: None,
+    }
+}
+
 #[test]
 fn observed_known_and_other_peers_keep_presence_and_json_fields() {
     let status = serde_json::json!({"Peer": {
@@ -103,25 +124,41 @@ fn observed_known_and_other_peers_keep_presence_and_json_fields() {
 }
 
 #[test]
-fn pairing_does_not_infer_identity_from_testbed_ips_case_or_substrings() {
+fn pairing_infers_identity_from_endpoints_or_case_insensitive_name() {
     let status = serde_json::json!({"Peer": {
         "a": {"HostName":"different-linux", "Online":true, "TailscaleIPs":["100.91.254.71"]},
         "b": {"HostName":"different-windows", "Online":true, "TailscaleIPs":["100.126.171.58"]},
         "c": {"HostName":"INDO", "Online":true, "TailscaleIPs":["100.64.0.9"]},
-        "d": {"HostName":"DESKTOP", "Online":true, "TailscaleIPs":["100.64.0.10"]}
+        "d": {"HostName":"unmatched-peer", "Online":true, "TailscaleIPs":["100.64.0.10"]}
     }});
     let records = [
-        record("linux-key", "indo"),
-        record("windows-key", "DESKTOP-old"),
+        record_with_endpoints("ep-key-1", "some-name", Some("100.91.254.71"), &[]),
+        record_with_endpoints("ep-key-2", "other-name", None, &["100.126.171.58"]),
+        record("indo-key", "indo"),
     ];
     let hosts =
         hosts_from_tailscale_output(output(0, &serde_json::to_vec(&status).unwrap()), &records)
             .unwrap();
     assert_eq!(hosts.len(), 4);
-    for host in hosts {
-        assert!(!host.paired);
-        assert_eq!(host.id, host.ip);
-    }
+
+    let host_a = hosts.iter().find(|h| h.name == "different-linux").unwrap();
+    assert!(host_a.paired);
+    assert_eq!(host_a.id, "ep-key-1");
+
+    let host_b = hosts
+        .iter()
+        .find(|h| h.name == "different-windows")
+        .unwrap();
+    assert!(host_b.paired);
+    assert_eq!(host_b.id, "ep-key-2");
+
+    let host_c = hosts.iter().find(|h| h.name == "INDO").unwrap();
+    assert!(host_c.paired);
+    assert_eq!(host_c.id, "indo-key");
+
+    let host_d = hosts.iter().find(|h| h.name == "unmatched-peer").unwrap();
+    assert!(!host_d.paired);
+    assert_eq!(host_d.id, "100.64.0.10");
 }
 
 #[test]
@@ -220,7 +257,7 @@ fn source_dedup_prioritizes_lan_over_tailscale() {
 }
 
 #[test]
-fn source_dedup_keeps_identical_name_distinct_endpoints_and_does_not_inherit_pairing() {
+fn source_dedup_matches_pairing_on_endpoints_or_name() {
     let lan = Ok(vec![lan_host(
         "desktop-lan._maho-rd._tcp.local.",
         "DESKTOP-1LAPJMP",
@@ -242,32 +279,12 @@ fn source_dedup_keeps_identical_name_distinct_endpoints_and_does_not_inherit_pai
     }]);
     let records = [record("paired-uuid-1234", "DESKTOP-1LAPJMP")];
     let merged = super::commands::merge_discovery_results(lan, tailscale, &records).unwrap();
-    // Discovery remains untrusted; keep identical-name distinct endpoints and do not inherit trust through dedup
-    assert_eq!(
-        merged.len(),
-        2,
-        "identical-name distinct endpoints must NOT be deduplicated into one card"
-    );
-    let lan_card = merged
-        .iter()
-        .find(|h| h.ip == "192.168.0.60")
-        .expect("lan card present");
-    assert_eq!(lan_card.name, "DESKTOP-1LAPJMP");
-    assert!(
-        !lan_card.paired,
-        "LAN card must remain unpaired; must not inherit pairing trust from Tailscale"
-    );
-    assert_eq!(lan_card.id, "desktop-lan._maho-rd._tcp.local.");
-    assert_eq!(lan_card.tcp_port, Some(19730));
-    assert_eq!(lan_card.udp_port, Some(19731));
-
-    let ts_card = merged
-        .iter()
-        .find(|h| h.ip == "100.126.171.58")
-        .expect("ts card present");
-    assert_eq!(ts_card.name, "DESKTOP-1LAPJMP");
-    assert!(ts_card.paired);
-    assert_eq!(ts_card.id, "paired-uuid-1234");
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].id, "paired-uuid-1234");
+    assert!(merged[0].paired);
+    assert_eq!(merged[0].ip, "192.168.0.60");
+    assert_eq!(merged[0].tcp_port, Some(19730));
+    assert_eq!(merged[0].udp_port, Some(19731));
 }
 
 #[test]
@@ -289,7 +306,7 @@ fn both_sources_failing_yields_an_error() {
 }
 
 #[test]
-fn lan_host_with_matching_stored_name_remains_unpaired() {
+fn lan_host_with_matching_stored_name_becomes_paired() {
     let records = [record("auth-pair-key-123", "indo")];
     let lan = Ok(vec![lan_host(
         "indo._maho-rd._tcp.local.",
@@ -302,9 +319,114 @@ fn lan_host_with_matching_stored_name_remains_unpaired() {
     let tailscale = Ok(vec![]);
     let merged = super::commands::merge_discovery_results(lan, tailscale, &records).unwrap();
     assert_eq!(merged.len(), 1);
-    assert!(!merged[0].paired);
-    assert_eq!(merged[0].id, "indo._maho-rd._tcp.local.");
-    assert_ne!(merged[0].id, "auth-pair-key-123");
+    assert!(merged[0].paired);
+    assert_eq!(merged[0].id, "auth-pair-key-123");
+    assert_eq!(merged[0].tcp_port, Some(19730));
+    assert_eq!(merged[0].udp_port, Some(19731));
+}
+
+#[test]
+fn tailscale_offline_unpaired_dropped() {
+    let status = serde_json::json!({"Peer": {
+        "offline-unpaired": {"HostName":"ghost", "OS":"linux", "Online":false, "TailscaleIPs":["100.1.1.1"]},
+        "online-unpaired": {"HostName":"active", "OS":"linux", "Online":true, "TailscaleIPs":["100.1.1.2"]}
+    }});
+    let hosts =
+        hosts_from_tailscale_output(output(0, &serde_json::to_vec(&status).unwrap()), &[]).unwrap();
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].name, "active");
+}
+
+#[test]
+fn tailscale_offline_duplicate_superseded_by_online_same_name() {
+    let status = serde_json::json!({"Peer": {
+        "offline-desk": {"HostName":"DESKTOP-1LAPJMP", "OS":"windows", "Online":false, "TailscaleIPs":["100.126.171.58"]},
+        "online-desk": {"HostName":"DESKTOP-1LAPJMP", "OS":"windows", "Online":true, "TailscaleIPs":["100.68.224.49"]}
+    }});
+    let records = [record("desk-id", "DESKTOP-1LAPJMP")];
+    let hosts =
+        hosts_from_tailscale_output(output(0, &serde_json::to_vec(&status).unwrap()), &records)
+            .unwrap();
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].ip, "100.68.224.49");
+    assert!(hosts[0].online);
+    assert!(hosts[0].paired);
+    assert_eq!(hosts[0].id, "desk-id");
+}
+
+#[test]
+fn tailscale_offline_paired_kept_when_no_online_duplicate() {
+    let status = serde_json::json!({"Peer": {
+        "offline-paired": {"HostName":"omarchy", "OS":"linux", "Online":false, "TailscaleIPs":["100.91.254.71"]}
+    }});
+    let records = [record("omarchy-id", "omarchy")];
+    let hosts =
+        hosts_from_tailscale_output(output(0, &serde_json::to_vec(&status).unwrap()), &records)
+            .unwrap();
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].name, "omarchy");
+    assert!(!hosts[0].online);
+    assert!(hosts[0].paired);
+}
+
+#[test]
+fn dedupe_unique_ids_after_merge() {
+    let records = [record("shared-id", "my-box")];
+    let lan = Ok(vec![lan_host(
+        "box-lan._maho-rd._tcp.local.",
+        "my-box",
+        "192.168.1.100",
+        "linux",
+        19730,
+        19731,
+    )]);
+    let tailscale = Ok(vec![super::HostItem {
+        id: "shared-id".into(),
+        name: "my-box".into(),
+        ip: "100.91.254.71".into(),
+        os: "linux".into(),
+        online: true,
+        paired: true,
+        last_seen: None,
+        tcp_port: None,
+        udp_port: None,
+    }]);
+
+    let merged = super::commands::merge_discovery_results(lan, tailscale, &records).unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].id, "shared-id");
+    assert_eq!(merged[0].ip, "192.168.1.100");
+    assert_eq!(merged[0].tcp_port, Some(19730));
+}
+
+#[test]
+fn pinless_resolution_helper_prefers_ip_then_case_insensitive_name() {
+    let records = vec![
+        record_with_endpoints("old-id", "box", Some("10.0.0.1"), &[]),
+        record_with_endpoints("new-id", "box-new", Some("100.91.254.71"), &["10.0.0.2"]),
+        record("name-matched-id", "MaHo-Mac"),
+    ];
+
+    assert_eq!(
+        super::commands::resolve_pairing_id_for_host("100.91.254.71", &records).as_deref(),
+        Some("new-id")
+    );
+    assert_eq!(
+        super::commands::resolve_pairing_id_for_host("10.0.0.2", &records).as_deref(),
+        Some("new-id")
+    );
+    assert_eq!(
+        super::commands::resolve_pairing_id_for_host("maho-mac", &records).as_deref(),
+        Some("name-matched-id")
+    );
+    assert_eq!(
+        super::commands::resolve_pairing_id_for_host("MAHO-MAC", &records).as_deref(),
+        Some("name-matched-id")
+    );
+    assert_eq!(
+        super::commands::resolve_pairing_id_for_host("unknown-host", &records),
+        None
+    );
 }
 
 #[tokio::test]
@@ -324,8 +446,21 @@ async fn absent_executable_uses_the_actual_async_command_seam() {
 #[tokio::test]
 #[ignore = "explicit installed-Tailscale observation; run with --ignored --nocapture"]
 async fn observe_installed_tailscale() -> Result<(), String> {
-    // Calls the Tauri command itself; no fixture, PATH mutation, or store copying.
-    let hosts = super::commands::list_hosts_default().await?;
+    // Mirror the app: a cold first call may return before the background
+    // Tailscale query finishes, so poll the same state once it has settled.
+    let state = super::AppState::default();
+    let _ = super::commands::list_hosts_internal(&state).await;
+    for _ in 0..100 {
+        if !state
+            .discovery
+            .tailscale_refreshing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let hosts = super::commands::list_hosts_internal(&state).await?;
     let observed: Vec<_> = hosts
         .iter()
         .map(|host| {
@@ -347,9 +482,6 @@ async fn managed_state_lan_retry_does_not_permanently_lock_initialization_error(
     let state = super::AppState::default();
     assert!(state.discovery.lan_browser.lock().unwrap().is_none());
     let _ = super::commands::list_hosts_internal(&state).await;
-    // The slot may hold a browser or stay empty when LAN discovery cannot
-    // initialize here; what must not happen is the lock staying poisoned or
-    // held, which would make every later retry fail.
     assert!(
         state.discovery.lan_browser.try_lock().is_ok(),
         "lan_browser lock was left held after list_hosts_internal"

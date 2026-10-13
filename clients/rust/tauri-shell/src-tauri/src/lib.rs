@@ -25,13 +25,14 @@ use maho_proto::{ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdat
 use maho_proto::{InputEvent, InputEventType, Modifiers};
 use maho_render::{AudioOutputDevice, AudioOutputStatus, AudioQueue, CpalAudioOutput};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 #[cfg(target_os = "macos")]
 use maho_app::platform::SystemClipboard;
 
 #[cfg(test)]
 mod discovery_tests;
+pub mod hidden_hosts;
 #[cfg(test)]
 mod pairing_tests;
 
@@ -1155,29 +1156,43 @@ pub mod commands {
         let ts_result = match cached_ts {
             Some(cache) => cache.result,
             None => {
-                if lan_res.is_ok() {
-                    Err("Tailscale background query in progress".into())
-                } else {
-                    tokio::time::timeout(Duration::from_millis(100), async {
-                        while state.discovery.tailscale_refreshing.load(Ordering::Relaxed) {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    })
-                    .await
-                    .ok();
-                    state
-                        .discovery
-                        .tailscale_cache
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .map(|c| c.result.clone())
-                        .unwrap_or_else(|| Err("Tailscale status unavailable".into()))
-                }
+                let wait_duration = Duration::from_millis(1500);
+                tokio::time::timeout(wait_duration, async {
+                    while state.discovery.tailscale_refreshing.load(Ordering::Relaxed) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .ok();
+                state
+                    .discovery
+                    .tailscale_cache
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| c.result.clone())
+                    .unwrap_or_else(|| Err("Tailscale status unavailable".into()))
             }
         };
 
-        merge_discovery_results(lan_res, ts_result, &records)
+        let merged = merge_discovery_results(lan_res, ts_result, &records)?;
+        let hidden = hidden_hosts::load_hidden_hosts().unwrap_or_default();
+        Ok(hidden_hosts::filter_hidden_hosts(merged, &hidden))
+    }
+
+    #[tauri::command]
+    pub fn hide_host(name: String) -> Result<(), String> {
+        hidden_hosts::add_hidden_host(&name)
+    }
+
+    #[tauri::command]
+    pub fn unhide_host(name: String) -> Result<(), String> {
+        hidden_hosts::remove_hidden_host(&name)
+    }
+
+    #[tauri::command]
+    pub fn list_hidden_hosts() -> Result<Vec<String>, String> {
+        hidden_hosts::load_hidden_hosts()
     }
 
     pub(super) async fn tailscale_status(
@@ -1197,6 +1212,59 @@ pub mod commands {
         .map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::TimedOut, "Tailscale status timed out")
         })?
+    }
+
+    pub fn match_pairing_record<'a>(
+        ip: &str,
+        name: &str,
+        records: &'a [maho_app::PairingRecord],
+    ) -> Option<&'a maho_app::PairingRecord> {
+        let endpoint_match = records.iter().rev().find(|r| {
+            if let Some(ref ep) = r.last_endpoint {
+                if ep.host == ip {
+                    return true;
+                }
+            }
+            r.endpoint_aliases.iter().any(|alias| alias.host == ip)
+        });
+        if endpoint_match.is_some() {
+            return endpoint_match;
+        }
+
+        let trimmed_name = name.trim();
+        records
+            .iter()
+            .rev()
+            .find(|r| r.name.trim().eq_ignore_ascii_case(trimmed_name))
+    }
+
+    pub fn resolve_pairing_id_for_host(
+        host: &str,
+        records: &[maho_app::PairingRecord],
+    ) -> Option<String> {
+        let trimmed_host = host.trim();
+        if trimmed_host.is_empty() {
+            return None;
+        }
+        let endpoint_match = records.iter().rev().find(|r| {
+            if let Some(ref ep) = r.last_endpoint {
+                if ep.host == trimmed_host {
+                    return true;
+                }
+            }
+            r.endpoint_aliases
+                .iter()
+                .any(|alias| alias.host == trimmed_host)
+        });
+        if let Some(record) = endpoint_match {
+            return Some(record.id.clone());
+        }
+
+        records
+            .iter()
+            .rev()
+            .find(|r| r.name.trim().eq_ignore_ascii_case(trimmed_host))
+            .map(|r| r.id.clone())
     }
 
     pub(super) fn hosts_from_tailscale_output(
@@ -1228,7 +1296,9 @@ pub mod commands {
             ips: Vec<String>,
         }
 
-        let mut hosts = Vec::new();
+        let mut parsed_peers = Vec::new();
+        let mut online_names = std::collections::HashSet::new();
+
         for value in peers.values() {
             let peer: Peer = serde_json::from_value(value.clone())
                 .map_err(|_| "Invalid Tailscale peer fields".to_string())?;
@@ -1243,21 +1313,45 @@ pub mod commands {
                 }
             }
 
-            if let Some(ip) = peer.ips.first().filter(|ip| !ip.is_empty()) {
-                // Legacy display hint only, not stable identity or authentication proof.
-                let record = records.iter().rev().find(|r| r.name == peer.host_name);
-                hosts.push(HostItem {
-                    id: record.map(|r| r.id.clone()).unwrap_or_else(|| ip.clone()),
-                    name: peer.host_name,
-                    ip: ip.clone(),
-                    os: peer.os.unwrap_or_else(|| "unknown".into()),
-                    online: peer.online,
-                    paired: record.is_some(),
-                    last_seen: None,
-                    tcp_port: None,
-                    udp_port: None,
-                });
+            if peer.online {
+                online_names.insert(peer.host_name.trim().to_ascii_lowercase());
             }
+            parsed_peers.push(peer);
+        }
+
+        let mut hosts = Vec::new();
+        for peer in parsed_peers {
+            let ip = match peer.ips.first().filter(|ip| !ip.is_empty()) {
+                Some(ip) => ip.clone(),
+                None => continue,
+            };
+
+            let matched_record = match_pairing_record(&ip, &peer.host_name, records);
+            let is_paired = matched_record.is_some();
+
+            if !peer.online {
+                if !is_paired {
+                    continue;
+                }
+                let lower_name = peer.host_name.trim().to_ascii_lowercase();
+                if online_names.contains(&lower_name) {
+                    continue;
+                }
+            }
+
+            hosts.push(HostItem {
+                id: matched_record
+                    .map(|r| r.id.clone())
+                    .unwrap_or_else(|| ip.clone()),
+                name: peer.host_name,
+                ip,
+                os: peer.os.unwrap_or_else(|| "unknown".into()),
+                online: peer.online,
+                paired: is_paired,
+                last_seen: None,
+                tcp_port: None,
+                udp_port: None,
+            });
         }
         Ok(hosts)
     }
@@ -1265,7 +1359,7 @@ pub mod commands {
     pub fn merge_discovery_results(
         lan: Result<Vec<maho_net::discovery::DiscoveredHost>, maho_net::discovery::DiscoveryError>,
         tailscale: Result<Vec<HostItem>, String>,
-        _records: &[maho_app::PairingRecord],
+        records: &[maho_app::PairingRecord],
     ) -> Result<Vec<HostItem>, String> {
         match (lan, tailscale) {
             (Err(lan_err), Err(ts_err)) => {
@@ -1274,52 +1368,116 @@ pub mod commands {
                 ))
             }
             (Ok(lan_hosts), Err(_)) => {
-                let items = lan_hosts
-                    .into_iter()
-                    .map(|h| HostItem {
-                        id: h.id,
-                        name: h.name,
-                        ip: h.ip,
-                        os: h.os,
-                        online: true,
-                        paired: false,
-                        last_seen: None,
-                        tcp_port: Some(h.tcp_port),
-                        udp_port: Some(h.udp_port),
-                    })
-                    .collect();
-                Ok(items)
-            }
-            (Err(_), Ok(ts_hosts)) => Ok(ts_hosts),
-            (Ok(lan_hosts), Ok(ts_hosts)) => {
-                let mut merged: Vec<HostItem> = Vec::new();
-                let mut seen_ips = std::collections::HashSet::new();
-
+                let mut items = Vec::new();
                 for h in lan_hosts {
-                    seen_ips.insert(h.ip.clone());
-                    merged.push(HostItem {
-                        id: h.id,
+                    let matched = match_pairing_record(&h.ip, &h.name, records);
+                    let is_paired = matched.is_some();
+                    let id = matched.map(|r| r.id.clone()).unwrap_or(h.id);
+                    items.push(HostItem {
+                        id,
                         name: h.name,
                         ip: h.ip,
                         os: h.os,
                         online: true,
-                        paired: false,
+                        paired: is_paired,
                         last_seen: None,
                         tcp_port: Some(h.tcp_port),
                         udp_port: Some(h.udp_port),
                     });
                 }
+                Ok(dedupe_host_items(items))
+            }
+            (Err(_), Ok(ts_hosts)) => Ok(dedupe_host_items(ts_hosts)),
+            (Ok(lan_hosts), Ok(ts_hosts)) => {
+                let mut candidates: Vec<(HostItem, bool)> = Vec::new();
+                let mut seen_ips = std::collections::HashSet::new();
+
+                for h in lan_hosts {
+                    seen_ips.insert(h.ip.clone());
+                    let matched = match_pairing_record(&h.ip, &h.name, records);
+                    let is_paired = matched.is_some();
+                    let id = matched.map(|r| r.id.clone()).unwrap_or(h.id);
+                    candidates.push((
+                        HostItem {
+                            id,
+                            name: h.name,
+                            ip: h.ip,
+                            os: h.os,
+                            online: true,
+                            paired: is_paired,
+                            last_seen: None,
+                            tcp_port: Some(h.tcp_port),
+                            udp_port: Some(h.udp_port),
+                        },
+                        true,
+                    ));
+                }
 
                 for th in ts_hosts {
                     if !seen_ips.contains(&th.ip) {
                         seen_ips.insert(th.ip.clone());
-                        merged.push(th);
+                        candidates.push((th, false));
+                    }
+                }
+
+                let mut by_id: std::collections::HashMap<String, (HostItem, bool)> =
+                    std::collections::HashMap::new();
+                let mut order: Vec<String> = Vec::new();
+
+                for (item, is_lan) in candidates {
+                    let id = item.id.clone();
+                    if let Some(existing) = by_id.get_mut(&id) {
+                        let replace = match (existing.0.online, item.online) {
+                            (false, true) => true,
+                            (true, false) => false,
+                            (true, true) => !existing.1 && is_lan,
+                            (false, false) => false,
+                        };
+                        if replace {
+                            *existing = (item, is_lan);
+                        }
+                    } else {
+                        order.push(id.clone());
+                        by_id.insert(id, (item, is_lan));
+                    }
+                }
+
+                let mut merged = Vec::new();
+                for id in order {
+                    if let Some((item, _)) = by_id.remove(&id) {
+                        merged.push(item);
                     }
                 }
 
                 Ok(merged)
             }
         }
+    }
+
+    fn dedupe_host_items(items: Vec<HostItem>) -> Vec<HostItem> {
+        let mut by_id: std::collections::HashMap<String, HostItem> =
+            std::collections::HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+
+        for item in items {
+            let id = item.id.clone();
+            if let Some(existing) = by_id.get_mut(&id) {
+                if !existing.online && item.online {
+                    *existing = item;
+                }
+            } else {
+                order.push(id.clone());
+                by_id.insert(id, item);
+            }
+        }
+
+        let mut result = Vec::new();
+        for id in order {
+            if let Some(item) = by_id.remove(&id) {
+                result.push(item);
+            }
+        }
+        result
     }
 
     pub fn classify_session_error(err: &maho_app::SessionError) -> IpcError {
@@ -1401,6 +1559,16 @@ pub mod commands {
         }
     }
 
+    pub fn is_pairing_auth_error(err: &IpcError) -> bool {
+        matches!(
+            err.code,
+            IpcErrorCode::PairingDenied
+                | IpcErrorCode::PairingLockedOut
+                | IpcErrorCode::PairingDisabled
+                | IpcErrorCode::PairingRequired
+        ) || matches!(err.stage, IpcErrorStage::Preauth | IpcErrorStage::TlsPsk)
+    }
+
     #[tauri::command]
     pub async fn connect(
         state: State<'_, AppState>,
@@ -1434,14 +1602,33 @@ pub mod commands {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        if trimmed_pin.is_none() && trimmed_id.is_none() {
-            return Err(IpcError::pairing_required(
-                "PIN required for initial authorization",
-            ));
-        }
+        let effective_pairing_id = if trimmed_pin.is_none() && trimmed_id.is_none() {
+            let store = PairingStore::open_default().map_err(|e| {
+                IpcError::connection_failed(
+                    IpcErrorStage::Client,
+                    format!("Pairing store error: {e}"),
+                )
+            })?;
+            let records = store.load_all().map_err(|e| {
+                IpcError::connection_failed(
+                    IpcErrorStage::Client,
+                    format!("Load pairings error: {e}"),
+                )
+            })?;
+            match resolve_pairing_id_for_host(&host, &records) {
+                Some(resolved_id) => Some(resolved_id),
+                None => {
+                    return Err(IpcError::pairing_required(
+                        "PIN required for initial authorization",
+                    ));
+                }
+            }
+        } else {
+            trimmed_id.map(|s| s.to_string())
+        };
 
         if trimmed_pin.is_none() {
-            if let Some(id) = trimmed_id {
+            if let Some(ref id) = effective_pairing_id {
                 let store = PairingStore::open_default().map_err(|e| {
                     IpcError::connection_failed(
                         IpcErrorStage::Client,
@@ -1465,18 +1652,87 @@ pub mod commands {
             }
         }
 
-        match connect_session(&state, host, tcp_port, udp_port, pin, pairing_id).await {
+        let first_id = effective_pairing_id.clone();
+        match connect_session(
+            &state,
+            host.clone(),
+            tcp_port,
+            udp_port,
+            pin.clone(),
+            first_id.clone(),
+        )
+        .await
+        {
             Ok(response) => Ok(response),
-            Err(error) => {
+            Err(first_error) => {
+                let _ = disconnect_internal(&state).await;
+
+                if trimmed_pin.is_none()
+                    && first_id.is_some()
+                    && is_pairing_auth_error(&first_error)
+                {
+                    let fallback_ids = {
+                        let store = PairingStore::open_default().ok();
+                        let records = store.and_then(|s| s.load_all().ok()).unwrap_or_default();
+                        let primary_id = first_id.as_deref().unwrap_or_default();
+                        let primary_record = records.iter().find(|r| r.id == primary_id);
+                        let primary_name =
+                            primary_record.map(|r| r.name.trim().to_ascii_lowercase());
+
+                        let mut candidates = Vec::new();
+                        for r in records.iter().rev() {
+                            if r.id == primary_id {
+                                continue;
+                            }
+                            let matches_endpoint = r
+                                .last_endpoint
+                                .as_ref()
+                                .map(|ep| ep.host == host)
+                                .unwrap_or(false)
+                                || r.endpoint_aliases.iter().any(|alias| alias.host == host);
+                            let matches_name = match &primary_name {
+                                Some(name) => r.name.trim().to_ascii_lowercase() == *name,
+                                None => false,
+                            };
+                            if matches_endpoint || matches_name {
+                                candidates.push(r.id.clone());
+                                if candidates.len() == 2 {
+                                    break;
+                                }
+                            }
+                        }
+                        candidates
+                    };
+
+                    for candidate_id in fallback_ids {
+                        state.clear_metrics();
+                        match connect_session(
+                            &state,
+                            host.clone(),
+                            tcp_port,
+                            udp_port,
+                            None,
+                            Some(candidate_id),
+                        )
+                        .await
+                        {
+                            Ok(resp) => return Ok(resp),
+                            Err(_) => {
+                                let _ = disconnect_internal(&state).await;
+                            }
+                        }
+                    }
+                }
+
                 let cleanup_result = disconnect_internal(&state).await;
                 if let Err(cleanup_err) = cleanup_result {
                     Err(IpcError::new(
-                        error.code,
+                        first_error.code,
                         IpcErrorStage::Cleanup,
-                        format!("{}\nCleanup failed: {}", error.message, cleanup_err),
+                        format!("{}\nCleanup failed: {}", first_error.message, cleanup_err),
                     ))
                 } else {
-                    Err(error)
+                    Err(first_error)
                 }
             }
         }
@@ -2569,8 +2825,20 @@ pub fn run() {
     }
     tauri::Builder::default()
         .manage(state)
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = handle.try_state::<AppState>() {
+                    let _ = commands::list_hosts_internal(&state).await;
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_hosts,
+            commands::hide_host,
+            commands::unhide_host,
+            commands::list_hidden_hosts,
             commands::list_pairings,
             commands::forget_pairing,
             commands::connect,
