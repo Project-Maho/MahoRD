@@ -22,6 +22,13 @@ impl Capabilities {
     pub const PEN_INPUT: Self = Self(1 << 6);
     pub const AUTHENTICATED_UDP_REGISTRATION: Self = Self(1 << 7);
     pub const STREAM_OPTIONS: Self = Self(1 << 8);
+    pub const SECURE_ATTENTION: Self = Self(1 << 9);
+    pub const HOST_STATUS: Self = Self(1 << 10);
+    pub const SESSION_ENDED: Self = Self(1 << 11);
+    pub const GUEST_PERMISSIONS: Self = Self(1 << 12);
+    pub const PAIRING_TRUST: Self = Self(1 << 13);
+    pub const CLIPBOARD_IMAGE: Self = Self(1 << 14);
+    pub const RTT_PROBE: Self = Self(1 << 15);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -37,7 +44,14 @@ impl Capabilities {
                 | Self::GAMEPAD.0
                 | Self::PEN_INPUT.0
                 | Self::AUTHENTICATED_UDP_REGISTRATION.0
-                | Self::STREAM_OPTIONS.0,
+                | Self::STREAM_OPTIONS.0
+                | Self::SECURE_ATTENTION.0
+                | Self::HOST_STATUS.0
+                | Self::SESSION_ENDED.0
+                | Self::GUEST_PERMISSIONS.0
+                | Self::PAIRING_TRUST.0
+                | Self::CLIPBOARD_IMAGE.0
+                | Self::RTT_PROBE.0,
         )
     }
 

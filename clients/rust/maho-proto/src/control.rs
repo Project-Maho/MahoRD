@@ -1,6 +1,8 @@
 use crate::{
     codec::{checked_bytes, push_i32, push_u16, push_u32, usize_to_u16, Decoder},
-    CodecError, WireCodec,
+    Capabilities, ClipboardImageChunk, CodecError, GuestPermissions, HostStatus, PairingTrustGrant,
+    PairingTrustRequest, RttProbe, SecureAttentionRequest, SecureAttentionResponse, SessionEnded,
+    WireCodec,
 };
 
 pub const MAX_CLIPBOARD_TEXT_BYTES: usize = 4096;
@@ -29,10 +31,20 @@ pub enum ControlMessageType {
     StreamOptionsActive = 16,
     HostDisplayList = 17,
     HostPolicy = 18,
+    SecureAttentionRequest = 19,
+    SecureAttentionResponse = 20,
+    HostStatus = 21,
+    SessionEnded = 22,
+    GuestPermissions = 23,
+    PairingTrustRequest = 24,
+    PairingTrustGrant = 25,
+    ClipboardImageChunk = 26,
+    RttPing = 27,
+    RttPong = 28,
 }
 
 impl ControlMessageType {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 29] = [
         Self::RequestKeyFrame,
         Self::StartStream,
         Self::StopStream,
@@ -52,7 +64,44 @@ impl ControlMessageType {
         Self::StreamOptionsActive,
         Self::HostDisplayList,
         Self::HostPolicy,
+        Self::SecureAttentionRequest,
+        Self::SecureAttentionResponse,
+        Self::HostStatus,
+        Self::SessionEnded,
+        Self::GuestPermissions,
+        Self::PairingTrustRequest,
+        Self::PairingTrustGrant,
+        Self::ClipboardImageChunk,
+        Self::RttPing,
+        Self::RttPong,
     ];
+
+    /// Additional capability required on both peers for parity extensions.
+    /// Legacy message negotiation remains governed by its existing contract.
+    pub const fn required_capability(self) -> Option<Capabilities> {
+        match self {
+            Self::SecureAttentionRequest | Self::SecureAttentionResponse => {
+                Some(Capabilities::SECURE_ATTENTION)
+            }
+            Self::HostStatus => Some(Capabilities::HOST_STATUS),
+            Self::SessionEnded => Some(Capabilities::SESSION_ENDED),
+            Self::GuestPermissions => Some(Capabilities::GUEST_PERMISSIONS),
+            Self::PairingTrustRequest | Self::PairingTrustGrant => {
+                Some(Capabilities::PAIRING_TRUST)
+            }
+            Self::ClipboardImageChunk => Some(Capabilities::CLIPBOARD_IMAGE),
+            Self::RttPing | Self::RttPong => Some(Capabilities::RTT_PROBE),
+            _ => None,
+        }
+    }
+
+    /// Check before sending or accepting any new control message.
+    pub const fn supported_by(self, local: Capabilities, peer: Capabilities) -> bool {
+        match self.required_capability() {
+            Some(required) => local.contains(required) && peer.contains(required),
+            None => true,
+        }
+    }
 }
 
 impl TryFrom<u8> for ControlMessageType {
@@ -79,6 +128,16 @@ impl TryFrom<u8> for ControlMessageType {
             16 => Ok(Self::StreamOptionsActive),
             17 => Ok(Self::HostDisplayList),
             18 => Ok(Self::HostPolicy),
+            19 => Ok(Self::SecureAttentionRequest),
+            20 => Ok(Self::SecureAttentionResponse),
+            21 => Ok(Self::HostStatus),
+            22 => Ok(Self::SessionEnded),
+            23 => Ok(Self::GuestPermissions),
+            24 => Ok(Self::PairingTrustRequest),
+            25 => Ok(Self::PairingTrustGrant),
+            26 => Ok(Self::ClipboardImageChunk),
+            27 => Ok(Self::RttPing),
+            28 => Ok(Self::RttPong),
             unknown => Err(CodecError::UnknownControlMessageType(unknown)),
         }
     }
@@ -779,6 +838,16 @@ pub enum ControlMessage {
     StreamOptionsActive(StreamOptionsActive),
     HostDisplayList(HostDisplayList),
     HostPolicy(HostPolicy),
+    SecureAttentionRequest(SecureAttentionRequest),
+    SecureAttentionResponse(SecureAttentionResponse),
+    HostStatus(HostStatus),
+    SessionEnded(SessionEnded),
+    GuestPermissions(GuestPermissions),
+    PairingTrustRequest(PairingTrustRequest),
+    PairingTrustGrant(PairingTrustGrant),
+    ClipboardImageChunk(ClipboardImageChunk),
+    RttPing(RttProbe),
+    RttPong(RttProbe),
 }
 
 impl ControlMessage {
@@ -803,6 +872,16 @@ impl ControlMessage {
             Self::StreamOptionsActive(_) => ControlMessageType::StreamOptionsActive,
             Self::HostDisplayList(_) => ControlMessageType::HostDisplayList,
             Self::HostPolicy(_) => ControlMessageType::HostPolicy,
+            Self::SecureAttentionRequest(_) => ControlMessageType::SecureAttentionRequest,
+            Self::SecureAttentionResponse(_) => ControlMessageType::SecureAttentionResponse,
+            Self::HostStatus(_) => ControlMessageType::HostStatus,
+            Self::SessionEnded(_) => ControlMessageType::SessionEnded,
+            Self::GuestPermissions(_) => ControlMessageType::GuestPermissions,
+            Self::PairingTrustRequest(_) => ControlMessageType::PairingTrustRequest,
+            Self::PairingTrustGrant(_) => ControlMessageType::PairingTrustGrant,
+            Self::ClipboardImageChunk(_) => ControlMessageType::ClipboardImageChunk,
+            Self::RttPing(_) => ControlMessageType::RttPing,
+            Self::RttPong(_) => ControlMessageType::RttPong,
         }
     }
 }
@@ -830,6 +909,15 @@ impl WireCodec for ControlMessage {
             Self::StreamOptionsActive(value) => value.encode()?,
             Self::HostDisplayList(value) => value.encode()?,
             Self::HostPolicy(value) => value.encode()?,
+            Self::SecureAttentionRequest(value) => value.encode()?,
+            Self::SecureAttentionResponse(value) => value.encode()?,
+            Self::HostStatus(value) => value.encode()?,
+            Self::SessionEnded(value) => value.encode()?,
+            Self::GuestPermissions(value) => value.encode()?,
+            Self::PairingTrustRequest(value) => value.encode()?,
+            Self::PairingTrustGrant(value) => value.encode()?,
+            Self::ClipboardImageChunk(value) => value.encode()?,
+            Self::RttPing(value) | Self::RttPong(value) => value.encode()?,
         };
         output.extend_from_slice(&body);
         Ok(output)
@@ -899,6 +987,28 @@ impl WireCodec for ControlMessage {
                 Ok(Self::HostDisplayList(HostDisplayList::decode(body)?))
             }
             ControlMessageType::HostPolicy => Ok(Self::HostPolicy(HostPolicy::decode(body)?)),
+            ControlMessageType::SecureAttentionRequest => Ok(Self::SecureAttentionRequest(
+                SecureAttentionRequest::decode(body)?,
+            )),
+            ControlMessageType::SecureAttentionResponse => Ok(Self::SecureAttentionResponse(
+                SecureAttentionResponse::decode(body)?,
+            )),
+            ControlMessageType::HostStatus => Ok(Self::HostStatus(HostStatus::decode(body)?)),
+            ControlMessageType::SessionEnded => Ok(Self::SessionEnded(SessionEnded::decode(body)?)),
+            ControlMessageType::GuestPermissions => {
+                Ok(Self::GuestPermissions(GuestPermissions::decode(body)?))
+            }
+            ControlMessageType::PairingTrustRequest => Ok(Self::PairingTrustRequest(
+                PairingTrustRequest::decode(body)?,
+            )),
+            ControlMessageType::PairingTrustGrant => {
+                Ok(Self::PairingTrustGrant(PairingTrustGrant::decode(body)?))
+            }
+            ControlMessageType::ClipboardImageChunk => Ok(Self::ClipboardImageChunk(
+                ClipboardImageChunk::decode(body)?,
+            )),
+            ControlMessageType::RttPing => Ok(Self::RttPing(RttProbe::decode(body)?)),
+            ControlMessageType::RttPong => Ok(Self::RttPong(RttProbe::decode(body)?)),
         }
     }
 }
