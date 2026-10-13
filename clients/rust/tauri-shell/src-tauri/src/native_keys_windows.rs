@@ -105,9 +105,9 @@ unsafe extern "system" fn callback(code: i32, wparam: usize, lparam: isize) -> i
                 return false;
             }
             // SAFETY: Windows provides a live KBDLLHOOKSTRUCT for nonnegative hook codes.
-            let data = unsafe { &*std::ptr::with_exposed_provenance::<KeyData>(lparam as usize) };
+            let data = unsafe { &*(lparam as *const KeyData) };
             // SAFETY: GetForegroundWindow has no pointer arguments or caller preconditions.
-            let focused = unsafe { GetForegroundWindow() }.addr() == context.hwnd;
+            let focused = unsafe { GetForegroundWindow() } as usize == context.hwnd;
             if !focused {
                 context.active = false;
                 release(context);
@@ -198,8 +198,7 @@ pub fn start(window: tauri::WebviewWindow) -> Result<(), CaptureError> {
     let hwnd = window
         .hwnd()
         .map_err(|e| CaptureError::Failed(e.to_string()))?
-        .0
-        .addr();
+        .0 as usize;
     let app = window.app_handle().clone();
     let capture = app.state::<Capture>();
     let mut worker = capture
@@ -233,6 +232,8 @@ pub fn start(window: tauri::WebviewWindow) -> Result<(), CaptureError> {
                 let error = std::io::Error::last_os_error();
                 let error = if error.raw_os_error() == Some(5) {
                     CaptureError::PermissionDenied(error.to_string())
+                } else if error.raw_os_error() == Some(50) {
+                    CaptureError::Unsupported(error.to_string())
                 } else {
                     CaptureError::Failed(error.to_string())
                 };

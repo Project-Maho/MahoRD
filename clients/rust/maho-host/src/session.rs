@@ -1304,6 +1304,14 @@ fn stop_pipeline(slot: &PipelineSlot) -> bool {
 
 trait MediaSource: Send + Sync {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError>;
+    #[cfg(target_os = "windows")]
+    fn supports_cpu_scaling(&self) -> bool {
+        true
+    }
+    #[cfg(target_os = "windows")]
+    fn output_target(&self) -> Option<TargetDisplay> {
+        None
+    }
     #[cfg(test)]
     fn sender_exited(&self) {}
 }
@@ -2026,6 +2034,21 @@ impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
 
 #[cfg(target_os = "windows")]
 impl MediaSource for WindowsMediaSource {
+    fn supports_cpu_scaling(&self) -> bool {
+        false
+    }
+
+    fn output_target(&self) -> Option<TargetDisplay> {
+        WindowsCapture::selected_output_metadata(self.display_index)
+            .ok()
+            .map(|meta| TargetDisplay {
+                x: meta.desktop_x,
+                y: meta.desktop_y,
+                width: meta.pixel_width,
+                height: meta.pixel_height,
+            })
+    }
+
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -3736,7 +3759,8 @@ impl HostServer {
                             bitrate: active_bitrate,
                         };
                         let (tx, rx) = mpsc::sync_channel(16);
-                        let handle = factory(&restart).start(tx)?;
+                        let source = factory(&restart);
+                        let handle = source.start(tx)?;
                         if let Some(tx) = &swap_tx {
                             tx.send((rx, width, height))
                                 .map_err(|_| SessionError::MediaStopped)?;
@@ -3759,15 +3783,8 @@ impl HostServer {
                             input.update_geometry(geometry).map_err(SessionError::Io)?;
                         }
                         #[cfg(target_os = "windows")]
-                        if let Ok(meta) =
-                            WindowsCapture::selected_output_metadata(display.index as usize)
-                        {
-                            input.update_target(TargetDisplay {
-                                x: meta.desktop_x,
-                                y: meta.desktop_y,
-                                width: meta.pixel_width,
-                                height: meta.pixel_height,
-                            });
+                        if let Some(target) = source.output_target() {
+                            input.update_target(target);
                             input.refresh_virtual_desktop().map_err(SessionError::Io)?;
                         }
                         #[cfg(target_os = "macos")]
@@ -4661,15 +4678,6 @@ impl HostServer {
                                             }
                                         };
                                         let selected = &displays[request.display_index as usize];
-                                        #[cfg(target_os = "windows")]
-                                        if request.scale_permille != 1000 {
-                                            send_tcp_control(&mut stream, ControlMessage::StreamConfigReject(StreamConfigurationReject {
-                                                request_id: request.request_id,
-                                                reason: StreamConfigurationErrorCode::UnsupportedDimensions,
-                                                message: "Windows CPU capture does not support scaling".into(),
-                                            }))?;
-                                            continue;
-                                        }
                                         #[cfg(all(target_os = "macos", not(test)))]
                                         if request.codec == StreamCodecPreference::H264 {
                                             send_tcp_control(&mut stream, ControlMessage::StreamConfigReject(StreamConfigurationReject {
@@ -4720,6 +4728,17 @@ impl HostServer {
                                             bitrate,
                                         };
                                         let source = factory(&restart);
+                                        #[cfg(target_os = "windows")]
+                                        if request.scale_permille != 1000
+                                            && !source.supports_cpu_scaling()
+                                        {
+                                            send_tcp_control(&mut stream, ControlMessage::StreamConfigReject(StreamConfigurationReject {
+                                                request_id: request.request_id,
+                                                reason: StreamConfigurationErrorCode::UnsupportedDimensions,
+                                                message: "Windows CPU capture does not support scaling".into(),
+                                            }))?;
+                                            continue;
+                                        }
                                         let (tx, rx) = mpsc::sync_channel(16);
                                         let new_handle = match source.start(tx) {
                                             Ok(handle) => handle,
@@ -4785,15 +4804,8 @@ impl HostServer {
                                         active_fps = request.fps as u32;
                                         active_codec = resolved_codec;
                                         #[cfg(target_os = "windows")]
-                                        if let Ok(meta) = WindowsCapture::selected_output_metadata(
-                                            request.display_index as usize,
-                                        ) {
-                                            input.update_target(TargetDisplay {
-                                                x: meta.desktop_x,
-                                                y: meta.desktop_y,
-                                                width: meta.pixel_width,
-                                                height: meta.pixel_height,
-                                            });
+                                        if let Some(target) = source.output_target() {
+                                            input.update_target(target);
                                             input
                                                 .refresh_virtual_desktop()
                                                 .map_err(SessionError::Io)?;
@@ -5793,18 +5805,36 @@ mod tests {
         let mut config = test_config(store, consent);
         config.bootstrap_pin = None;
         let mut server = HostServer::bind_synthetic(config, 0).unwrap();
-        server.preauth_timeout = Duration::from_millis(50);
         prepare_admission_input(&mut server);
+        let tls = TlsPskServer::new(server.current_psks().unwrap()).unwrap();
         let addr = server.tcp_addr().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
-            done_tx.send(server.serve_next()).unwrap();
+            let (socket, peer) = server.tcp_listener.accept().unwrap();
+            socket.set_nodelay(true).unwrap();
+            let stream = tls
+                .accept_stream_until(socket, Instant::now() + Duration::from_secs(2))
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_millis(50);
+            ready_tx.send(deadline).unwrap();
+            let watch = SessionWatch::new(server.session_stall_timeout);
+            let result = server.handle_connection(
+                stream,
+                peer,
+                deadline,
+                None,
+                &watch,
+                &PipelineSlot::default(),
+            );
+            done_tx.send((result, Instant::now())).unwrap();
         });
         let client =
             TlsPskClient::new(PskIdentity::pairing("deadline-client", &[7; 32]).unwrap()).unwrap();
         let tcp = client.connect(addr).unwrap();
+        let deadline = ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         // When: the total application-handshake budget expires with the peer open.
-        let completion = done_rx.recv_timeout(Duration::from_millis(500));
+        let completion = done_rx.recv_timeout(Duration::from_secs(2));
         let ended_before_peer = completion.is_ok();
         let shutdown = tcp
             .ssl_stream()
@@ -5818,8 +5848,10 @@ mod tests {
             ended_before_peer,
             "idle preauth client monopolized host admission"
         );
+        let (result, ended_at) = completion.unwrap();
+        assert!(ended_at >= deadline, "admission ended before its deadline");
         assert!(
-            matches!(completion.unwrap(), Err(SessionError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
+            matches!(result, Err(SessionError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
         );
     }
 
@@ -8855,6 +8887,30 @@ mod tests {
 
         send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
         server_thread.join().unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn stream_option_capabilities_follow_media_source() {
+        let synthetic = SyntheticMediaSource {
+            frame_count: 1,
+            restart_starts: Arc::default(),
+        };
+        let windows = WindowsMediaSource {
+            display_index: 0,
+            fps: 60,
+            width: 1920,
+            height: 1080,
+            bitrate: 10_000_000,
+            codec: VideoCodec::H264,
+            capture_audio: false,
+            desktop_x: 0,
+            desktop_y: 0,
+        };
+
+        assert!(synthetic.supports_cpu_scaling());
+        assert!(synthetic.output_target().is_none());
+        assert!(!windows.supports_cpu_scaling());
     }
 
     #[test]

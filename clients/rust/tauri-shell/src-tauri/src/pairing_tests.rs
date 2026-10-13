@@ -30,6 +30,7 @@ struct TempStoreGuard {
     store_file: PathBuf,
     prev_xdg: Option<String>,
     prev_home: Option<String>,
+    prev_appdata: Option<std::ffi::OsString>,
 }
 
 impl TempStoreGuard {
@@ -51,9 +52,11 @@ impl TempStoreGuard {
 
         let prev_xdg = std::env::var("XDG_DATA_HOME").ok();
         let prev_home = std::env::var("HOME").ok();
+        let prev_appdata = std::env::var_os("APPDATA");
 
         std::env::set_var("XDG_DATA_HOME", &dir);
         std::env::set_var("HOME", &dir);
+        std::env::set_var("APPDATA", &dir);
 
         let store_file = store_dir.join("pairing-keys.json");
         Self {
@@ -62,6 +65,7 @@ impl TempStoreGuard {
             store_file,
             prev_xdg,
             prev_home,
+            prev_appdata,
         }
     }
 
@@ -111,6 +115,10 @@ impl Drop for TempStoreGuard {
         match &self.prev_home {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
+        }
+        match &self.prev_appdata {
+            Some(v) => std::env::set_var("APPDATA", v),
+            None => std::env::remove_var("APPDATA"),
         }
         let _ = fs::remove_dir_all(&self.dir);
     }
