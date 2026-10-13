@@ -60,7 +60,8 @@ async fn execute(scenario: Scenario, unwritable: bool) -> Option<Value> {
                     .packet_type,
                 PacketType::Handshake
             );
-            let handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            let mut handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            handshake.capabilities = maho_proto::Capabilities::AUTHENTICATED_UDP_REGISTRATION;
             let mut ack = PacketHeader::new(PacketType::HandshakeAck, 0, 0, 0)
                 .encode()
                 .unwrap();

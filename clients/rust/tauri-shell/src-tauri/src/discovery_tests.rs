@@ -72,6 +72,7 @@ fn record(id: &str, name: &str) -> maho_app::PairingRecord {
         endpoint_aliases: Vec::new(),
         relay_url: None,
         relay_host_id: None,
+        trust: maho_proto::PairingTrust::Owner,
     }
 }
 
@@ -93,6 +94,7 @@ fn record_with_endpoints(
             .collect(),
         relay_url: None,
         relay_host_id: None,
+        trust: maho_proto::PairingTrust::Owner,
     }
 }
 

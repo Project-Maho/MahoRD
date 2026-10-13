@@ -42,11 +42,10 @@ impl Connected {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let handshake = stream.read_frame().unwrap();
+            let mut ack = maho_proto::Handshake::decode(&handshake[PacketHeader::SIZE..]).unwrap();
+            ack.capabilities = maho_proto::Capabilities::AUTHENTICATED_UDP_REGISTRATION;
             stream
-                .write_frame(&packet(
-                    PacketType::HandshakeAck,
-                    &handshake[PacketHeader::SIZE..],
-                ))
+                .write_frame(&packet(PacketType::HandshakeAck, &ack.encode().unwrap()))
                 .unwrap();
             for index in 0..128 {
                 let update = ControlMessage::ClipboardSyncUpdate(ClipboardSyncUpdate {
@@ -83,6 +82,7 @@ impl Connected {
                 endpoint_aliases: Vec::new(),
                 relay_url: None,
                 relay_host_id: None,
+                trust: maho_proto::PairingTrust::Owner,
             })
             .unwrap();
         let runtime = session.spawn_tcp_runtime().unwrap();

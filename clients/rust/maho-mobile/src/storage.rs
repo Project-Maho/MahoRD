@@ -603,6 +603,7 @@ mod tests {
             endpoint_aliases: Vec::new(),
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::Owner,
         };
 
         store.save_record(&record).unwrap();
@@ -632,6 +633,7 @@ mod tests {
             endpoint_aliases: Vec::new(),
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::Owner,
         };
         store.save_record(&record).unwrap();
 

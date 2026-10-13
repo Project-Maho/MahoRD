@@ -59,7 +59,8 @@ impl Connected {
                     .packet_type,
                 PacketType::Handshake
             );
-            let handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            let mut handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            handshake.capabilities = maho_proto::Capabilities::AUTHENTICATED_UDP_REGISTRATION;
             let mut ack = PacketHeader::new(PacketType::HandshakeAck, 0, 0, 0)
                 .encode()
                 .unwrap();
@@ -88,6 +89,7 @@ impl Connected {
                 endpoint_aliases: Vec::new(),
                 relay_url: None,
                 relay_host_id: None,
+                trust: maho_proto::PairingTrust::Owner,
             })
             .unwrap();
         session

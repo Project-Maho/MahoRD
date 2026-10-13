@@ -249,6 +249,7 @@ fn connect_with_pairing_direct_round_trip() {
         endpoint_aliases: Vec::new(),
         relay_url: None,
         relay_host_id: None,
+        trust: maho_proto::PairingTrust::Owner,
     };
     let ready = session.connect_with_pairing(record).unwrap();
     assert_eq!(ready.server.name, "mock-host");
@@ -303,8 +304,11 @@ fn stalled_consumer_retains_latest_clipboard_and_terminal_error() {
             .unwrap();
         let frame = stream.read_frame().unwrap();
         let (_, payload) = split_packet(&frame);
+        let mut ack = Handshake::decode(payload).unwrap();
+        ack.capabilities =
+            Capabilities::TEXT_CLIPBOARD_SYNC | Capabilities::AUTHENTICATED_UDP_REGISTRATION;
         stream
-            .write_frame(&packet(PacketType::HandshakeAck, payload))
+            .write_frame(&packet(PacketType::HandshakeAck, &ack.encode().unwrap()))
             .unwrap();
         for index in 0..128 {
             let update = ControlMessage::ClipboardSyncUpdate(ClipboardSyncUpdate {
@@ -348,6 +352,7 @@ fn stalled_consumer_retains_latest_clipboard_and_terminal_error() {
             endpoint_aliases: Vec::new(),
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::GuestOnce,
         })
         .unwrap();
     let mut runtime = session.spawn_tcp_runtime().unwrap();
@@ -443,6 +448,7 @@ fn mock_server_abr_bitrate_adjust_round_trip() {
             endpoint_aliases: Vec::new(),
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::Owner,
         })
         .unwrap();
 
@@ -529,6 +535,7 @@ fn mock_server_stream_config_negotiation_round_trip() {
             endpoint_aliases: Vec::new(),
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::Owner,
         })
         .unwrap();
 
@@ -616,6 +623,7 @@ fn udp_client_rejects_host_missing_authenticated_registration_capability() {
         endpoint_aliases: Vec::new(),
         relay_url: None,
         relay_host_id: None,
+        trust: maho_proto::PairingTrust::Owner,
     };
     let result = session.connect_with_pairing(record);
     assert!(
@@ -732,6 +740,7 @@ fn udp_client_sends_authenticated_registration_and_preserves_nonce() {
         endpoint_aliases: Vec::new(),
         relay_url: None,
         relay_host_id: None,
+        trust: maho_proto::PairingTrust::Owner,
     };
     let ready = session.connect_with_pairing(record).unwrap();
     assert_eq!(ready.server.name, "mock-host");

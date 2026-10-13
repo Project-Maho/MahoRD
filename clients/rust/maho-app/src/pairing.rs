@@ -59,6 +59,30 @@ pub struct PairingRecord {
         skip_serializing_if = "Option::is_none"
     )]
     pub relay_host_id: Option<String>,
+    #[serde(default, with = "trust_serde")]
+    pub trust: maho_proto::PairingTrust,
+}
+
+mod trust_serde {
+    use super::*;
+    use maho_proto::WireCodec;
+
+    pub fn serialize<S: Serializer>(
+        trust: &maho_proto::PairingTrust,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        trust
+            .encode()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<maho_proto::PairingTrust, D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        maho_proto::PairingTrust::decode(&bytes).map_err(de::Error::custom)
+    }
 }
 
 impl fmt::Debug for PairingRecord {
@@ -247,6 +271,7 @@ impl PairingRecord {
             endpoint_aliases: Vec::new(),
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::Owner,
         }
     }
 
@@ -1788,6 +1813,7 @@ mod tests {
             endpoint_aliases: vec![],
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::Owner,
         };
 
         // When: converted to PairingSummary and serialized to JSON

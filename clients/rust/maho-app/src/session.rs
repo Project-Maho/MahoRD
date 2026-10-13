@@ -38,6 +38,10 @@ mod tcp_write_tests;
 mod receiver_trace;
 pub use receiver_trace::*;
 
+#[path = "session_parity.rs"]
+mod parity;
+pub use parity::{ReconnectState, SessionInfo, SessionStats};
+
 pub const DEFAULT_TCP_PORT: u16 = 19_730;
 pub const DEFAULT_UDP_PORT: u16 = 19_731;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -66,16 +70,27 @@ pub struct SessionConfig {
 }
 
 impl SessionConfig {
+    pub fn implemented_capabilities() -> Capabilities {
+        Capabilities::STREAM_CONFIGURATION
+            | Capabilities::TEXT_CLIPBOARD_SYNC
+            | Capabilities::AUTHENTICATED_UDP_REGISTRATION
+            | Capabilities::STREAM_OPTIONS
+            | Capabilities::HOST_STATUS
+            | Capabilities::SESSION_ENDED
+            | Capabilities::GUEST_PERMISSIONS
+            | Capabilities::SECURE_ATTENTION
+            | Capabilities::RTT_PROBE
+            | Capabilities::CLIPBOARD_IMAGE
+            | Capabilities::PAIRING_TRUST
+    }
+
     pub fn direct(host: impl Into<String>, client_name: impl Into<String>) -> Self {
         Self {
             host: host.into(),
             tcp_port: DEFAULT_TCP_PORT,
             udp_port: DEFAULT_UDP_PORT,
             client_name: client_name.into(),
-            capabilities: Capabilities::STREAM_CONFIGURATION
-                | Capabilities::TEXT_CLIPBOARD_SYNC
-                | Capabilities::AUTHENTICATED_UDP_REGISTRATION
-                | Capabilities::STREAM_OPTIONS,
+            capabilities: Self::implemented_capabilities(),
             pairing_store_path: None,
             connect_timeout: CONNECT_TIMEOUT,
             handshake_ack_timeout: HANDSHAKE_ACK_TIMEOUT,
@@ -131,7 +146,12 @@ pub fn should_reconnect(error: &SessionError) -> bool {
             | SessionError::TcpRuntimeStopped
             | SessionError::TcpRuntimePanicked(_)
             | SessionError::HandshakeAckTimeout
-    )
+    ) || matches!(error, SessionError::Io(e) | SessionError::Tls(TlsPskError::Io(e)) if matches!(e.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut))
+        // OpenSSL can report an unclean EOF as SSL_ERROR_SYSCALL without an
+        // OS error. The TLS frame reader wraps it in io::ErrorKind::Other.
+        // This is an established-stream failure, not a PSK handshake rejection
+        // (which remains TlsPskError::Handshake and must never be retried).
+        || matches!(error, SessionError::Tls(TlsPskError::Io(e)) if e.kind() == io::ErrorKind::Other)
 }
 
 #[derive(Debug, Error)]
@@ -173,6 +193,12 @@ pub enum SessionError {
     MissingAuthenticatedRegistration,
     #[error("operation cancelled")]
     Cancelled,
+    #[error("operation is unsupported or was not negotiated")]
+    Unsupported,
+    #[error("operation denied by effective guest permissions")]
+    PermissionDenied,
+    #[error("invalid clipboard image transfer")]
+    InvalidClipboardImage,
 }
 
 struct SessionStateInner {
@@ -187,6 +213,7 @@ struct SessionStateInner {
     audio: AudioFragmentReassembler,
     cursor: CursorState,
     stream_state: StreamState,
+    parity: parity::ParityState,
 }
 
 impl Default for SessionStateInner {
@@ -203,6 +230,7 @@ impl Default for SessionStateInner {
             audio: AudioFragmentReassembler::default(),
             cursor: CursorState::default(),
             stream_state: StreamState::default(),
+            parity: parity::ParityState::default(),
         }
     }
 }
@@ -213,11 +241,13 @@ pub struct SessionInterruptHandle {
     socket: Arc<Mutex<Option<std::net::TcpStream>>>,
     cancelled: Arc<AtomicBool>,
     udp: Arc<Mutex<Option<Arc<UdpTransport>>>>,
+    cancel_signal: tokio::sync::watch::Sender<bool>,
 }
 
 impl SessionInterruptHandle {
     pub fn interrupt(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        self.cancel_signal.send_replace(true);
         if let Ok(guard) = self.socket.lock() {
             if let Some(ref socket) = *guard {
                 let _ = socket.shutdown(std::net::Shutdown::Both);
@@ -244,6 +274,9 @@ pub struct ClientSession {
     interrupt_socket: Arc<Mutex<Option<std::net::TcpStream>>>,
     cancelled: Arc<AtomicBool>,
     // Lock before state/tcp when admitting sends or changing runtime ownership.
+    clipboard_send: Arc<Mutex<()>>,
+    image_sequence: Arc<AtomicU32>,
+    cancel_signal: tokio::sync::watch::Sender<bool>,
     tcp_runtime: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
     udp: Arc<Mutex<Option<Arc<UdpTransport>>>>,
     udp_send: Arc<Mutex<Option<DatagramCipher>>>,
@@ -252,7 +285,8 @@ pub struct ClientSession {
     udp_registered: Arc<AtomicBool>,
     registration_attempts: Arc<AtomicU32>,
     relay_endpoint: Arc<Mutex<Option<(String, u16, u16)>>>,
-    relay_stop: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+    relay_stop: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    relay_worker: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     trace: ReceiverTrace,
     #[cfg(test)]
     tcp_wait: Arc<Mutex<Option<mpsc::Sender<()>>>>,
@@ -273,6 +307,9 @@ impl ClientSession {
             tcp: Arc::new(Mutex::new(None)),
             interrupt_socket: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(AtomicBool::new(false)),
+            clipboard_send: Arc::new(Mutex::new(())),
+            image_sequence: Arc::new(AtomicU32::new(0)),
+            cancel_signal: tokio::sync::watch::channel(false).0,
             tcp_runtime: Arc::new(Mutex::new(None)),
             udp: Arc::new(Mutex::new(None)),
             udp_send: Arc::new(Mutex::new(None)),
@@ -282,6 +319,7 @@ impl ClientSession {
             registration_attempts: Arc::new(AtomicU32::new(0)),
             relay_endpoint: Arc::new(Mutex::new(None)),
             relay_stop: Arc::new(Mutex::new(None)),
+            relay_worker: Arc::new(Mutex::new(None)),
             trace: std::env::var_os("MAHO_RECEIVER_TRACE_PATH")
                 .map(|path| ReceiverTrace::at_path(path.into()))
                 .unwrap_or_default(),
@@ -294,6 +332,213 @@ impl ClientSession {
 
     pub fn state(&self) -> Result<SessionState, SessionError> {
         Ok(self.state.lock().map_err(|_| SessionError::Poisoned)?.state)
+    }
+
+    pub fn session_info(&self) -> Result<SessionInfo, SessionError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?
+            .parity
+            .info
+            .clone())
+    }
+
+    pub fn session_stats(&self) -> Result<SessionStats, SessionError> {
+        let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+        let receiver = state.receiver.snapshot(std::time::Instant::now());
+        let mut stats = state.parity.stats.clone();
+        stats.receive_bytes_per_second = receiver.udp_receive_bps.map(|bps| bps / 8.0);
+        stats.packet_loss_ratio = receiver.packet_loss_ratio;
+        Ok(stats)
+    }
+
+    pub fn set_decoder_backend(&self, name: impl Into<String>) -> Result<(), SessionError> {
+        self.state
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?
+            .parity
+            .stats
+            .decoder_backend = Some(name.into());
+        Ok(())
+    }
+
+    fn negotiated(&self, capability: Capabilities) -> Result<bool, SessionError> {
+        let state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+        Ok(self.config.capabilities.contains(capability)
+            && state
+                .server
+                .as_ref()
+                .is_some_and(|s| s.capabilities.contains(capability)))
+    }
+
+    pub fn request_secure_attention(&self) -> Result<u32, SessionError> {
+        if !self.negotiated(Capabilities::SECURE_ATTENTION)? {
+            return Err(SessionError::Unsupported);
+        }
+        let id = {
+            let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+            if state.parity.sas_pending.is_some() {
+                return Err(SessionError::NotReady);
+            }
+            state.parity.next_sas = state
+                .parity
+                .next_sas
+                .checked_add(1)
+                .ok_or(SessionError::Unsupported)?;
+            let id = state.parity.next_sas;
+            state.parity.sas_pending = Some(id);
+            id
+        };
+        if let Err(error) = self.send_control(ControlMessage::SecureAttentionRequest(
+            maho_proto::SecureAttentionRequest { request_id: id },
+        )) {
+            self.state
+                .lock()
+                .map_err(|_| SessionError::Poisoned)?
+                .parity
+                .sas_pending = None;
+            return Err(error);
+        }
+        Ok(id)
+    }
+
+    pub fn set_clipboard_enabled(&self, enabled: bool) -> Result<(), SessionError> {
+        let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+        state.parity.clipboard_enabled = enabled;
+        if !enabled {
+            state.parity.images.discard();
+            state.parity.completed_image = None;
+        }
+        Ok(())
+    }
+
+    pub fn take_clipboard_image(&self) -> Result<Option<Vec<u8>>, SessionError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?
+            .parity
+            .completed_image
+            .take())
+    }
+
+    pub fn effective_permissions(
+        &self,
+    ) -> Result<Option<maho_proto::GuestPermissions>, SessionError> {
+        let state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+        Ok(self.permissions_locked(&state))
+    }
+
+    fn clipboard_allowed(&self) -> Result<bool, SessionError> {
+        let state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+        Ok(state.parity.clipboard_enabled
+            && self
+                .permissions_locked(&state)
+                .map_or(true, |p| p.clipboard))
+    }
+
+    fn permissions_locked(
+        &self,
+        state: &SessionStateInner,
+    ) -> Option<maho_proto::GuestPermissions> {
+        if self
+            .config
+            .capabilities
+            .contains(Capabilities::GUEST_PERMISSIONS)
+            && state
+                .server
+                .as_ref()
+                .is_some_and(|s| s.capabilities.contains(Capabilities::GUEST_PERMISSIONS))
+        {
+            Some(
+                state
+                    .parity
+                    .info
+                    .permissions
+                    .unwrap_or(maho_proto::GuestPermissions {
+                        keyboard: false,
+                        mouse: false,
+                        gamepad: false,
+                        clipboard: false,
+                        audio: false,
+                    }),
+            )
+        } else {
+            state
+                .stream_state
+                .policy
+                .map(|p| maho_proto::GuestPermissions {
+                    keyboard: p.allow_input,
+                    mouse: p.allow_input,
+                    gamepad: true,
+                    clipboard: p.allow_clipboard,
+                    audio: true,
+                })
+        }
+    }
+
+    pub fn send_clipboard_image(&self, png: &[u8]) -> Result<(), SessionError> {
+        if !self.negotiated(Capabilities::CLIPBOARD_IMAGE)? {
+            return Err(SessionError::Unsupported);
+        }
+        if !self.clipboard_allowed()? {
+            return Err(SessionError::PermissionDenied);
+        }
+        if png.len() > maho_proto::MAX_CLIPBOARD_IMAGE_BYTES as usize
+            || !png.starts_with(maho_proto::PNG_SIGNATURE)
+        {
+            return Err(SessionError::InvalidClipboardImage);
+        }
+        let _guard = self
+            .clipboard_send
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?;
+        let id = self
+            .image_sequence
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
+            .map_err(|_| SessionError::Unsupported)?
+            + 1;
+        for (index, chunk) in png
+            .chunks(maho_proto::MAX_CLIPBOARD_IMAGE_CHUNK_BYTES)
+            .enumerate()
+        {
+            if !self.clipboard_allowed()? {
+                return Err(SessionError::PermissionDenied);
+            }
+            self.send_control(ControlMessage::ClipboardImageChunk(
+                maho_proto::ClipboardImageChunk {
+                    transfer_id: id,
+                    total_bytes: png.len() as u32,
+                    offset: (index * maho_proto::MAX_CLIPBOARD_IMAGE_CHUNK_BYTES) as u32,
+                    png_bytes: chunk.to_vec(),
+                },
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn send_rtt_probe(&self) -> Result<(), SessionError> {
+        if !self.negotiated(Capabilities::RTT_PROBE)? {
+            return Ok(());
+        }
+        let timestamp = {
+            let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+            let now = std::time::Instant::now();
+            if state
+                .parity
+                .probe
+                .is_some_and(|(_, sent)| now.duration_since(sent) < Duration::from_secs(10))
+            {
+                return Ok(());
+            }
+            let timestamp = now.duration_since(state.parity.epoch).as_micros() as u64;
+            state.parity.probe = Some((timestamp, now));
+            timestamp
+        };
+        self.send_control(ControlMessage::RttPing(maho_proto::RttProbe {
+            timestamp_us: timestamp,
+        }))
     }
 
     pub fn receiver_trace(&self) -> ReceiverTrace {
@@ -330,6 +575,42 @@ impl ClientSession {
     }
 
     pub fn pair_with_pin(&self, pin: &str) -> Result<ReadySession, SessionError> {
+        self.pair_with_pin_as(pin, maho_proto::PairingTrust::Owner)
+    }
+
+    pub fn pair_with_pin_cancellable(
+        &self,
+        pin: &str,
+        handle: &SessionInterruptHandle,
+    ) -> Result<ReadySession, SessionError> {
+        if !Arc::ptr_eq(&self.cancelled, &handle.cancelled) {
+            return Err(SessionError::Unsupported);
+        }
+        self.pair_with_pin(pin)
+    }
+
+    pub fn connect_with_pairing_cancellable(
+        &self,
+        pairing: PairingRecord,
+        handle: &SessionInterruptHandle,
+    ) -> Result<ReadySession, SessionError> {
+        if !Arc::ptr_eq(&self.cancelled, &handle.cancelled) {
+            return Err(SessionError::Unsupported);
+        }
+        self.connect_with_pairing(pairing)
+    }
+
+    pub fn pair_with_pin_as(
+        &self,
+        pin: &str,
+        preference: maho_proto::PairingTrust,
+    ) -> Result<ReadySession, SessionError> {
+        self.state
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?
+            .parity
+            .info
+            .ended = None;
         let psk = PskIdentity::bootstrap(pin)?;
         self.connect_with_psk(psk, SessionState::AwaitingPairing)?;
         self.send_packet(
@@ -343,7 +624,7 @@ impl ClientSession {
         let pairing = match header.packet_type {
             PacketType::PairingGrant => {
                 let grant = PairingGrant::decode(&payload)?;
-                let record = PairingRecord {
+                PairingRecord {
                     id: grant.pairing_id,
                     name: grant.host_name,
                     key: grant.key.to_vec(),
@@ -352,9 +633,8 @@ impl ClientSession {
                     endpoint_aliases: Vec::new(),
                     relay_url: None,
                     relay_host_id: None,
-                };
-                self.store.save(record.clone())?;
-                record
+                    trust: maho_proto::PairingTrust::Owner,
+                }
             }
             PacketType::PairingReject => {
                 return Err(SessionError::PairingRejected(
@@ -368,7 +648,7 @@ impl ClientSession {
                 });
             }
         };
-        self.begin_handshake(pairing)
+        self.begin_handshake_with_trust(pairing, Some(preference))
     }
 
     pub fn reconnect(&self, pairing_id: &str) -> Result<ReadySession, SessionError> {
@@ -384,6 +664,15 @@ impl ClientSession {
         &self,
         pairing: PairingRecord,
     ) -> Result<ReadySession, SessionError> {
+        if self.is_cancelled() {
+            return Err(SessionError::Cancelled);
+        }
+        self.state
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?
+            .parity
+            .info
+            .ended = None;
         let psk = PskIdentity::pairing(&pairing.id, &pairing.key)?;
         *self
             .relay_endpoint
@@ -392,6 +681,9 @@ impl ClientSession {
         match self.connect_with_psk(psk.clone(), SessionState::AwaitingHandshakeAck) {
             Ok(()) => self.begin_handshake(pairing),
             Err(direct_error) => {
+                if self.is_cancelled() {
+                    return Err(SessionError::Cancelled);
+                }
                 if let Some(endpoint) = self.open_relay_fallback(&pairing) {
                     *self
                         .relay_endpoint
@@ -410,6 +702,11 @@ impl ClientSession {
         if let Ok(mut guard) = self.relay_stop.lock() {
             if let Some(stop) = guard.take() {
                 let _ = stop.send(());
+            }
+        }
+        if let Ok(mut worker) = self.relay_worker.lock() {
+            if let Some(worker) = worker.take() {
+                let _ = worker.join();
             }
         }
         if let Ok(mut endpoint) = self.relay_endpoint.lock() {
@@ -433,12 +730,13 @@ impl ClientSession {
         }
         self.stop_relay_bridge();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+        let mut cancel = self.cancel_signal.subscribe();
         *self.relay_stop.lock().ok()? = Some(stop_tx);
         let url_for_thread = url;
         let secret_for_thread = secret.into_bytes();
         let host_for_thread = host_id;
-        if std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("maho-client-relay".to_owned())
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -452,13 +750,17 @@ impl ClientSession {
                     }
                 };
                 runtime.block_on(async move {
-                    match crate::relay::start_client_bridge(
+                    let bridge = tokio::select! {
+                        biased;
+                        _ = &mut stop_rx => return,
+                        _ = cancel.changed() => return,
+                        result = crate::relay::start_client_bridge(
                         &url_for_thread,
                         &host_for_thread,
                         &secret_for_thread,
-                    )
-                    .await
-                    {
+                    ) => result,
+                    };
+                    match bridge {
                         Ok(bridge) => {
                             tracing::info!(
                                 local_tcp = %bridge.local_tcp,
@@ -471,7 +773,7 @@ impl ClientSession {
                                 bridge.local_tcp.port(),
                                 bridge.local_udp.port(),
                             )));
-                            let _ = tokio::task::spawn_blocking(move || stop_rx.recv()).await;
+                            tokio::select! { _ = &mut stop_rx => {}, _ = cancel.changed() => {} }
                         }
                         Err(error) => {
                             tracing::warn!(%error, "relay fallback bridge failed");
@@ -480,11 +782,13 @@ impl ClientSession {
                     }
                 });
             })
-            .is_err()
-        {
-            return None;
+            .ok()?;
+        *self.relay_worker.lock().ok()? = Some(worker);
+        let result = ready_rx.recv().ok().and_then(Result::ok);
+        if result.is_none() {
+            self.stop_relay_bridge();
         }
-        ready_rx.recv().ok().and_then(Result::ok)
+        result
     }
 
     pub fn set_udp_read_timeout(&self, timeout: Option<Duration>) -> Result<(), SessionError> {
@@ -496,10 +800,36 @@ impl ClientSession {
     }
 
     pub fn send_input(&self, event: InputEvent) -> Result<(), SessionError> {
+        let state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+        if let Some(p) = self.permissions_locked(&state) {
+            use maho_proto::InputEventType::*;
+            let allowed = match event.event_type {
+                Reset => true,
+                KeyDown | KeyUp | FlagsChanged | UnicodeChar => p.keyboard,
+                GamepadAxis | GamepadButtonDown | GamepadButtonUp => p.gamepad,
+                _ => p.mouse,
+            };
+            if !allowed {
+                return Err(SessionError::PermissionDenied);
+            }
+        }
+        drop(state);
         self.send_ready_packet(PacketType::InputEvent, &event.encode()?)
     }
 
     pub fn send_control(&self, control: ControlMessage) -> Result<(), SessionError> {
+        if let Some(capability) = control.message_type().required_capability() {
+            if !self.negotiated(capability)? {
+                return Err(SessionError::Unsupported);
+            }
+        }
+        if matches!(
+            control,
+            ControlMessage::ClipboardSyncUpdate(_) | ControlMessage::ClipboardImageChunk(_)
+        ) && !self.clipboard_allowed()?
+        {
+            return Err(SessionError::PermissionDenied);
+        }
         self.send_ready_packet(PacketType::Control, &control.encode()?)
     }
 
@@ -567,6 +897,10 @@ impl ClientSession {
     }
 
     pub fn send_clipboard_text(&self, text: String) -> Result<(), SessionError> {
+        let _guard = self
+            .clipboard_send
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?;
         self.send_control(ControlMessage::ClipboardSyncUpdate(ClipboardSyncUpdate {
             request_id: 0,
             direction: ClipboardSyncDirection::ClientToHost,
@@ -624,6 +958,155 @@ impl ClientSession {
     /// Stopping closes TCP and cancels all pending frames. Reconnect only after
     /// this runtime has stopped; a partial encrypted connection is not reusable.
     pub fn spawn_tcp_runtime(&self) -> Result<SessionRuntime, SessionError> {
+        let mut generation = self.spawn_tcp_generation()?;
+        let session = self.clone();
+        let events = RuntimeEvents::default();
+        let output = events.clone();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let worker = thread::spawn(move || {
+            let mut next_probe = std::time::Instant::now();
+            loop {
+                if stopped.try_recv().is_ok()
+                    || (session.is_cancelled()
+                        && session
+                            .session_info()
+                            .map_or(true, |info| info.ended.is_none()))
+                {
+                    break;
+                }
+                if std::time::Instant::now() >= next_probe {
+                    let _ = session.send_rtt_probe();
+                    next_probe = std::time::Instant::now() + HEARTBEAT_INTERVAL;
+                }
+                match generation.events().recv_timeout(Duration::from_millis(100)) {
+                    Ok(Ok(event)) => {
+                        let terminal = matches!(
+                            event,
+                            SessionEvent::StreamConfig(ControlMessage::SessionEnded(_))
+                        );
+                        output.push(Ok(event));
+                        if terminal {
+                            break;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    result => {
+                        let error = match result {
+                            Ok(Err(error)) => error,
+                            _ => SessionError::TcpRuntimeStopped,
+                        };
+                        let _ = generation.stop();
+                        let pairing = session.state.lock().ok().and_then(|state| {
+                            if state.parity.info.ended.is_some() {
+                                None
+                            } else {
+                                state.pairing.clone()
+                            }
+                        });
+                        if session.is_cancelled()
+                            && session
+                                .session_info()
+                                .map_or(true, |info| info.ended.is_none())
+                        {
+                            break;
+                        }
+                        if session.is_cancelled()
+                            || !should_reconnect(&error)
+                            || pairing
+                                .as_ref()
+                                .map_or(true, |p| p.trust == maho_proto::PairingTrust::GuestOnce)
+                        {
+                            output.push(Err(error));
+                            break;
+                        }
+                        let pairing = pairing.expect("eligible stored pairing");
+                        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+                        let mut attempt = 0;
+                        let mut reason = error.to_string();
+                        let recovered = loop {
+                            attempt += 1;
+                            let delay = parity::retry_delay(attempt);
+                            if std::time::Instant::now() + delay >= deadline {
+                                break false;
+                            }
+                            if let Ok(mut state) = session.state.lock() {
+                                state.parity.info.reconnect = ReconnectState::Reconnecting {
+                                    attempt,
+                                    next_retry_ms: delay.as_millis() as u64,
+                                };
+                                state.parity.images.discard();
+                                state.parity.probe = None;
+                            }
+                            let runtime = match tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                            {
+                                Ok(runtime) => runtime,
+                                Err(error) => {
+                                    reason = error.to_string();
+                                    break false;
+                                }
+                            };
+                            let mut cancel = session.cancel_signal.subscribe();
+                            let cancelled = runtime.block_on(async { tokio::select! { _ = &mut stopped => true, _ = cancel.changed() => true, _ = tokio::time::sleep(delay) => false } });
+                            if cancelled || session.is_cancelled() {
+                                break false;
+                            }
+                            let mut connector = session.clone();
+                            let remaining =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            connector.config.connect_timeout =
+                                remaining.min(Duration::from_secs(5));
+                            connector.config.handshake_ack_timeout =
+                                remaining.min(Duration::from_secs(5));
+                            match connector.connect_with_pairing(pairing.clone()) {
+                                Ok(_) => match session.spawn_tcp_generation() {
+                                    Ok(replacement) => {
+                                        generation = replacement;
+                                        break true;
+                                    }
+                                    Err(error) => {
+                                        reason = error.to_string();
+                                        break false;
+                                    }
+                                },
+                                Err(error) => {
+                                    reason = error.to_string();
+                                    if !should_reconnect(&error) {
+                                        break false;
+                                    }
+                                }
+                            }
+                        };
+                        if let Ok(mut state) = session.state.lock() {
+                            state.parity.info.reconnect = if recovered {
+                                ReconnectState::Reconnected
+                            } else {
+                                ReconnectState::GaveUp {
+                                    reason: reason.clone(),
+                                }
+                            };
+                        }
+                        if !recovered {
+                            output.push(Err(error));
+                            break;
+                        }
+                        next_probe = std::time::Instant::now();
+                    }
+                }
+            }
+            let _ = generation.stop();
+            output.close();
+        });
+        Ok(SessionRuntime {
+            events,
+            stop: Some(stop),
+            worker: Some(worker),
+            interrupt: Some(self.interrupt_handle()),
+        })
+    }
+
+    fn spawn_tcp_generation(&self) -> Result<SessionRuntime, SessionError> {
         if self.state()? != SessionState::Ready {
             return Err(SessionError::NotReady);
         }
@@ -775,6 +1258,7 @@ impl ClientSession {
             events: event_rx,
             stop: Some(stop_tx),
             worker: Some(worker),
+            interrupt: None,
         })
     }
 
@@ -889,6 +1373,7 @@ impl ClientSession {
             socket: self.interrupt_socket.clone(),
             cancelled: self.cancelled.clone(),
             udp: self.udp.clone(),
+            cancel_signal: self.cancel_signal.clone(),
         }
     }
 
@@ -912,6 +1397,16 @@ impl ClientSession {
             state.frames.clear();
             state.audio.clear();
             state.receiver = crate::receiver_stats::ReceiverStats::default();
+            state.parity.images.discard();
+            state.parity.completed_image = None;
+            state.parity.probe = None;
+            if state
+                .pairing
+                .as_ref()
+                .is_some_and(|pairing| pairing.trust == maho_proto::PairingTrust::GuestOnce)
+            {
+                state.pairing = None;
+            }
         }
         if let Some(udp) = self.udp.lock().map_err(|_| SessionError::Poisoned)?.take() {
             udp.cancel.send_replace(true);
@@ -1000,6 +1495,12 @@ impl ClientSession {
             state.state = SessionState::Connecting;
             state.frames.clear();
             state.receiver = crate::receiver_stats::ReceiverStats::default();
+            state.parity.probe = None;
+            state.parity.info.permissions = None;
+            state.parity.info.host_status = None;
+            state.parity.sas_pending = None;
+            state.parity.images = parity::ImageAssembly::default();
+            state.stream_state = StreamState::default();
         }
         let address = {
             let override_endpoint = self
@@ -1025,7 +1526,33 @@ impl ClientSession {
             .map_err(|_| SessionError::Poisoned)?
             .frames
             .set_receiver_trace(self.trace.clone());
-        let tcp = std::net::TcpStream::connect_timeout(&address, self.config.connect_timeout)?;
+        // This synchronous API is also called inside Tokio tasks. Keep the
+        // bounded socket connect off the caller's runtime, and abandon its
+        // result on cancellation (a late socket is dropped with the channel).
+        let timeout = self.config.connect_timeout;
+        let deadline = std::time::Instant::now() + timeout;
+        let (connected_tx, connected_rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("maho-client-connect".into())
+            .spawn(move || {
+                let _ = connected_tx.send(std::net::TcpStream::connect_timeout(&address, timeout));
+            })?;
+        let tcp = loop {
+            if self.is_cancelled() {
+                return Err(SessionError::Cancelled);
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(SessionError::Io(io::ErrorKind::TimedOut.into()));
+            }
+            match connected_rx.recv_timeout(remaining.min(Duration::from_millis(25))) {
+                Ok(result) => break result?,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(SessionError::TcpRuntimeStopped);
+                }
+            }
+        };
         tcp.set_read_timeout(Some(self.config.connect_timeout))?;
         tcp.set_write_timeout(Some(self.config.connect_timeout))?;
         tcp.set_nodelay(true)?;
@@ -1066,6 +1593,14 @@ impl ClientSession {
     }
 
     fn begin_handshake(&self, pairing: PairingRecord) -> Result<ReadySession, SessionError> {
+        self.begin_handshake_with_trust(pairing, None)
+    }
+
+    fn begin_handshake_with_trust(
+        &self,
+        mut pairing: PairingRecord,
+        preference: Option<maho_proto::PairingTrust>,
+    ) -> Result<ReadySession, SessionError> {
         let mut salt = [0_u8; 16];
         OsRng.fill_bytes(&mut salt);
         self.trace.begin_session(salt);
@@ -1075,7 +1610,9 @@ impl ClientSession {
             height: 0,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: self.config.capabilities,
+            capabilities: Capabilities::from_bits_retain(
+                self.config.capabilities.bits() & SessionConfig::implemented_capabilities().bits(),
+            ),
             pairing_id: pairing.id.clone(),
             session_salt: salt,
         };
@@ -1111,6 +1648,60 @@ impl ClientSession {
             });
         }
         let server = Handshake::decode(&payload)?;
+        let trust_negotiated = self
+            .config
+            .capabilities
+            .contains(Capabilities::PAIRING_TRUST)
+            && server.capabilities.contains(Capabilities::PAIRING_TRUST);
+        if trust_negotiated {
+            if let Some(trust) = preference {
+                self.send_packet(
+                    PacketType::Control,
+                    &ControlMessage::PairingTrustRequest(maho_proto::PairingTrustRequest { trust })
+                        .encode()?,
+                )?;
+            }
+            let (header, payload) = self.read_tcp_packet()?;
+            if header.packet_type != PacketType::Control {
+                return Err(SessionError::UnexpectedPacket {
+                    expected: PacketType::Control,
+                    actual: header.packet_type,
+                });
+            }
+            match ControlMessage::decode(&payload)? {
+                ControlMessage::PairingTrustGrant(grant) => pairing.trust = grant.trust,
+                ControlMessage::SessionEnded(ended)
+                    if server.capabilities.contains(Capabilities::SESSION_ENDED)
+                        && self
+                            .config
+                            .capabilities
+                            .contains(Capabilities::SESSION_ENDED) =>
+                {
+                    self.state
+                        .lock()
+                        .map_err(|_| SessionError::Poisoned)?
+                        .parity
+                        .info
+                        .ended = Some(ended.reason);
+                    self.interrupt();
+                    return Err(SessionError::PermissionDenied);
+                }
+                _ => return Err(SessionError::PermissionDenied),
+            }
+        } else if preference.is_some_and(|trust| trust != maho_proto::PairingTrust::Owner) {
+            self.interrupt();
+            return Err(SessionError::Unsupported);
+        }
+        if (preference.is_some() || trust_negotiated)
+            && pairing.trust != maho_proto::PairingTrust::GuestOnce
+        {
+            self.store.save(pairing.clone())?;
+        }
+        {
+            let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+            state.pairing = Some(pairing.clone());
+            state.parity.info.pairing_trust = Some(pairing.trust);
+        }
         if !server
             .capabilities
             .contains(Capabilities::AUTHENTICATED_UDP_REGISTRATION)
@@ -1174,8 +1765,11 @@ impl ClientSession {
             .udp_receive
             .lock()
             .map_err(|_| SessionError::Poisoned)? = Some(udp_receive);
-        let host_supports_stream_options =
-            server.capabilities.contains(Capabilities::STREAM_OPTIONS);
+        let host_supports_stream_options = self
+            .config
+            .capabilities
+            .contains(Capabilities::STREAM_OPTIONS)
+            && server.capabilities.contains(Capabilities::STREAM_OPTIONS);
         let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
         state.stream_state.host_supports_stream_options = host_supports_stream_options;
         state.server = Some(server);
@@ -1298,6 +1892,11 @@ impl ClientSession {
                 }
                 Ok(frame.map_or(SessionEvent::Ignored, SessionEvent::Frame))
             }
+            PacketType::AudioFrame
+                if from_udp && self.permissions_locked(&state).is_some_and(|p| !p.audio) =>
+            {
+                Ok(SessionEvent::Ignored)
+            }
             PacketType::AudioFrame if from_udp => Ok(state
                 .audio
                 .push(AudioFragment::decode(&payload)?)
@@ -1317,53 +1916,166 @@ impl ClientSession {
                 self.send_control(ControlMessage::Pong)?;
                 Ok(SessionEvent::Ping)
             }
-            PacketType::Control => match ControlMessage::decode(&payload)? {
-                ControlMessage::Ping => {
-                    drop(state);
-                    self.send_control(ControlMessage::Pong)?;
-                    Ok(SessionEvent::Ping)
-                }
-                ControlMessage::ClipboardSyncUpdate(update) => {
-                    Ok(SessionEvent::Clipboard(update.text))
-                }
-                ControlMessage::InputAck(ack) => {
-                    if let Ok(mut lock) = self.last_input_ack.lock() {
-                        *lock = Some((ack.sequence, ack.success, ack.error_code));
+            PacketType::Control => {
+                let message = ControlMessage::decode(&payload)?;
+                if let Some(capability) = message.message_type().required_capability() {
+                    if !self.config.capabilities.contains(capability)
+                        || !state
+                            .server
+                            .as_ref()
+                            .is_some_and(|s| s.capabilities.contains(capability))
+                    {
+                        return Err(SessionError::Unsupported);
                     }
-                    Ok(SessionEvent::InputAck {
-                        sequence: ack.sequence,
-                        success: ack.success,
-                        error_code: ack.error_code,
-                    })
                 }
-                ControlMessage::StreamOptionsActive(active) => {
-                    state.stream_state.active = Some(active);
-                    Ok(SessionEvent::StreamConfig(
-                        ControlMessage::StreamOptionsActive(active),
-                    ))
+                match message {
+                    ControlMessage::HostStatus(status) => {
+                        state.parity.info.host_status = Some(status.clone());
+                        Ok(SessionEvent::StreamConfig(ControlMessage::HostStatus(
+                            status,
+                        )))
+                    }
+                    ControlMessage::GuestPermissions(permissions) => {
+                        let removed = state.parity.info.permissions.is_some_and(|old| {
+                            (old.keyboard && !permissions.keyboard)
+                                || (old.mouse && !permissions.mouse)
+                                || (old.gamepad && !permissions.gamepad)
+                        });
+                        state.parity.info.permissions = Some(permissions);
+                        state.stream_state.policy = Some(HostPolicy {
+                            allow_input: permissions.keyboard && permissions.mouse,
+                            allow_clipboard: permissions.clipboard,
+                        });
+                        if !permissions.clipboard {
+                            state.parity.images.discard();
+                            state.parity.completed_image = None;
+                        }
+                        drop(state);
+                        if removed {
+                            self.send_input(InputEvent {
+                                event_type: maho_proto::InputEventType::Reset,
+                                ..InputEvent::unicode_char(0, 0.0, 0.0)
+                            })?;
+                        }
+                        Ok(SessionEvent::StreamConfig(
+                            ControlMessage::GuestPermissions(permissions),
+                        ))
+                    }
+                    ControlMessage::SessionEnded(ended) => {
+                        state.parity.info.ended = Some(ended.reason);
+                        state.parity.images.discard();
+                        state.parity.completed_image = None;
+                        state.frames.clear();
+                        state.audio.clear();
+                        drop(state);
+                        let _ = self.send_input(InputEvent {
+                            event_type: maho_proto::InputEventType::Reset,
+                            ..InputEvent::unicode_char(0, 0.0, 0.0)
+                        });
+                        self.interrupt();
+                        self.state.lock().map_err(|_| SessionError::Poisoned)?.state =
+                            SessionState::Disconnected;
+                        Ok(SessionEvent::StreamConfig(ControlMessage::SessionEnded(
+                            ended,
+                        )))
+                    }
+                    ControlMessage::SecureAttentionResponse(response) => {
+                        if state.parity.sas_pending == Some(response.request_id) {
+                            state.parity.sas_pending = None;
+                            state.parity.info.secure_attention_response = Some(response);
+                            Ok(SessionEvent::StreamConfig(
+                                ControlMessage::SecureAttentionResponse(response),
+                            ))
+                        } else {
+                            Ok(SessionEvent::Ignored)
+                        }
+                    }
+                    ControlMessage::RttPong(probe) => {
+                        state
+                            .parity
+                            .pong(probe.timestamp_us, std::time::Instant::now());
+                        Ok(SessionEvent::Ignored)
+                    }
+                    ControlMessage::ClipboardImageChunk(chunk) => {
+                        if !state.parity.clipboard_enabled
+                            || self
+                                .permissions_locked(&state)
+                                .is_some_and(|p| !p.clipboard)
+                        {
+                            return Err(SessionError::PermissionDenied);
+                        }
+                        if let Some(png) =
+                            state.parity.images.push(chunk, std::time::Instant::now())?
+                        {
+                            state.parity.completed_image = Some(png);
+                        }
+                        Ok(SessionEvent::Ignored)
+                    }
+                    ControlMessage::Ping => {
+                        drop(state);
+                        self.send_control(ControlMessage::Pong)?;
+                        Ok(SessionEvent::Ping)
+                    }
+                    ControlMessage::ClipboardSyncUpdate(update) => {
+                        state.parity.images.discard();
+                        state.parity.completed_image = None;
+                        if !state.parity.clipboard_enabled
+                            || self
+                                .permissions_locked(&state)
+                                .is_some_and(|p| !p.clipboard)
+                        {
+                            return Ok(SessionEvent::Ignored);
+                        }
+                        Ok(SessionEvent::Clipboard(update.text))
+                    }
+                    ControlMessage::InputAck(ack) => {
+                        if let Ok(mut lock) = self.last_input_ack.lock() {
+                            *lock = Some((ack.sequence, ack.success, ack.error_code));
+                        }
+                        Ok(SessionEvent::InputAck {
+                            sequence: ack.sequence,
+                            success: ack.success,
+                            error_code: ack.error_code,
+                        })
+                    }
+                    ControlMessage::StreamOptionsActive(active) => {
+                        state.stream_state.active = Some(active);
+                        Ok(SessionEvent::StreamConfig(
+                            ControlMessage::StreamOptionsActive(active),
+                        ))
+                    }
+                    ControlMessage::HostDisplayList(list) => {
+                        state.stream_state.displays = list.displays.clone();
+                        Ok(SessionEvent::StreamConfig(ControlMessage::HostDisplayList(
+                            list,
+                        )))
+                    }
+                    ControlMessage::HostPolicy(policy) => {
+                        if !self
+                            .config
+                            .capabilities
+                            .contains(Capabilities::GUEST_PERMISSIONS)
+                            || !state.server.as_ref().is_some_and(|s| {
+                                s.capabilities.contains(Capabilities::GUEST_PERMISSIONS)
+                            })
+                        {
+                            state.stream_state.policy = Some(policy);
+                        }
+                        Ok(SessionEvent::StreamConfig(ControlMessage::HostPolicy(
+                            policy,
+                        )))
+                    }
+                    ControlMessage::StreamConfigReject(reject) => {
+                        state.stream_state.last_reject = Some(reject.message.clone());
+                        Ok(SessionEvent::StreamConfig(
+                            ControlMessage::StreamConfigReject(reject),
+                        ))
+                    }
+                    msg @ (ControlMessage::StreamConfigResponse(_)
+                    | ControlMessage::StreamConfigError(_)) => Ok(SessionEvent::StreamConfig(msg)),
+                    _ => Ok(SessionEvent::Ignored),
                 }
-                ControlMessage::HostDisplayList(list) => {
-                    state.stream_state.displays = list.displays.clone();
-                    Ok(SessionEvent::StreamConfig(ControlMessage::HostDisplayList(
-                        list,
-                    )))
-                }
-                ControlMessage::HostPolicy(policy) => {
-                    state.stream_state.policy = Some(policy);
-                    Ok(SessionEvent::StreamConfig(ControlMessage::HostPolicy(
-                        policy,
-                    )))
-                }
-                ControlMessage::StreamConfigReject(reject) => {
-                    state.stream_state.last_reject = Some(reject.message.clone());
-                    Ok(SessionEvent::StreamConfig(
-                        ControlMessage::StreamConfigReject(reject),
-                    ))
-                }
-                msg @ (ControlMessage::StreamConfigResponse(_)
-                | ControlMessage::StreamConfigError(_)) => Ok(SessionEvent::StreamConfig(msg)),
-                _ => Ok(SessionEvent::Ignored),
-            },
+            }
             _ => Ok(SessionEvent::Ignored),
         }
     }
@@ -1371,8 +2083,6 @@ impl ClientSession {
 
 struct UdpTransport {
     socket: UdpSocket,
-    runtime: tokio::runtime::Runtime,
-    reader: tokio::net::UdpSocket,
     cancel: tokio::sync::watch::Sender<bool>,
     timeout: Mutex<Option<Duration>>,
     buffer: Mutex<Vec<u8>>,
@@ -1387,19 +2097,9 @@ struct UdpTransport {
 impl UdpTransport {
     fn new(socket: UdpSocket) -> Result<Self, SessionError> {
         let timeout = socket.read_timeout()?;
-        socket.set_nonblocking(true)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let reader = {
-            let _entered = runtime.enter();
-            tokio::net::UdpSocket::from_std(socket.try_clone()?)?
-        };
         let (cancel, _) = tokio::sync::watch::channel(false);
         Ok(Self {
             socket,
-            runtime,
-            reader,
             cancel,
             timeout: Mutex::new(timeout),
             buffer: Mutex::new(Vec::new()),
@@ -1420,50 +2120,44 @@ impl UdpTransport {
             self.alloc_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        let mut cancelled = self.cancel.subscribe();
         let timeout = *self.timeout.lock().map_err(|_| SessionError::Poisoned)?;
-        self.runtime
-            .block_on(async {
-                if *cancelled.borrow() {
-                    return Err(SessionError::NotReady);
-                }
-                let receive = async {
-                    #[cfg(test)]
-                    {
-                        *self.last_buffer_ptr.lock().unwrap() = Some(datagram.as_ptr() as usize);
+        let deadline = timeout.map(|timeout| std::time::Instant::now() + timeout);
+        #[cfg(test)]
+        {
+            *self.last_buffer_ptr.lock().unwrap() = Some(datagram.as_ptr() as usize);
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                entered
+                    .send(())
+                    .map_err(|_| SessionError::TcpRuntimeStopped)?;
+            }
+        }
+        // Bounded std socket reads preserve cancellation without owning or
+        // entering a runtime on the synchronous caller's thread.
+        loop {
+            if *self.cancel.borrow() {
+                return Err(SessionError::NotReady);
+            }
+            let slice = match deadline {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(SessionError::Io(io::ErrorKind::TimedOut.into()));
                     }
-                    let count = self.reader.recv(&mut datagram).await?;
-                    Ok::<_, SessionError>(count)
-                };
-                tokio::pin!(receive);
-                #[cfg(test)]
-                let entered_opt = self.entered.lock().unwrap().take();
-                #[cfg(test)]
-                if let Some(entered) = entered_opt {
-                    std::future::poll_fn(|cx| {
-                        use std::future::Future;
-                        assert!(receive.as_mut().poll(cx).is_pending());
-                        std::task::Poll::Ready(())
-                    })
-                    .await;
-                    entered
-                        .send(())
-                        .map_err(|_| SessionError::TcpRuntimeStopped)?;
+                    remaining.min(Duration::from_millis(25))
                 }
-                let deadline = async {
-                    match timeout {
-                        Some(timeout) => tokio::time::sleep(timeout).await,
-                        None => std::future::pending().await,
-                    }
-                };
-                tokio::select! {
-                    biased;
-                    _ = cancelled.changed() => Err(SessionError::NotReady),
-                    result = &mut receive => result,
-                    _ = deadline => Err(SessionError::Io(io::Error::from(io::ErrorKind::TimedOut))),
-                }
-            })
-            .map(|count| (datagram, count))
+                None => Duration::from_millis(25),
+            };
+            self.socket.set_read_timeout(Some(slice))?;
+            match self.socket.recv(&mut datagram) {
+                Ok(count) => return Ok((datagram, count)),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 }
 
@@ -1588,6 +2282,7 @@ pub struct SessionRuntime {
     events: RuntimeEvents,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     worker: Option<thread::JoinHandle<()>>,
+    interrupt: Option<SessionInterruptHandle>,
 }
 
 impl SessionRuntime {
@@ -1604,10 +2299,14 @@ impl SessionRuntime {
             events: RuntimeEvents::default(),
             stop,
             worker: Some(worker),
+            interrupt: None,
         }
     }
 
     pub fn stop(&mut self) -> Result<(), SessionError> {
+        if let Some(interrupt) = self.interrupt.take() {
+            interrupt.interrupt();
+        }
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -1665,6 +2364,125 @@ mod cancellation_tests {
 
     use maho_net::TlsPskServer;
     use maho_proto::{HostDisplayList, StreamCodecPreference};
+    fn parity_session() -> ClientSession {
+        let mut config = SessionConfig::direct("127.0.0.1", "test");
+        config.pairing_store_path = Some(PathBuf::from("/unused-parity-fixture"));
+        let session = ClientSession::new(config).unwrap();
+        {
+            let mut state = session.state.lock().unwrap();
+            state.state = SessionState::Ready;
+            state.server = Some(Handshake {
+                name: "fixture".into(),
+                width: 1,
+                height: 1,
+                scale: 1.0,
+                version: PROTOCOL_VERSION,
+                capabilities: SessionConfig::implemented_capabilities(),
+                pairing_id: String::new(),
+                session_salt: [0; 16],
+            });
+        }
+        session
+    }
+
+    #[test]
+    fn negotiated_permissions_deny_before_initial_grant() {
+        let session = parity_session();
+        let p = session.effective_permissions().unwrap().unwrap();
+        assert!(!p.keyboard && !p.mouse && !p.clipboard && !p.audio && !p.gamepad);
+        assert!(matches!(
+            session.send_input(InputEvent::unicode_char(65, 0.0, 0.0)),
+            Err(SessionError::PermissionDenied)
+        ));
+    }
+
+    #[test]
+    fn effective_permissions_supersede_later_host_policy() {
+        let session = parity_session();
+        let permissions = maho_proto::GuestPermissions {
+            keyboard: true,
+            mouse: false,
+            gamepad: false,
+            clipboard: true,
+            audio: false,
+        };
+        session
+            .handle_packet(
+                PacketHeader::new(PacketType::Control, 1, 0, 0),
+                ControlMessage::GuestPermissions(permissions)
+                    .encode()
+                    .unwrap(),
+                None,
+            )
+            .unwrap();
+        session
+            .handle_packet(
+                PacketHeader::new(PacketType::Control, 2, 0, 0),
+                ControlMessage::HostPolicy(HostPolicy {
+                    allow_input: true,
+                    allow_clipboard: false,
+                })
+                .encode()
+                .unwrap(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(session.effective_permissions().unwrap(), Some(permissions));
+        assert_eq!(
+            session.stream_state().unwrap().policy,
+            Some(HostPolicy {
+                allow_input: false,
+                allow_clipboard: true
+            })
+        );
+    }
+
+    #[test]
+    fn unnegotiated_host_message_is_rejected() {
+        let session = parity_session();
+        session
+            .state
+            .lock()
+            .unwrap()
+            .server
+            .as_mut()
+            .unwrap()
+            .capabilities = Capabilities::AUTHENTICATED_UDP_REGISTRATION;
+        let message = ControlMessage::HostStatus(maho_proto::HostStatus {
+            guest_names: vec![],
+        });
+        assert!(matches!(
+            session.handle_packet(
+                PacketHeader::new(PacketType::Control, 0, 0, 0),
+                message.encode().unwrap(),
+                None
+            ),
+            Err(SessionError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn secure_attention_response_requires_outstanding_id() {
+        let session = parity_session();
+        session.state.lock().unwrap().parity.sas_pending = Some(4);
+        let response = maho_proto::SecureAttentionResponse {
+            request_id: 3,
+            result: maho_proto::SecureAttentionResult::Accepted,
+        };
+        session
+            .handle_packet(
+                PacketHeader::new(PacketType::Control, 0, 0, 0),
+                ControlMessage::SecureAttentionResponse(response)
+                    .encode()
+                    .unwrap(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            session.session_info().unwrap().secure_attention_response,
+            None
+        );
+    }
     fn packet(packet_type: PacketType, payload: &[u8]) -> Vec<u8> {
         let mut packet = PacketHeader::new(packet_type, 0, 0, 0).encode().unwrap();
         packet.extend_from_slice(payload);
@@ -1737,6 +2555,16 @@ mod cancellation_tests {
         assert_eq!(session.stream_state().unwrap(), StreamState::default());
         // Control packets are only handled once the handshake has completed.
         session.state.lock().unwrap().state = SessionState::Ready;
+        session.state.lock().unwrap().server = Some(Handshake {
+            name: "fixture".into(),
+            width: 1,
+            height: 1,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::STREAM_OPTIONS,
+            pairing_id: String::new(),
+            session_salt: [0; 16],
+        });
 
         // HostPolicy event
         let policy = HostPolicy {
@@ -1900,6 +2728,7 @@ mod cancellation_tests {
             endpoint_aliases: Vec::new(),
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::Owner,
         };
         let ready = session.connect_with_pairing(record).unwrap();
         assert_eq!(ready.server.name, "mock-host");
@@ -2153,6 +2982,7 @@ mod cancellation_tests {
             SessionError::TcpRuntimeStopped,
             SessionError::TcpRuntimePanicked("worker exited".into()),
             SessionError::HandshakeAckTimeout,
+            SessionError::Tls(TlsPskError::Io(io::Error::other("unclean TLS EOF"))),
         ] {
             assert!(
                 should_reconnect(&error),
@@ -2164,6 +2994,10 @@ mod cancellation_tests {
         for error in [
             SessionError::PairingNotFound("missing".into()),
             SessionError::NoAddress,
+            SessionError::Tls(TlsPskError::Handshake("PSK rejected".into())),
+            SessionError::Tls(TlsPskError::InvalidKeyLength),
+            SessionError::PairingRejected(PairingRejectReason::DeniedByHost),
+            SessionError::Io(io::Error::other("unrelated I/O failure")),
         ] {
             assert!(
                 !should_reconnect(&error),
@@ -2205,7 +3039,8 @@ mod receiver_clock_tests {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let frame = stream.read_frame().unwrap();
-            let handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            let mut handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            handshake.capabilities = Capabilities::AUTHENTICATED_UDP_REGISTRATION;
             let mut ack = PacketHeader::new(PacketType::HandshakeAck, 0, 0, 0)
                 .encode()
                 .unwrap();
@@ -2234,6 +3069,7 @@ mod receiver_clock_tests {
                 endpoint_aliases: Vec::new(),
                 relay_url: None,
                 relay_host_id: None,
+                trust: maho_proto::PairingTrust::Owner,
             })
             .unwrap();
         session
@@ -2324,7 +3160,8 @@ mod receiver_clock_tests {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let frame = stream.read_frame().unwrap();
-            let handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            let mut handshake = Handshake::decode(&frame[PacketHeader::SIZE..]).unwrap();
+            handshake.capabilities = Capabilities::AUTHENTICATED_UDP_REGISTRATION;
             let mut ack = PacketHeader::new(PacketType::HandshakeAck, 0, 0, 0)
                 .encode()
                 .unwrap();
@@ -2345,6 +3182,7 @@ mod receiver_clock_tests {
                 endpoint_aliases: Vec::new(),
                 relay_url: None,
                 relay_host_id: None,
+                trust: maho_proto::PairingTrust::Owner,
             })
             .unwrap();
         let salt = ready_rx.recv().unwrap();

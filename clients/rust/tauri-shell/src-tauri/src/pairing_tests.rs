@@ -375,9 +375,17 @@ impl CancellableServer {
                                 .set_read_timeout(Some(Duration::from_millis(500)));
                             if let Ok(frame) = tls_stream.read_frame() {
                                 if frame.len() >= maho_proto::PacketHeader::SIZE {
+                                    // This legacy fixture implements UDP registration,
+                                    // not the client's newly advertised trust protocol.
+                                    let mut ack = maho_proto::Handshake::decode(
+                                        &frame[maho_proto::PacketHeader::SIZE..],
+                                    )
+                                    .unwrap();
+                                    ack.capabilities =
+                                        maho_proto::Capabilities::AUTHENTICATED_UDP_REGISTRATION;
                                     let _ = tls_stream.write_frame(&make_packet(
                                         maho_proto::PacketType::HandshakeAck,
-                                        &frame[maho_proto::PacketHeader::SIZE..],
+                                        &ack.encode().unwrap(),
                                     ));
                                 }
                             }

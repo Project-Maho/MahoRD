@@ -45,7 +45,8 @@ fn fixture() -> Fixture {
                 .packet_type,
             PacketType::Handshake
         );
-        let hello = Handshake::decode(&hello[PacketHeader::SIZE..]).unwrap();
+        let mut hello = Handshake::decode(&hello[PacketHeader::SIZE..]).unwrap();
+        hello.capabilities = Capabilities::AUTHENTICATED_UDP_REGISTRATION;
         peer.write_frame(&packet(PacketType::HandshakeAck, &hello.encode().unwrap()))
             .unwrap();
         let mut wake = [0; 1024];
@@ -75,6 +76,7 @@ fn fixture() -> Fixture {
             endpoint_aliases: Vec::new(),
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::Owner,
         })
         .unwrap();
     let peer = peer_rx.recv_timeout(WATCHDOG).unwrap();

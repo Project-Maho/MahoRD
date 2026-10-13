@@ -19,7 +19,7 @@ use maho_app::{
 };
 use maho_decode::HevcDecoder;
 use maho_proto::{
-    Capabilities, ControlMessage, InputEvent, InputEventType, Modifiers, StreamCodecPreference,
+    ControlMessage, InputEvent, InputEventType, Modifiers, StreamCodecPreference,
     StreamOptionsRequest,
 };
 use tracing::{debug, error, info, warn};
@@ -125,6 +125,8 @@ struct Cli {
     /// Start stdio Model Context Protocol (MCP) server for direct agent driving.
     #[arg(long)]
     mcp: bool,
+    #[arg(long)]
+    sas: bool,
 }
 
 impl std::fmt::Debug for Cli {
@@ -526,10 +528,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
         tcp_port: cli.tcp_port,
         udp_port,
         client_name: cli.client_name.clone(),
-        capabilities: Capabilities::STREAM_CONFIGURATION
-            | Capabilities::TEXT_CLIPBOARD_SYNC
-            | Capabilities::AUTHENTICATED_UDP_REGISTRATION
-            | Capabilities::STREAM_OPTIONS,
+        capabilities: SessionConfig::implemented_capabilities(),
         pairing_store_path: cli.pairing_store.clone(),
         connect_timeout: Duration::from_secs(10),
         handshake_ack_timeout: Duration::from_secs(10),
@@ -614,6 +613,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
                 endpoint_aliases: Vec::new(),
                 relay_url: cli.relay_url.clone(),
                 relay_host_id: cli.relay_host_id.clone(),
+                trust: maho_proto::PairingTrust::Owner,
             };
             info!(pairing_id = %pairing.id, "Connecting with explicit PSK");
             session
@@ -647,6 +647,11 @@ fn run_client(mut cli: Cli) -> Result<()> {
     let mut tcp_runtime = session
         .spawn_tcp_runtime()
         .context("failed to spawn TCP runtime")?;
+    if cli.sas {
+        session
+            .request_secure_attention()
+            .context("secure attention unavailable")?;
+    }
 
     session
         .set_udp_read_timeout(Some(Duration::from_millis(5)))
@@ -910,6 +915,10 @@ fn run_client(mut cli: Cli) -> Result<()> {
                     debug!("Received clipboard update");
                 }
                 Ok(SessionEvent::StreamConfig(ref msg)) => match msg {
+                    ControlMessage::HostStatus(status) => println!("host status: {} active guests {:?}", status.active_guest_count(), status.guest_names),
+                    ControlMessage::GuestPermissions(p) => println!("effective permissions: keyboard={} mouse={} gamepad={} clipboard={} audio={}", p.keyboard, p.mouse, p.gamepad, p.clipboard, p.audio),
+                    ControlMessage::SessionEnded(ended) => { println!("session ended: {:?}", ended.reason); running.store(false, Ordering::SeqCst); }
+                    ControlMessage::SecureAttentionResponse(response) => println!("secure attention: {:?}", response.result),
                     ControlMessage::HostDisplayList(list) => {
                         for d in &list.displays {
                             let primary_str = if d.primary { " (primary)" } else { "" };
@@ -968,6 +977,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
                     match HevcDecoder::from_keyframe_auto(data) {
                         Ok((codec_kind, dec)) => {
                             info!(?codec_kind, "decoder initialized from keyframe");
+                            session.set_decoder_backend(format!("{:?}", dec.acceleration()))?;
                             current_codec = Some(codec_kind);
                             decoder = Some(dec);
                         }
@@ -1130,6 +1140,9 @@ fn run_client(mut cli: Cli) -> Result<()> {
             .and_then(|result| result)
     });
     let receiver_result = session.receiver_snapshot();
+    if let Ok(stats) = session.session_stats() {
+        println!("network: RTT latest={:?}ms smoothed={:?}ms receive={:?} bytes/s loss={:?} decoder={:?}", stats.rtt_latest_ms, stats.rtt_smoothed_ms, stats.receive_bytes_per_second, stats.packet_loss_ratio, stats.decoder_backend);
+    }
     let mcp_result = match mcp_handle {
         Some(handle) => handle
             .join()

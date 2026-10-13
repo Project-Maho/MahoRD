@@ -46,6 +46,7 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             endpoint_aliases: Vec::new(),
             relay_url: None,
             relay_host_id: None,
+            trust: maho_proto::PairingTrust::Owner,
         };
         client_store.save(client_record.clone()).unwrap();
 

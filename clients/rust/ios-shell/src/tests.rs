@@ -329,6 +329,7 @@ fn pairing_lookup_by_host_address_never_infers_pairing_from_advertised_hostname(
         endpoint_aliases: Vec::new(),
         relay_url: None,
         relay_host_id: None,
+        trust: maho_proto::PairingTrust::Owner,
     };
     store.save(paired_record).unwrap();
 
