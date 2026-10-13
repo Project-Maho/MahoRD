@@ -21,6 +21,7 @@ maho-render = { path = "../maho-render" }
 tauri = { version = "2", default-features = false, features = ["wry", "tray-icon"] }
 tauri-plugin-autostart = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+if-addrs = "0.13"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -371,6 +371,7 @@ pub struct LinuxInputInjector {
     held_keys: HashSet<KeyCode>,
     pending_surrogate: Option<u16>,
     unicode_backend_warned: bool,
+    unicode_batch: UnicodeBatch,
     vertical_wheel: WheelAccumulator,
     horizontal_wheel: WheelAccumulator,
 }
@@ -448,6 +449,7 @@ impl LinuxInputInjector {
             held_keys: HashSet::new(),
             pending_surrogate: None,
             unicode_backend_warned: false,
+            unicode_batch: UnicodeBatch::default(),
             vertical_wheel: WheelAccumulator::default(),
             horizontal_wheel: WheelAccumulator::default(),
         })
@@ -464,6 +466,29 @@ impl LinuxInputInjector {
         Ok(())
     }
 
+    /// Flush coalesced non-ASCII text once no more arrived for
+    /// `UNICODE_BATCH_IDLE`. The session loop calls this on every iteration.
+    pub fn flush_idle_text(&mut self, now: Instant) {
+        if let Some(text) = self.unicode_batch.take_if_idle(now) {
+            self.type_unicode(&text);
+        }
+    }
+
+    fn flush_pending_text(&mut self) {
+        if let Some(text) = self.unicode_batch.take_pending() {
+            self.type_unicode(&text);
+        }
+    }
+
+    fn type_unicode(&mut self, text: &str) {
+        if let Err(error) = inject_wayland_unicode(text) {
+            if !self.unicode_backend_warned {
+                tracing::warn!(%error, "Wayland Unicode backend unavailable; dropping text");
+                self.unicode_backend_warned = true;
+            }
+        }
+    }
+
     pub fn inject(&mut self, event: &WireInputEvent) -> io::Result<()> {
         if !event.x.is_finite()
             || !event.y.is_finite()
@@ -471,6 +496,10 @@ impl LinuxInputInjector {
             || !event.scroll_dy.is_finite()
         {
             return Ok(());
+        }
+        // Text queued before any key, pointer, or Reset event must land first.
+        if flushes_pending_text(event.event_type) {
+            self.flush_pending_text();
         }
 
         match event.event_type {
@@ -660,6 +689,7 @@ impl LinuxInputInjector {
                 if let Some(ch) = decode_utf16_unit(&mut self.pending_surrogate, event.key_code)? {
                     match text_input_route(ch) {
                         TextInputRoute::Evdev(key, needs_shift) => {
+                            self.flush_pending_text();
                             // Separate SYN reports preserve each key transition.
                             if needs_shift {
                                 self.keyboard.emit(&[InputEvent::new(
@@ -687,11 +717,8 @@ impl LinuxInputInjector {
                             }
                         }
                         TextInputRoute::Unicode => {
-                            if let Err(error) = inject_wayland_unicode(ch) {
-                                if !self.unicode_backend_warned {
-                                    tracing::warn!(%error, "Wayland Unicode backend unavailable; dropping character");
-                                    self.unicode_backend_warned = true;
-                                }
+                            if let Some(text) = self.unicode_batch.push(ch, Instant::now()) {
+                                self.type_unicode(&text);
                             }
                         }
                     }
@@ -715,15 +742,59 @@ fn text_input_route(ch: char) -> TextInputRoute {
     }
 }
 
-fn inject_wayland_unicode(ch: char) -> io::Result<()> {
-    // Bound each non-ASCII insertion to 100 ms: the event API supplies only
-    // one UTF-16 unit at a time, so it cannot batch text without delaying input.
-    // Kill and reap on timeout; ASCII never starts a subprocess.
+/// Idle gap after which queued non-ASCII text is typed.
+const UNICODE_BATCH_IDLE: Duration = Duration::from_millis(8);
+/// Upper bound per `wtype` invocation so one spawn stays inside its 100 ms bound.
+const UNICODE_BATCH_MAX_CHARS: usize = 32;
+
+/// Every event except `UnicodeChar` flushes queued text first; ASCII
+/// `UnicodeChar` flushes on its own route before reaching uinput.
+fn flushes_pending_text(event_type: InputEventType) -> bool {
+    event_type != InputEventType::UnicodeChar
+}
+
+/// Coalesces consecutive non-ASCII characters into one `wtype` invocation.
+#[derive(Default)]
+struct UnicodeBatch {
+    text: String,
+    chars: usize,
+    last: Option<Instant>,
+}
+
+impl UnicodeBatch {
+    /// Queue `ch`; returns the batch when it reached its size cap.
+    fn push(&mut self, ch: char, now: Instant) -> Option<String> {
+        self.text.push(ch);
+        self.chars += 1;
+        self.last = Some(now);
+        (self.chars >= UNICODE_BATCH_MAX_CHARS).then(|| self.take())
+    }
+
+    fn take_if_idle(&mut self, now: Instant) -> Option<String> {
+        let last = self.last?;
+        (now.saturating_duration_since(last) >= UNICODE_BATCH_IDLE).then(|| self.take())
+    }
+
+    fn take_pending(&mut self) -> Option<String> {
+        (!self.text.is_empty()).then(|| self.take())
+    }
+
+    fn take(&mut self) -> String {
+        self.chars = 0;
+        self.last = None;
+        std::mem::take(&mut self.text)
+    }
+}
+
+fn inject_wayland_unicode(text: &str) -> io::Result<()> {
+    // Bound each insertion to 100 ms. Consecutive non-ASCII characters are
+    // coalesced by `UnicodeBatch`, so an IME burst costs one spawn, not one
+    // per character. Kill and reap on timeout; ASCII never starts a subprocess.
     let deadline = Instant::now() + Duration::from_millis(100);
     let mut command = Command::new("wtype");
     command
         .env("LC_ALL", "C.UTF-8")
-        .args(["--", ch.encode_utf8(&mut [0; 4])])
+        .args(["--", text])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -929,6 +1000,49 @@ mod tests {
     fn unmapped_text_routes_to_unicode_backend() {
         for ch in ['é', '한', '🚀'] {
             assert_eq!(text_input_route(ch), TextInputRoute::Unicode);
+        }
+    }
+
+    #[test]
+    fn unicode_batch_coalesces_until_idle_or_cap() {
+        let start = Instant::now();
+        let mut batch = UnicodeBatch::default();
+        assert_eq!(batch.take_if_idle(start), None);
+        assert_eq!(batch.push('한', start), None);
+        assert_eq!(batch.push('글', start + Duration::from_millis(5)), None);
+        // Idle is measured from the last character, not the first.
+        assert_eq!(batch.take_if_idle(start + Duration::from_millis(12)), None);
+        assert_eq!(
+            batch.take_if_idle(start + Duration::from_millis(13)),
+            Some("한글".into())
+        );
+        assert_eq!(batch.take_pending(), None);
+
+        assert_eq!(batch.push('é', start), None);
+        assert_eq!(batch.take_pending(), Some("é".into()));
+        assert_eq!(batch.take_if_idle(start + Duration::from_secs(1)), None);
+
+        for _ in 1..UNICODE_BATCH_MAX_CHARS {
+            assert_eq!(batch.push('é', start), None);
+        }
+        let full = batch.push('é', start).unwrap();
+        assert_eq!(full.chars().count(), UNICODE_BATCH_MAX_CHARS);
+        assert_eq!(batch.take_pending(), None);
+    }
+
+    #[test]
+    fn non_text_events_flush_pending_unicode() {
+        assert!(!flushes_pending_text(InputEventType::UnicodeChar));
+        for event_type in [
+            InputEventType::KeyDown,
+            InputEventType::KeyUp,
+            InputEventType::FlagsChanged,
+            InputEventType::MouseMove,
+            InputEventType::LeftMouseDown,
+            InputEventType::ScrollWheel,
+            InputEventType::Reset,
+        ] {
+            assert!(flushes_pending_text(event_type));
         }
     }
 

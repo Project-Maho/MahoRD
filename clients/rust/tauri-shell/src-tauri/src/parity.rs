@@ -285,15 +285,62 @@ fn magic_packet(mac: &str) -> Result<[u8; 102], String> {
     Ok(packet)
 }
 
+/// Subnet-directed broadcast (`ip | !netmask`) for a usable IPv4 interface.
+/// Loopback, unspecified, and /31-/32 point-to-point netmasks have none.
+fn directed_broadcast(
+    ip: std::net::Ipv4Addr,
+    netmask: std::net::Ipv4Addr,
+) -> Option<std::net::Ipv4Addr> {
+    if ip.is_loopback() || ip.is_unspecified() || u32::from(netmask).count_ones() >= 31 {
+        return None;
+    }
+    Some((u32::from(ip) | !u32::from(netmask)).into())
+}
+
+/// Limited broadcast plus each IPv4 interface's subnet broadcast, deduplicated.
+/// macOS sends 255.255.255.255 out of the default interface only, so the
+/// directed address is what reaches a sleeping machine on another LAN interface.
+fn wake_targets(interfaces: &[if_addrs::Interface]) -> Vec<std::net::SocketAddrV4> {
+    let mut targets = vec![std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::BROADCAST,
+        9,
+    )];
+    for interface in interfaces {
+        if let if_addrs::IfAddr::V4(v4) = &interface.addr {
+            if let Some(broadcast) = directed_broadcast(v4.ip, v4.netmask) {
+                let target = std::net::SocketAddrV4::new(broadcast, 9);
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+        }
+    }
+    targets
+}
+
 #[tauri::command]
 pub fn wake_computer(mac: String) -> Result<(), String> {
     let packet = magic_packet(&mac)?;
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
     socket.set_broadcast(true).map_err(|e| e.to_string())?;
-    socket
-        .send_to(&packet, "255.255.255.255:9")
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let mut errors = Vec::new();
+    // Enumeration failure still leaves the limited broadcast to try.
+    let interfaces = if_addrs::get_if_addrs().unwrap_or_else(|e| {
+        errors.push(format!("interface enumeration: {e}"));
+        Vec::new()
+    });
+    let mut sent = false;
+    for target in wake_targets(&interfaces) {
+        match socket.send_to(&packet, target) {
+            Ok(_) => sent = true,
+            Err(e) => errors.push(format!("{target}: {e}")),
+        }
+    }
+    if sent {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 #[cfg(test)]
@@ -308,5 +355,60 @@ mod tests {
         }
         assert!(magic_packet("01:23").is_err());
         assert!(magic_packet("01:23:45:67:89:zz").is_err());
+    }
+
+    #[test]
+    fn wake_directed_broadcast_addresses() {
+        use std::net::Ipv4Addr;
+        let ip = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        assert_eq!(
+            directed_broadcast(ip("192.168.1.42"), ip("255.255.255.0")),
+            Some(ip("192.168.1.255"))
+        );
+        assert_eq!(
+            directed_broadcast(ip("10.20.30.40"), ip("255.255.240.0")),
+            Some(ip("10.20.31.255"))
+        );
+        assert_eq!(directed_broadcast(ip("127.0.0.1"), ip("255.0.0.0")), None);
+        assert_eq!(directed_broadcast(ip("0.0.0.0"), ip("0.0.0.0")), None);
+        assert_eq!(
+            directed_broadcast(ip("100.91.254.71"), ip("255.255.255.255")),
+            None
+        );
+        assert_eq!(
+            directed_broadcast(ip("10.0.0.0"), ip("255.255.255.254")),
+            None
+        );
+    }
+
+    #[test]
+    fn wake_targets_include_limited_and_unique_subnet_broadcasts() {
+        use if_addrs::{IfAddr, Ifv4Addr, Interface};
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        let v4 = |ip: [u8; 4], mask: [u8; 4]| Interface {
+            name: "en0".into(),
+            addr: IfAddr::V4(Ifv4Addr {
+                ip: ip.into(),
+                netmask: mask.into(),
+                prefixlen: u32::from(Ipv4Addr::from(mask)).count_ones() as u8,
+                broadcast: None,
+            }),
+            index: None,
+            #[cfg(windows)]
+            adapter_name: String::new(),
+        };
+        let targets = wake_targets(&[
+            v4([127, 0, 0, 1], [255, 0, 0, 0]),
+            v4([192, 168, 1, 42], [255, 255, 255, 0]),
+            v4([192, 168, 1, 43], [255, 255, 255, 0]),
+            v4([100, 91, 254, 71], [255, 255, 255, 255]),
+        ]);
+        assert_eq!(
+            targets,
+            vec![
+                SocketAddrV4::new(Ipv4Addr::BROADCAST, 9),
+                SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 255), 9),
+            ]
+        );
     }
 }

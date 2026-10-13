@@ -337,6 +337,16 @@ impl crate::guests::SecureAttentionHandler for SecureAttentionBroker {
     }
 }
 
+/// Invokes `SendSAS` (Ctrl+Alt+Del) from the Session 0 service.
+///
+/// Machine-policy side effect: `SendSAS` from a service requires
+/// `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\SoftwareSASGeneration`
+/// to be 1 (services) or 3 (services and Ease of Access). When the value is
+/// absent, the first owner SAS request creates it as `1` (services only), the
+/// narrowest value that works, logs the write, and leaves it in place after the
+/// session and on uninstall. An existing value is never changed: 0 or 2 makes
+/// the request fail with `PermissionDenied`. Operators who manage this policy
+/// via GPO should set it explicitly; see `docs/windows-login-screen.md`.
 fn send_native_sas() -> io::Result<()> {
     use windows::core::w;
     use windows::Win32::System::Registry::*;

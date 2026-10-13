@@ -98,6 +98,24 @@ starts it by hand — the one state this service exists to avoid. Confirm it wit
 sc qfailure MahoRDHost   # expect RESET_PERIOD 86400 and three RESTART actions
 ```
 
+## Ctrl+Alt+Del (SAS) policy side effect
+
+An owner's Ctrl+Alt+Del request is sent with `SendSAS` from the Session 0
+service, which Windows allows only when the machine policy
+`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\SoftwareSASGeneration`
+is `1` (services) or `3` (services and Ease of Access). If the value does not
+exist, the first SAS request **creates it as `1`** (services only) and logs
+`SAS: created absent SoftwareSASGeneration=1 (services only)` to `service.log`.
+The value stays after the session ends and after `--uninstall-service`. An
+existing value is never changed: `0` or `2` makes SAS requests fail instead.
+If you manage this policy with Group Policy ("Disable or enable software Secure
+Attention Sequence"), set it explicitly; to undo the host's write, delete the
+value:
+
+```powershell
+Reg Delete HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v SoftwareSASGeneration /f
+```
+
 ## Troubleshooting
 
 An SCM-hosted process has no console, so diagnostics go to

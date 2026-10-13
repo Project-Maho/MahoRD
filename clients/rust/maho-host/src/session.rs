@@ -276,6 +276,10 @@ impl PairingStore {
                 permissions.map(|p| [p.keyboard, p.mouse, p.gamepad, p.clipboard, p.audio]),
             ),
         );
+        self.write_grants_unlocked(&records)
+    }
+
+    fn write_grants_unlocked(&self, records: &HostGrants) -> Result<(), SessionError> {
         let path = self.path.with_extension("grants.json");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -288,7 +292,7 @@ impl PairingStore {
         use std::io::Write;
         let mut file = options.open(&temporary)?;
         file.write_all(
-            &serde_json::to_vec(&records).map_err(|e| SessionError::Store(e.to_string()))?,
+            &serde_json::to_vec(records).map_err(|e| SessionError::Store(e.to_string()))?,
         )?;
         file.sync_all()?;
         fs::rename(temporary, path)?;
@@ -350,11 +354,17 @@ impl PairingStore {
         let mut records = self.load_all_unlocked()?;
         let original_len = records.len();
         records.retain(|record| record.id != id);
-        if records.len() == original_len {
-            return Ok(false);
+        let removed = records.len() != original_len;
+        if removed {
+            self.write_unlocked(&records)?;
         }
-        self.write_unlocked(&records)?;
-        Ok(true)
+        // Drop the authorization alongside the key so no stale grant outlives
+        // the pairing (and a leftover grant without a key is cleaned up too).
+        let mut grants = self.read_grants()?;
+        if grants.remove(id).is_some() {
+            self.write_grants_unlocked(&grants)?;
+        }
+        Ok(removed)
     }
 
     fn load_all_unlocked(&self) -> Result<Vec<PairingRecord>, SessionError> {
@@ -3645,6 +3655,10 @@ impl HostServer {
             // If authenticated and media_receiver is set, we run UDP sending in a dedicated thread to avoid TCP blocking it.
             loop {
                 watch.tick(Instant::now());
+                // Type coalesced non-ASCII text once the client paused; the
+                // 5 ms read timeout below bounds the extra latency.
+                #[cfg(target_os = "linux")]
+                input.flush_idle_text(Instant::now());
                 if watch.is_aborted() {
                     warn!(peer = %tcp_peer, "session watchdog aborted a stalled session");
                     break;
@@ -7160,6 +7174,38 @@ mod tests {
             reloaded.authorization("guest").unwrap(),
             (trust, Some(permissions))
         );
+    }
+
+    #[test]
+    fn revoke_removes_pairing_grant() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("keys.json"));
+        store
+            .save(PairingRecord {
+                id: "guest".into(),
+                name: "guest".into(),
+                key: [7; 32],
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let trust = PairingTrust::GuestExpiring {
+            expires_at_unix_ms: u64::MAX,
+        };
+        store.set_authorization("guest", trust, None).unwrap();
+        store
+            .set_authorization("other", PairingTrust::Owner, None)
+            .unwrap();
+        assert_eq!(store.authorization("guest").unwrap(), (trust, None));
+
+        assert!(store.revoke("guest").unwrap());
+        let grants = store.read_grants().unwrap();
+        assert!(!grants.contains_key("guest"));
+        assert!(grants.contains_key("other"));
+        assert!(store.load("guest").unwrap().is_none());
+
+        // A grant without a key record is still cleaned up.
+        assert!(!store.revoke("other").unwrap());
+        assert!(store.read_grants().unwrap().is_empty());
     }
 
     #[test]

@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { SessionCanvas } from "./SessionCanvas";
 import { SessionSettingsPanel } from "./SessionSettingsPanel";
-import { sustainedQuality, type QualitySample } from "./quality";
+import { nextQualitySamples, sustainedQuality, type QualitySample } from "./quality";
 
 import { useRemoteInput } from "./useRemoteInput";
 import { savedScrollSensitivity, SCROLL_STORAGE_KEY, toolbarPinned, type PresentationMode, type CursorMode } from "./presentation";
@@ -102,8 +102,12 @@ export function SessionView({
 
   // Overlay state ported model from @/lib/overlay
   useEffect(() => {
-    if (snapshot.statsStatus === "ready" && snapshot.stats) setQualitySamples(old => [...old.slice(-4), { rtt_smoothed_ms: snapshot.stats?.rtt_smoothed_ms, packet_loss_ratio: snapshot.stats?.packet_loss_ratio }]);
+    if (snapshot.statsStatus === "ready" && snapshot.stats) setQualitySamples(old => nextQualitySamples(old, snapshot.phase, { rtt_smoothed_ms: snapshot.stats?.rtt_smoothed_ms, packet_loss_ratio: snapshot.stats?.packet_loss_ratio }));
   }, [snapshot.stats]);
+  // Leaving `streaming` drops the window so post-reconnect quality starts fresh.
+  useEffect(() => {
+    setQualitySamples(old => nextQualitySamples(old, snapshot.phase, null));
+  }, [snapshot.phase]);
   const quality = sustainedQuality(qualitySamples, snapshot.phase);
   const info = snapshot.stats?.session_info;
   const overlayStateRef = useRef(createOverlayState());

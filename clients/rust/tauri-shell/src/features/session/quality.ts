@@ -8,3 +8,8 @@ export function sustainedQuality(samples: readonly QualitySample[], phase = "str
   const degraded = recent.filter(s => (s.rtt_smoothed_ms ?? 0) >= 60 || (s.packet_loss_ratio ?? 0) >= 0.01).length;
   return poor >= 3 ? "poor" : degraded >= 3 ? "degraded" : "good";
 }
+/** Sample window after a snapshot: empty whenever not streaming, so a reconnect starts fresh. */
+export function nextQualitySamples(samples: QualitySample[], phase: string, sample: QualitySample | null): QualitySample[] {
+  if (phase !== "streaming") return samples.length ? [] : samples;
+  return sample ? [...samples.slice(-4), sample] : samples;
+}

@@ -4766,6 +4766,7 @@ dependencies = [
 name = "tauri-shell"
 version = "0.1.0"
 dependencies = [
+ "if-addrs",
  "image",
  "maho-app",
  "maho-decode",
