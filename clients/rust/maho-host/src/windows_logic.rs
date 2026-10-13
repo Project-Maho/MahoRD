@@ -169,6 +169,14 @@ pub fn macos_keycode_to_vk(key_code: u16) -> Option<u16> {
         .find_map(|&(macos, windows)| (macos == key_code).then_some(windows))
 }
 
+pub fn vk_is_extended(vk: u16) -> bool {
+    matches!(vk, 0x21..=0x28 | 0x2D | 0x2E | 0x5B | 0x5C | 0x6F | 0x90 | 0xA3 | 0xA5 | 0xA6..=0xB3)
+}
+
+pub fn macos_keycode_to_windows_key(key_code: u16) -> Option<(u16, bool)> {
+    macos_keycode_to_vk(key_code).map(|vk| (vk, key_code == 76 || vk_is_extended(vk)))
+}
+
 /// Maps v3 modifier bits to the left-side Win32 VKs used by the injector.
 pub fn modifier_vks(modifiers: Modifiers) -> Vec<u16> {
     [
@@ -350,14 +358,20 @@ const KEY_MAP: &[(u16, u16)] = &[
     (60, 0xA1),
     (61, 0xA5),
     (62, 0xA3),
+    (64, 0x80),
     (65, 0x6E),
     (67, 0x6A),
     (69, 0x6B),
     (71, 0x90),
+    (72, 0xAF),
+    (73, 0xAE),
+    (74, 0xAD),
     (75, 0x6F),
     (76, 0x0D),
     (78, 0x6D),
-    (81, 0xBB),
+    (79, 0x81),
+    (80, 0x82),
+    (81, 0x92),
     (82, 0x60),
     (83, 0x61),
     (84, 0x62),
@@ -366,6 +380,7 @@ const KEY_MAP: &[(u16, u16)] = &[
     (87, 0x65),
     (88, 0x66),
     (89, 0x67),
+    (90, 0x83),
     (91, 0x68),
     (92, 0x69),
     (96, 0x74),
@@ -395,6 +410,58 @@ const KEY_MAP: &[(u16, u16)] = &[
     (125, 0x28),
     (126, 0x26),
 ];
+
+#[cfg(test)]
+mod input_identity_tests {
+    use super::*;
+
+    #[test]
+    fn keypad_enter_preserves_extended_identity() {
+        assert_eq!(macos_keycode_to_windows_key(36), Some((0x0D, false)));
+        assert_eq!(macos_keycode_to_windows_key(76), Some((0x0D, true)));
+        assert_eq!(macos_keycode_to_windows_key(75), Some((0x6F, true)));
+        assert_eq!(macos_keycode_to_windows_key(81), Some((0x92, false)));
+        assert_eq!(macos_keycode_to_windows_key(24), Some((0xBB, false)));
+    }
+
+    #[test]
+    fn keypad_digits_do_not_collapse_into_main_row() {
+        for (wire, vk) in [
+            (82, 0x60),
+            (83, 0x61),
+            (84, 0x62),
+            (85, 0x63),
+            (86, 0x64),
+            (87, 0x65),
+            (88, 0x66),
+            (89, 0x67),
+            (91, 0x68),
+            (92, 0x69),
+        ] {
+            assert_eq!(macos_keycode_to_windows_key(wire), Some((vk, false)));
+        }
+        assert_eq!(macos_keycode_to_windows_key(18), Some((0x31, false)));
+    }
+
+    #[test]
+    fn maps_volume_and_f13_through_f20() {
+        for (wire, vk) in [
+            (72, 0xAF),
+            (73, 0xAE),
+            (74, 0xAD),
+            (105, 0x7C),
+            (107, 0x7D),
+            (113, 0x7E),
+            (106, 0x7F),
+            (64, 0x80),
+            (79, 0x81),
+            (80, 0x82),
+            (90, 0x83),
+        ] {
+            assert_eq!(macos_keycode_to_vk(wire), Some(vk));
+        }
+    }
+}
 
 /// Raw descriptor information extracted from DXGI output enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

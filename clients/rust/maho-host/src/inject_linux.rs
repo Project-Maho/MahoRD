@@ -17,7 +17,13 @@
 //! `sudo usermod -aG uinput $USER`, load `uinput`, reload udev rules, and log
 //! out/in. The process must never run setuid or as root merely for injection.
 
-use std::{collections::HashSet, io};
+use std::{
+    collections::HashSet,
+    io,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 use evdev::{
     uinput::VirtualDevice, AbsInfo, AbsoluteAxisCode, AbsoluteAxisEvent, AttributeSet, EventType,
@@ -156,6 +162,9 @@ pub fn macos_keycode_to_evdev(key_code: u16) -> Option<KeyCode> {
         67 => KeyCode::KEY_KPASTERISK,
         69 => KeyCode::KEY_KPPLUS,
         71 => KeyCode::KEY_NUMLOCK,
+        72 => KeyCode::KEY_VOLUMEUP,
+        73 => KeyCode::KEY_VOLUMEDOWN,
+        74 => KeyCode::KEY_MUTE,
         75 => KeyCode::KEY_KPSLASH,
         76 => KeyCode::KEY_KPENTER,
         78 => KeyCode::KEY_KPMINUS,
@@ -170,6 +179,7 @@ pub fn macos_keycode_to_evdev(key_code: u16) -> Option<KeyCode> {
         87 => KeyCode::KEY_KP5,
         88 => KeyCode::KEY_KP6,
         89 => KeyCode::KEY_KP7,
+        90 => KeyCode::KEY_F20,
         91 => KeyCode::KEY_KP8,
         92 => KeyCode::KEY_KP9,
         96 => KeyCode::KEY_F5,
@@ -342,6 +352,10 @@ pub struct LinuxInputInjector {
     geometry: OutputGeometry,
     modifiers: Modifiers,
     held_keys: HashSet<KeyCode>,
+    pending_surrogate: Option<u16>,
+    unicode_backend_warned: bool,
+    vertical_wheel: WheelAccumulator,
+    horizontal_wheel: WheelAccumulator,
 }
 
 impl LinuxInputInjector {
@@ -414,6 +428,10 @@ impl LinuxInputInjector {
             geometry,
             modifiers: Modifiers::empty(),
             held_keys: HashSet::new(),
+            pending_surrogate: None,
+            unicode_backend_warned: false,
+            vertical_wheel: WheelAccumulator::default(),
+            horizontal_wheel: WheelAccumulator::default(),
         })
     }
 
@@ -521,33 +539,41 @@ impl LinuxInputInjector {
                     kb_events.push(InputEvent::new(EventType::KEY.0, key.code(), 0));
                 }
                 self.modifiers = Modifiers::empty();
+                self.pending_surrogate = None;
+                self.vertical_wheel = WheelAccumulator::default();
+                self.horizontal_wheel = WheelAccumulator::default();
                 if !kb_events.is_empty() {
                     let _ = self.keyboard.emit(&kb_events);
                 }
                 Ok(())
             }
             InputEventType::ScrollWheel => {
-                let vertical = scroll_units(event.scroll_dy);
-                let horizontal = scroll_units(event.scroll_dx);
+                let (vertical, vertical_notches) = self.vertical_wheel.convert(-event.scroll_dy);
+                let (horizontal, horizontal_notches) =
+                    self.horizontal_wheel.convert(event.scroll_dx);
                 let mut events = Vec::with_capacity(4);
-                if vertical != 0 {
+                if vertical_notches != 0 {
                     events.push(InputEvent::new(
                         EventType::RELATIVE.0,
                         RelativeAxisCode::REL_WHEEL.0,
-                        vertical.signum(),
+                        vertical_notches,
                     ));
+                }
+                if vertical != 0 {
                     events.push(InputEvent::new(
                         EventType::RELATIVE.0,
                         RelativeAxisCode::REL_WHEEL_HI_RES.0,
                         vertical,
                     ));
                 }
-                if horizontal != 0 {
+                if horizontal_notches != 0 {
                     events.push(InputEvent::new(
                         EventType::RELATIVE.0,
                         RelativeAxisCode::REL_HWHEEL.0,
-                        horizontal.signum(),
+                        horizontal_notches,
                     ));
+                }
+                if horizontal != 0 {
                     events.push(InputEvent::new(
                         EventType::RELATIVE.0,
                         RelativeAxisCode::REL_HWHEEL_HI_RES.0,
@@ -608,34 +634,43 @@ impl LinuxInputInjector {
                 }
             }
             InputEventType::UnicodeChar => {
-                if let Some(ch) = char::from_u32(u32::from(event.key_code)) {
-                    if let Some((key, needs_shift)) = ascii_to_evdev(ch) {
-                        // One SYN_REPORT per transition: events inside a single
-                        // sync report are simultaneous state changes, so batching
-                        // the down and the up together drops the keypress.
-                        if needs_shift {
+                if let Some(ch) = decode_utf16_unit(&mut self.pending_surrogate, event.key_code)? {
+                    match text_input_route(ch) {
+                        TextInputRoute::Evdev(key, needs_shift) => {
+                            // Separate SYN reports preserve each key transition.
+                            if needs_shift {
+                                self.keyboard.emit(&[InputEvent::new(
+                                    EventType::KEY.0,
+                                    KeyCode::KEY_LEFTSHIFT.code(),
+                                    1,
+                                )])?;
+                            }
                             self.keyboard.emit(&[InputEvent::new(
                                 EventType::KEY.0,
-                                KeyCode::KEY_LEFTSHIFT.code(),
+                                key.code(),
                                 1,
                             )])?;
-                        }
-                        self.keyboard
-                            .emit(&[InputEvent::new(EventType::KEY.0, key.code(), 1)])?;
-                        self.keyboard
-                            .emit(&[InputEvent::new(EventType::KEY.0, key.code(), 0)])?;
-                        if needs_shift {
                             self.keyboard.emit(&[InputEvent::new(
                                 EventType::KEY.0,
-                                KeyCode::KEY_LEFTSHIFT.code(),
+                                key.code(),
                                 0,
                             )])?;
+                            if needs_shift {
+                                self.keyboard.emit(&[InputEvent::new(
+                                    EventType::KEY.0,
+                                    KeyCode::KEY_LEFTSHIFT.code(),
+                                    0,
+                                )])?;
+                            }
                         }
-                    } else {
-                        tracing::debug!(
-                            code_unit = event.key_code,
-                            "Linux uinput skipping non-ASCII Unicode char"
-                        );
+                        TextInputRoute::Unicode => {
+                            if let Err(error) = inject_wayland_unicode(ch) {
+                                if !self.unicode_backend_warned {
+                                    tracing::warn!(%error, "Wayland Unicode backend unavailable; dropping character");
+                                    self.unicode_backend_warned = true;
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -644,16 +679,101 @@ impl LinuxInputInjector {
     }
 }
 
-fn scroll_units(delta: f32) -> i32 {
-    if delta == 0.0 {
-        0
-    } else {
-        let rounded = delta.round() as i32;
-        if rounded == 0 {
-            delta.signum() as i32
-        } else {
-            rounded
+#[derive(Debug, PartialEq, Eq)]
+enum TextInputRoute {
+    Evdev(KeyCode, bool),
+    Unicode,
+}
+
+fn text_input_route(ch: char) -> TextInputRoute {
+    match ascii_to_evdev(ch) {
+        Some((key, shift)) => TextInputRoute::Evdev(key, shift),
+        None => TextInputRoute::Unicode,
+    }
+}
+
+fn inject_wayland_unicode(ch: char) -> io::Result<()> {
+    // Bound each non-ASCII insertion to 100 ms: the event API supplies only
+    // one UTF-16 unit at a time, so it cannot batch text without delaying input.
+    // Kill and reap on timeout; ASCII never starts a subprocess.
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut command = Command::new("wtype");
+    command
+        .env("LC_ALL", "C.UTF-8")
+        .args(["--", ch.encode_utf8(&mut [0; 4])])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for name in ["WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
         }
+    }
+    let mut child = command.spawn()?;
+    let result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(format!("wtype failed: {status}")))
+                };
+            }
+            Ok(None) => {}
+            Err(error) => break Err(error),
+        }
+        if Instant::now() >= deadline {
+            break Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "wtype exceeded 100 ms",
+            ));
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    child.kill()?;
+    child.wait()?;
+    result
+}
+
+/// Decode the wire's UTF-16 units without losing supplementary characters.
+fn decode_utf16_unit(pending: &mut Option<u16>, unit: u16) -> io::Result<Option<char>> {
+    if (0xD800..=0xDBFF).contains(&unit) {
+        *pending = Some(unit);
+        return Ok(None);
+    }
+    let scalar = if (0xDC00..=0xDFFF).contains(&unit) {
+        let high = pending.take().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "unpaired UTF-16 low surrogate")
+        })?;
+        0x10000 + ((u32::from(high) - 0xD800) << 10) + u32::from(unit) - 0xDC00
+    } else {
+        *pending = None;
+        u32::from(unit)
+    };
+    char::from_u32(scalar)
+        .map(Some)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid Unicode scalar"))
+}
+
+/// Accumulates browser pixels into integer high-resolution units and notches.
+#[derive(Default)]
+struct WheelAccumulator {
+    fractional_units: f64,
+    notch_units: i32,
+}
+
+impl WheelAccumulator {
+    fn convert(&mut self, pixels: f32) -> (i32, i32) {
+        if !pixels.is_finite() {
+            return (0, 0);
+        }
+        let units = (f64::from(pixels) * 1.2 + self.fractional_units).clamp(-32767.0, 32767.0);
+        let high_res = units.trunc() as i32;
+        self.fractional_units = units - f64::from(high_res);
+        self.notch_units += high_res;
+        let notches = self.notch_units / 120;
+        self.notch_units %= 120;
+        (high_res, notches)
     }
 }
 
@@ -753,32 +873,72 @@ mod tests {
     }
 
     #[test]
-    fn safely_ignores_unicode_char_events() {
-        let geometry = OutputGeometry::single_output(1920, 1080);
-        let mut injector = LinuxInputInjector::new(geometry).expect("create injector");
-        let event = WireInputEvent {
-            event_type: maho_proto::InputEventType::UnicodeChar,
-            x: 0.5,
-            y: 0.5,
-            key_code: 0x0041, // UTF-16 code unit for 'A'
-            modifiers: Modifiers::empty(),
-            scroll_dx: 0.0,
-            scroll_dy: 0.0,
-        };
-        // Should inject successfully for ASCII
-        assert!(injector.inject(&event).is_ok());
+    fn decodes_unicode_bmp_and_supplementary_text() {
+        let mut pending = None;
+        assert_eq!(decode_utf16_unit(&mut pending, 0x00E9).unwrap(), Some('é'));
+        assert_eq!(decode_utf16_unit(&mut pending, 0xD55C).unwrap(), Some('한'));
+        assert_eq!(decode_utf16_unit(&mut pending, 0xD83D).unwrap(), None);
+        assert_eq!(decode_utf16_unit(&mut pending, 0xDE80).unwrap(), Some('🚀'));
+        assert!(decode_utf16_unit(&mut pending, 0xDE80).is_err());
+    }
 
-        // Non-ASCII should also safely succeed without error
-        let non_ascii_event = WireInputEvent {
-            event_type: maho_proto::InputEventType::UnicodeChar,
-            x: 0.5,
-            y: 0.5,
-            key_code: 0xd55c, // '한'
-            modifiers: Modifiers::empty(),
-            scroll_dx: 0.0,
-            scroll_dy: 0.0,
-        };
-        assert!(injector.inject(&non_ascii_event).is_ok());
+    #[test]
+    fn ascii_text_routes_directly_to_evdev() {
+        assert_eq!(
+            text_input_route('a'),
+            TextInputRoute::Evdev(KeyCode::KEY_A, false)
+        );
+        assert_eq!(
+            text_input_route('A'),
+            TextInputRoute::Evdev(KeyCode::KEY_A, true)
+        );
+        assert_eq!(
+            text_input_route('!'),
+            TextInputRoute::Evdev(KeyCode::KEY_1, true)
+        );
+        assert_eq!(
+            text_input_route('\n'),
+            TextInputRoute::Evdev(KeyCode::KEY_ENTER, false)
+        );
+    }
+
+    #[test]
+    fn unmapped_text_routes_to_unicode_backend() {
+        for ch in ['é', '한', '🚀'] {
+            assert_eq!(text_input_route(ch), TextInputRoute::Unicode);
+        }
+    }
+
+    #[test]
+    fn wheel_pixels_have_correct_sign_and_magnitude() {
+        let mut vertical = WheelAccumulator::default();
+        let mut horizontal = WheelAccumulator::default();
+        assert_eq!(vertical.convert(-100.0), (-120, -1));
+        assert_eq!(horizontal.convert(100.0), (120, 1));
+        assert_eq!(vertical.convert(200.0), (240, 2));
+    }
+
+    #[test]
+    fn wheel_accumulates_subpixel_and_subnotch_remainders() {
+        let mut wheel = WheelAccumulator::default();
+        assert_eq!(wheel.convert(0.5), (0, 0));
+        assert_eq!(wheel.convert(0.5), (1, 0));
+        assert_eq!(wheel.convert(49.0), (59, 0));
+        assert_eq!(wheel.convert(50.0), (60, 1));
+        assert_eq!(wheel.convert(-50.0), (-60, 0));
+        assert_eq!(wheel.convert(50.0), (60, 0));
+    }
+
+    #[test]
+    fn maps_volume_and_extended_function_keys() {
+        for (code, key) in [
+            (72, KeyCode::KEY_VOLUMEUP),
+            (73, KeyCode::KEY_VOLUMEDOWN),
+            (74, KeyCode::KEY_MUTE),
+            (90, KeyCode::KEY_F20),
+        ] {
+            assert_eq!(macos_keycode_to_evdev(code), Some(key));
+        }
     }
 
     #[test]

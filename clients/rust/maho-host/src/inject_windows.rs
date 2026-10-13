@@ -40,6 +40,7 @@ pub use crate::windows_logic::{
     macos_keycode_to_vk, normalize_absolute_pointer, vk_to_macos_keycode, wheel_data_from_scroll,
     TargetDisplay, VirtualDesktop,
 };
+use crate::windows_logic::{macos_keycode_to_windows_key, vk_is_extended};
 
 pub struct WindowsInputInjector {
     target: TargetDisplay,
@@ -47,7 +48,7 @@ pub struct WindowsInputInjector {
     modifiers: Modifiers,
     // Ordinary keys and mouse buttons the peer is currently holding, so a
     // dropped session can release them instead of leaving them stuck.
-    active_keys: HashSet<u16>,
+    active_keys: HashSet<(u16, bool)>,
     active_buttons: HashSet<u8>,
     // `HKEY_USERS` path of the interactive user's mouse settings; the worker
     // runs as SYSTEM, so its own HKCU does not hold the user's preferences.
@@ -160,10 +161,13 @@ impl WindowsInputInjector {
                     0,
                     MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTUP | MOUSEEVENTF_MIDDLEUP,
                 ));
-                let mut released: HashSet<u16> = self.active_keys.drain().collect();
-                released.extend([VK_LSHIFT, VK_LCONTROL, VK_LMENU, VK_LWIN].map(|vk| vk.0));
-                for vk in released {
-                    inputs.push(key_input(vk, true));
+                let mut released: HashSet<(u16, bool)> = self.active_keys.drain().collect();
+                released.extend(
+                    [VK_LSHIFT, VK_LCONTROL, VK_LMENU, VK_LWIN]
+                        .map(|vk| (vk.0, vk_is_extended(vk.0))),
+                );
+                for (vk, extended) in released {
+                    inputs.push(key_input_with_extended(vk, extended, true));
                 }
                 self.active_buttons.clear();
                 self.modifiers = Modifiers::empty();
@@ -188,7 +192,7 @@ impl WindowsInputInjector {
             InputEventType::KeyDown | InputEventType::KeyUp => {
                 let is_up = event.event_type == InputEventType::KeyUp;
                 let mut inputs = Vec::with_capacity(6);
-                if let Some(vk) = macos_keycode_to_vk(event.key_code) {
+                if let Some((vk, extended)) = macos_keycode_to_windows_key(event.key_code) {
                     // Right-side modifiers and CapsLock are modifier keys too:
                     // treating them as ordinary keys re-synthesizes the modifier
                     // state around them, duplicating presses and breaking AltGr.
@@ -209,11 +213,11 @@ impl WindowsInputInjector {
                         self.modifiers = event.modifiers;
                     }
                     if is_up {
-                        self.active_keys.remove(&vk);
+                        self.active_keys.remove(&(vk, extended));
                     } else {
-                        self.active_keys.insert(vk);
+                        self.active_keys.insert((vk, extended));
                     }
-                    inputs.push(key_input(vk, is_up));
+                    inputs.push(key_input_with_extended(vk, extended, is_up));
                 }
                 send_inputs(&inputs)
             }
@@ -239,8 +243,8 @@ impl Drop for WindowsInputInjector {
         // A session can end without a peer Reset, so release everything the
         // remote user was holding: modifiers, ordinary keys, and buttons.
         let mut inputs = modifier_inputs(self.modifiers, Modifiers::empty());
-        for vk in self.active_keys.drain() {
-            inputs.push(key_input(vk, true));
+        for (vk, extended) in self.active_keys.drain() {
+            inputs.push(key_input_with_extended(vk, extended, true));
         }
         let mut button_flags = MOUSE_EVENT_FLAGS(0);
         for button in self.active_buttons.drain() {
@@ -364,19 +368,16 @@ fn modifier_inputs(previous: Modifiers, current: Modifiers) -> Vec<INPUT> {
     .collect()
 }
 
-fn is_extended_key(vk: u16) -> bool {
-    matches!(
-        vk,
-        0x21..=0x28 | 0x2D | 0x2E | 0x5B | 0x5C | 0x6F | 0xA3 | 0xA5
-    )
+fn key_input(vk: u16, key_up: bool) -> INPUT {
+    key_input_with_extended(vk, vk_is_extended(vk), key_up)
 }
 
-fn key_input(vk: u16, key_up: bool) -> INPUT {
+fn key_input_with_extended(vk: u16, extended: bool, key_up: bool) -> INPUT {
     let mut flags = KEYBD_EVENT_FLAGS(0);
     if key_up {
         flags |= KEYEVENTF_KEYUP;
     }
-    if is_extended_key(vk) {
+    if extended {
         flags |= KEYEVENTF_EXTENDEDKEY;
     }
     INPUT {
